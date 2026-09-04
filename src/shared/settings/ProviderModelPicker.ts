@@ -1,5 +1,7 @@
 import { Setting } from 'obsidian';
 
+import { scheduleAnimationFrame } from '@/utils/animationFrame';
+
 const ALL_PROVIDERS_KEY = 'all';
 const VISIBLE_MODELS_DESCRIPTION = 'Choose which models are available in the chat selector. Drag to reorder them; the provider uses the first currently usable model as its default. Select at least one model to use this provider.';
 
@@ -78,7 +80,12 @@ export function renderProviderModelPicker(
   let providerFilter = ALL_PROVIDERS_KEY;
   let loadingCatalog = false;
   let catalogLoadFailed = false;
+  let catalogLoadAttempted = false;
   let draggedModelId: string | null = null;
+
+  const statusEl = pickerEl.createDiv({ cls: 'claudian-provider-model-picker-status' });
+  statusEl.setAttribute('role', 'status');
+  statusEl.setAttribute('aria-live', 'polite');
 
   const summaryEl = pickerEl.createDiv({ cls: 'claudian-provider-model-picker-summary' });
   const selectedEl = pickerEl.createDiv({ cls: 'claudian-provider-model-picker-selected' });
@@ -114,6 +121,7 @@ export function renderProviderModelPicker(
   const providerSelectEl = controlsEl.createEl('select', {
     cls: 'claudian-provider-model-picker-provider',
   });
+  providerSelectEl.setAttribute('aria-label', 'Filter by provider');
   providerSelectEl.addEventListener('change', () => {
     providerFilter = providerSelectEl.value;
     renderList();
@@ -429,7 +437,7 @@ export function renderProviderModelPicker(
     const models = state.models.filter(matchesFilter);
 
     if (models.length === 0) {
-      const emptyEl = listEl.createDiv({
+      listEl.createDiv({
         cls: 'claudian-provider-model-picker-empty',
         text: loadingCatalog
           ? options.loadingCatalogText
@@ -439,10 +447,6 @@ export function renderProviderModelPicker(
           ? options.emptyCatalogText
           : 'No models match your filter.',
       });
-      if (loadingCatalog) {
-        emptyEl.setAttribute('role', 'status');
-        emptyEl.setAttribute('aria-live', 'polite');
-      }
       return;
     }
 
@@ -503,8 +507,23 @@ export function renderProviderModelPicker(
     }
   };
 
+  const renderStatus = (): void => {
+    const state = options.getState();
+    const message = loadingCatalog
+      ? options.loadingCatalogText
+      : catalogLoadFailed
+      ? options.failedCatalogText
+      : catalogLoadAttempted && state.models.length === 0
+      ? options.emptyCatalogText
+      : '';
+    if (statusEl.textContent !== message) {
+      statusEl.setText(message);
+    }
+  };
+
   const renderAll = (): void => {
-    pickerEl.setAttribute('aria-busy', String(loadingCatalog));
+    catalogEl.setAttribute('aria-busy', String(loadingCatalog));
+    renderStatus();
     renderSummary();
     renderSelected();
     renderProviderSelect();
@@ -526,13 +545,14 @@ export function renderProviderModelPicker(
     loadingCatalog = true;
     catalogLoadFailed = false;
     renderAll();
-    await waitForNextPaint(pickerEl);
     try {
+      await waitForNextPaint(pickerEl);
       catalogLoadFailed = await options.loadCatalog(force) === 'failed';
     } catch {
       catalogLoadFailed = true;
     } finally {
       loadingCatalog = false;
+      catalogLoadAttempted = true;
       renderAll();
     }
   };
@@ -550,8 +570,7 @@ export function renderProviderModelPicker(
 }
 
 function waitForNextPaint(element: HTMLElement): Promise<void> {
-  const view = element.ownerDocument.defaultView ?? window;
   return new Promise(resolve => {
-    view.requestAnimationFrame(() => resolve());
+    scheduleAnimationFrame(() => resolve(), element.ownerDocument.defaultView);
   });
 }

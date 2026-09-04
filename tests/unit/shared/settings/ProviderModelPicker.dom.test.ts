@@ -1,4 +1,6 @@
-/** @jest-environment jsdom */
+/**
+ * @jest-environment jsdom
+ */
 
 jest.mock('obsidian', () => ({
   Setting: class MockSetting {
@@ -18,31 +20,48 @@ jest.mock('obsidian', () => ({
   },
 }));
 
-import { getByRole } from '@testing-library/dom';
+import { within } from '@testing-library/dom';
+import { configureAxe } from 'jest-axe';
 
 import {
   type ProviderModelPickerOptions,
+  type ProviderModelPickerState,
   renderProviderModelPicker,
 } from '@/shared/settings/ProviderModelPicker';
 
 const LOADING_TEXT = 'Loading model catalog...';
 const EMPTY_TEXT = 'No models discovered.';
+const FAILED_TEXT = 'Could not load the model catalog.';
+
+const checkAccessibility = configureAxe({ rules: { region: { enabled: false } } });
+
+function emptyState(): ProviderModelPickerState {
+  return { aliases: {}, discoveredCount: 0, models: [], selectedIds: [] };
+}
+
+function populatedState(): ProviderModelPickerState {
+  return {
+    aliases: {},
+    discoveredCount: 2,
+    models: [
+      { id: 'model-one', name: 'Model One', providerKey: 'test', providerLabel: 'Test provider' },
+      { id: 'model-two', name: 'Model Two', providerKey: 'test', providerLabel: 'Test provider' },
+    ],
+    selectedIds: ['model-one'],
+  };
+}
 
 function buildOptions(
   container: HTMLElement,
   loadCatalog: ProviderModelPickerOptions['loadCatalog'],
+  getState: () => ProviderModelPickerState = emptyState,
 ): ProviderModelPickerOptions {
   return {
     container,
     emptyCatalogText: EMPTY_TEXT,
-    failedCatalogText: 'Could not load the model catalog.',
-    getState: () => ({
-      aliases: {},
-      discoveredCount: 0,
-      models: [],
-      selectedIds: [],
-    }),
-    initiallyOpen: false,
+    failedCatalogText: FAILED_TEXT,
+    getState,
+    initiallyOpen: true,
     loadCatalog,
     loadingCatalogText: LOADING_TEXT,
     modifier: 'test',
@@ -55,122 +74,215 @@ function buildOptions(
 function getPickerEl(container: HTMLElement): HTMLElement {
   const pickerEl = container.querySelector<HTMLElement>('.claudian-provider-model-picker');
   if (!pickerEl) {
-    throw new Error('Picker element was not rendered');
+    throw new Error('picker root not found');
   }
   return pickerEl;
 }
 
-async function settle(): Promise<void> {
-  await new Promise<void>(resolve => {
-    setTimeout(resolve, 0);
-  });
+function getCatalogEl(container: HTMLElement): HTMLElement {
+  const catalogEl = container.querySelector<HTMLElement>('.claudian-provider-model-picker-catalog');
+  if (!catalogEl) {
+    throw new Error('picker catalog not found');
+  }
+  return catalogEl;
 }
 
-beforeAll(() => {
-  Object.defineProperties(HTMLElement.prototype, {
-    addClass: {
-      configurable: true,
-      value(this: HTMLElement, ...classes: string[]): void {
-        this.classList.add(...classes);
-      },
-    },
-    empty: {
-      configurable: true,
-      value(this: HTMLElement): void {
-        this.replaceChildren();
-      },
-    },
-    toggleClass: {
-      configurable: true,
-      value(this: HTMLElement, className: string, force: boolean): void {
-        this.classList.toggle(className, force);
-      },
-    },
+function getStatusEl(container: HTMLElement): HTMLElement {
+  return within(container).getByRole('status');
+}
+
+async function settle(): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, 0));
+}
+
+function captureHostFrames(): FrameRequestCallback[] {
+  const frames: FrameRequestCallback[] = [];
+  jest.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+    frames.push(callback);
+    return frames.length;
   });
-});
+  return frames;
+}
 
-afterEach(() => {
-  jest.restoreAllMocks();
-  document.body.replaceChildren();
-});
+/** Drains queued microtasks and animation frames until the picker settles. */
+async function flush(frames: FrameRequestCallback[]): Promise<void> {
+  await settle();
+  for (let guard = 0; guard < 10 && frames.length > 0; guard += 1) {
+    const frame = frames.shift();
+    frame?.(0);
+    await settle();
+  }
+}
 
-// The catalog starts collapsed so that opening it does not schedule its own discovery pass;
-// role queries therefore opt into the collapsed subtree with `hidden`.
-describe('provider model picker catalog discovery', () => {
-  it('announces the loading state before discovery starts and clears it afterwards', async () => {
-    const frames: FrameRequestCallback[] = [];
-    jest.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
-      frames.push(callback);
-      return frames.length;
-    });
+describe('renderProviderModelPicker discovery status', () => {
+  beforeAll(() => {
+    if (!HTMLElement.prototype.addClass) {
+      HTMLElement.prototype.addClass = function addClass(this: HTMLElement, ...classes: string[]) {
+        this.classList.add(...classes);
+      };
+    }
+    if (!HTMLElement.prototype.empty) {
+      HTMLElement.prototype.empty = function empty(this: HTMLElement) {
+        this.replaceChildren();
+      };
+    }
+    if (!HTMLElement.prototype.toggleClass) {
+      HTMLElement.prototype.toggleClass = function toggleClass(
+        this: HTMLElement,
+        classes: string | string[],
+        value: boolean,
+      ) {
+        const list = Array.isArray(classes) ? classes : [classes];
+        for (const cls of list) {
+          this.classList.toggle(cls, value);
+        }
+      };
+    }
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    document.body.replaceChildren();
+  });
+
+  it('exposes a persistent polite status region that starts empty', async () => {
+    const frames = captureHostFrames();
+    const loadCatalog = jest.fn(async (): Promise<'failed'> => 'failed');
+    const container = document.body.appendChild(document.createElement('div'));
+    const state = populatedState();
+
+    renderProviderModelPicker(buildOptions(container, loadCatalog, () => state));
+    await flush(frames);
+
+    const statusEl = getStatusEl(container);
+    expect(statusEl.getAttribute('aria-live')).toBe('polite');
+    expect(statusEl.textContent).toBe('');
+    expect(getCatalogEl(container).contains(statusEl)).toBe(false);
+  });
+
+  it('announces discovery start and the empty outcome', async () => {
+    const frames = captureHostFrames();
     const loadCatalog = jest.fn(async (): Promise<'empty'> => 'empty');
     const container = document.body.appendChild(document.createElement('div'));
 
     renderProviderModelPicker(buildOptions(container, loadCatalog));
 
-    const discoverButton = getByRole<HTMLButtonElement>(container, 'button', {
-      hidden: true,
-      name: 'Discover',
-    });
-    expect(discoverButton.type).toBe('button');
+    // The catalog renders open, so it performs its own first discovery pass.
+    await flush(frames);
 
+    const statusEl = getStatusEl(container);
+    expect(loadCatalog).toHaveBeenNthCalledWith(1, false);
+    expect(statusEl.textContent).toBe(EMPTY_TEXT);
+
+    const discoverButton = within(container).getByRole('button', { name: 'Discover' });
+    expect(discoverButton.getAttribute('type')).toBe('button');
     discoverButton.click();
 
-    expect(loadCatalog).not.toHaveBeenCalled();
-    expect(getByRole(container, 'button', { hidden: true, name: 'Loading...' }))
-      .toBe(discoverButton);
-    expect(discoverButton.disabled).toBe(true);
-    expect(getPickerEl(container).getAttribute('aria-busy')).toBe('true');
-
-    const statusEl = getByRole(container, 'status', { hidden: true });
     expect(statusEl.textContent).toBe(LOADING_TEXT);
-    expect(statusEl.getAttribute('aria-live')).toBe('polite');
-
-    const paintFrame = frames.shift();
-    if (!paintFrame) {
-      throw new Error('Discovery did not yield a frame before loading the catalog');
-    }
-    paintFrame(0);
-    await settle();
-
+    expect((discoverButton as HTMLButtonElement).disabled).toBe(true);
+    expect(within(container).getByRole('button', { name: 'Loading...' })).toBe(discoverButton);
+    expect(getCatalogEl(container).getAttribute('aria-busy')).toBe('true');
     expect(loadCatalog).toHaveBeenCalledTimes(1);
+
+    await flush(frames);
+
+    expect(loadCatalog).toHaveBeenNthCalledWith(2, true);
+    expect(getStatusEl(container)).toBe(statusEl);
+    expect(statusEl.textContent).toBe(EMPTY_TEXT);
+    expect(getCatalogEl(container).getAttribute('aria-busy')).toBe('false');
+    expect(within(container).getByRole('button', { name: 'Discover' })).toBe(discoverButton);
+  });
+
+  it('announces refresh start with existing models and reports the failure outcome', async () => {
+    const frames = captureHostFrames();
+    const loadCatalog = jest.fn(async (): Promise<'failed'> => 'failed');
+    const container = document.body.appendChild(document.createElement('div'));
+    const state = populatedState();
+
+    renderProviderModelPicker(buildOptions(container, loadCatalog, () => state));
+    await flush(frames);
+
+    const statusEl = getStatusEl(container);
+    expect(loadCatalog).not.toHaveBeenCalled();
+    expect(statusEl.textContent).toBe('');
+
+    within(container).getByRole('button', { name: 'Refresh' }).click();
+
+    expect(statusEl.textContent).toBe(LOADING_TEXT);
+    expect(getCatalogEl(container).getAttribute('aria-busy')).toBe('true');
+
+    await flush(frames);
+
     expect(loadCatalog).toHaveBeenCalledWith(true);
-    expect(getByRole(container, 'button', { hidden: true, name: 'Discover' }))
-      .toBe(discoverButton);
-    expect(discoverButton.disabled).toBe(false);
-    expect(getPickerEl(container).getAttribute('aria-busy')).toBe('false');
-    expect(container.textContent).toContain(EMPTY_TEXT);
+    expect(getStatusEl(container)).toBe(statusEl);
+    expect(statusEl.textContent).toBe(FAILED_TEXT);
+    expect(getCatalogEl(container).getAttribute('aria-busy')).toBe('false');
+  });
+
+  it('clears the status once discovery loads a catalog', async () => {
+    const frames = captureHostFrames();
+    const state = emptyState();
+    const loadCatalog = jest.fn(async (): Promise<'loaded'> => {
+      Object.assign(state, populatedState());
+      return 'loaded';
+    });
+    const container = document.body.appendChild(document.createElement('div'));
+
+    renderProviderModelPicker(buildOptions(container, loadCatalog, () => state));
+    await flush(frames);
+
+    expect(loadCatalog).toHaveBeenCalledWith(false);
+    expect(getStatusEl(container).textContent).toBe('');
+    expect(within(container).getByRole('button', { name: 'Refresh' })).toBeTruthy();
   });
 
   it('schedules the pre-discovery paint on the owner window of a popout document', async () => {
+    const hostFrame = jest.spyOn(window, 'requestAnimationFrame');
     const popoutDocument = document.implementation.createHTMLDocument('popout');
     const popoutFrames: FrameRequestCallback[] = [];
     Object.defineProperty(popoutDocument, 'defaultView', {
       configurable: true,
       get: () => ({
+        getComputedStyle: window.getComputedStyle.bind(window),
         requestAnimationFrame(callback: FrameRequestCallback): number {
           popoutFrames.push(callback);
           return popoutFrames.length;
         },
       }),
     });
-    const hostFrame = jest.spyOn(window, 'requestAnimationFrame');
+
     const loadCatalog = jest.fn(async (): Promise<'empty'> => 'empty');
     const container = popoutDocument.body.appendChild(popoutDocument.createElement('div'));
+    const state = populatedState();
 
-    renderProviderModelPicker(buildOptions(container, loadCatalog));
+    renderProviderModelPicker(buildOptions(container, loadCatalog, () => state));
+    await settle();
 
-    getPickerEl(container)
-      .querySelector<HTMLButtonElement>('.claudian-provider-model-picker-action')
-      ?.click();
+    within(container).getByRole('button', { name: 'Refresh' }).click();
 
     expect(hostFrame).not.toHaveBeenCalled();
     expect(popoutFrames).toHaveLength(1);
     expect(loadCatalog).not.toHaveBeenCalled();
+    expect(getStatusEl(container).textContent).toBe(LOADING_TEXT);
 
     popoutFrames[0](0);
     await settle();
 
+    expect(hostFrame).not.toHaveBeenCalled();
     expect(loadCatalog).toHaveBeenCalledTimes(1);
+    expect(loadCatalog).toHaveBeenCalledWith(true);
+    expect(getStatusEl(container).textContent).toBe('');
+  });
+
+  it('has no accessibility violations for a settled catalog', async () => {
+    const frames = captureHostFrames();
+    const loadCatalog = jest.fn(async (): Promise<'loaded'> => 'loaded');
+    const container = document.body.appendChild(document.createElement('div'));
+    const state = populatedState();
+
+    renderProviderModelPicker(buildOptions(container, loadCatalog, () => state));
+    await flush(frames);
+
+    expect(await checkAccessibility(getPickerEl(container))).toHaveNoViolations();
   });
 });
