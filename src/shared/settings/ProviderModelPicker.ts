@@ -507,15 +507,27 @@ export function renderProviderModelPicker(
     }
   };
 
+  const statusMessage = (state: ProviderModelPickerState): string => {
+    if (loadingCatalog) {
+      return options.loadingCatalogText;
+    }
+    if (catalogLoadFailed) {
+      return options.failedCatalogText;
+    }
+    if (!catalogLoadAttempted) {
+      return '';
+    }
+    if (state.models.length === 0) {
+      return options.emptyCatalogText;
+    }
+    if (state.discoveredCount <= 0) {
+      return '';
+    }
+    return `Loaded ${state.discoveredCount} ${state.discoveredCount === 1 ? 'model' : 'models'}.`;
+  };
+
   const renderStatus = (): void => {
-    const state = options.getState();
-    const message = loadingCatalog
-      ? options.loadingCatalogText
-      : catalogLoadFailed
-      ? options.failedCatalogText
-      : catalogLoadAttempted && state.models.length === 0
-      ? options.emptyCatalogText
-      : '';
+    const message = statusMessage(options.getState());
     if (statusEl.textContent !== message) {
       statusEl.setText(message);
     }

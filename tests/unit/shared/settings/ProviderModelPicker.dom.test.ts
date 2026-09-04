@@ -219,7 +219,7 @@ describe('renderProviderModelPicker discovery status', () => {
     expect(getCatalogEl(container).getAttribute('aria-busy')).toBe('false');
   });
 
-  it('clears the status once discovery loads a catalog', async () => {
+  it('announces the discovered model count once discovery loads a catalog', async () => {
     const frames = captureHostFrames();
     const state = emptyState();
     const loadCatalog = jest.fn(async (): Promise<'loaded'> => {
@@ -232,8 +232,35 @@ describe('renderProviderModelPicker discovery status', () => {
     await flush(frames);
 
     expect(loadCatalog).toHaveBeenCalledWith(false);
-    expect(getStatusEl(container).textContent).toBe('');
+    expect(getStatusEl(container).textContent).toBe('Loaded 2 models.');
     expect(within(container).getByRole('button', { name: 'Refresh' })).toBeTruthy();
+  });
+
+  it('announces the discovered model count after refreshing existing models', async () => {
+    const frames = captureHostFrames();
+    const state = populatedState();
+    const loadCatalog = jest.fn(async (): Promise<'loaded'> => {
+      state.discoveredCount = 1;
+      state.models = [{ id: 'model-one', name: 'Model One' }];
+      return 'loaded';
+    });
+    const container = document.body.appendChild(document.createElement('div'));
+
+    renderProviderModelPicker(buildOptions(container, loadCatalog, () => state));
+    await flush(frames);
+
+    const statusEl = getStatusEl(container);
+    expect(statusEl.textContent).toBe('');
+
+    within(container).getByRole('button', { name: 'Refresh' }).click();
+
+    expect(statusEl.textContent).toBe(LOADING_TEXT);
+
+    await flush(frames);
+
+    expect(loadCatalog).toHaveBeenCalledWith(true);
+    expect(getStatusEl(container)).toBe(statusEl);
+    expect(statusEl.textContent).toBe('Loaded 1 model.');
   });
 
   it('schedules the pre-discovery paint on the owner window of a popout document', async () => {
@@ -251,7 +278,7 @@ describe('renderProviderModelPicker discovery status', () => {
       }),
     });
 
-    const loadCatalog = jest.fn(async (): Promise<'empty'> => 'empty');
+    const loadCatalog = jest.fn(async (): Promise<'loaded'> => 'loaded');
     const container = popoutDocument.body.appendChild(popoutDocument.createElement('div'));
     const state = populatedState();
 
@@ -271,7 +298,7 @@ describe('renderProviderModelPicker discovery status', () => {
     expect(hostFrame).not.toHaveBeenCalled();
     expect(loadCatalog).toHaveBeenCalledTimes(1);
     expect(loadCatalog).toHaveBeenCalledWith(true);
-    expect(getStatusEl(container).textContent).toBe('');
+    expect(getStatusEl(container).textContent).toBe('Loaded 2 models.');
   });
 
   it('has no accessibility violations for a settled catalog', async () => {
