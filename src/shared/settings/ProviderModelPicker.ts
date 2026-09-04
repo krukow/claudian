@@ -517,11 +517,8 @@ export function renderProviderModelPicker(
     if (!catalogLoadAttempted) {
       return '';
     }
-    if (state.models.length === 0) {
-      return options.emptyCatalogText;
-    }
     if (state.discoveredCount <= 0) {
-      return '';
+      return options.emptyCatalogText;
     }
     return `Loaded ${state.discoveredCount} ${state.discoveredCount === 1 ? 'model' : 'models'}.`;
   };

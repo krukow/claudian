@@ -51,6 +51,15 @@ function populatedState(): ProviderModelPickerState {
   };
 }
 
+function placeholderOnlyState(): ProviderModelPickerState {
+  return {
+    aliases: {},
+    discoveredCount: 0,
+    models: [{ id: 'configured-model', isAvailable: false, name: 'Configured Model' }],
+    selectedIds: ['configured-model'],
+  };
+}
+
 function buildOptions(
   container: HTMLElement,
   loadCatalog: ProviderModelPickerOptions['loadCatalog'],
@@ -191,6 +200,23 @@ describe('renderProviderModelPicker discovery status', () => {
     expect(statusEl.textContent).toBe(EMPTY_TEXT);
     expect(getCatalogEl(container).getAttribute('aria-busy')).toBe('false');
     expect(within(container).getByRole('button', { name: 'Discover' })).toBe(discoverButton);
+  });
+
+  it('announces the empty outcome when only configured placeholders remain', async () => {
+    const frames = captureHostFrames();
+    const loadCatalog = jest.fn(async (): Promise<'empty'> => 'empty');
+    const container = document.body.appendChild(document.createElement('div'));
+    const state = placeholderOnlyState();
+
+    renderProviderModelPicker(buildOptions(container, loadCatalog, () => state));
+    await flush(frames);
+
+    expect(loadCatalog).toHaveBeenCalledWith(false);
+    expect(getStatusEl(container).textContent).toBe(EMPTY_TEXT);
+    expect(within(container).getAllByText('Configured Model').length).toBeGreaterThan(0);
+    expect(within(container).queryByText(EMPTY_TEXT, {
+      selector: '.claudian-provider-model-picker-empty',
+    })).toBeNull();
   });
 
   it('announces refresh start with existing models and reports the failure outcome', async () => {
