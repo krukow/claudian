@@ -1,3 +1,4 @@
+import { createFakeOwnerDocument } from '@test/helpers/FakeOwnerDocument';
 import * as fs from 'fs';
 
 import { ProviderExecutionLifecycleRegistry } from '@/core/execution';
@@ -214,6 +215,7 @@ function createElement(): any {
     placeholder: '',
     title: '',
     style: {},
+    ownerDocument: createFakeOwnerDocument(),
     classList: {
       add: jest.fn((cls: string) => classes.add(cls)),
       remove: jest.fn((cls: string) => classes.delete(cls)),

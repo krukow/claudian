@@ -142,6 +142,8 @@ jest.mock('@/utils/env', () => ({
   getHostnameKey: () => 'current-host',
 }));
 
+import { createFakeOwnerDocument } from '@test/helpers/FakeOwnerDocument';
+
 import { getPiProviderSettings } from '@/providers/pi/settings';
 import { piSettingsTabRenderer } from '@/providers/pi/ui/PiSettingsTab';
 
@@ -238,6 +240,7 @@ function createElement(): any {
     style: {},
     title: '',
     value: '',
+    ownerDocument: createFakeOwnerDocument(),
     classList: {
       add: jest.fn((cls: string) => classes.add(cls)),
       remove: jest.fn((cls: string) => classes.delete(cls)),

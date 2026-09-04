@@ -429,7 +429,7 @@ export function renderProviderModelPicker(
     const models = state.models.filter(matchesFilter);
 
     if (models.length === 0) {
-      listEl.createDiv({
+      const emptyEl = listEl.createDiv({
         cls: 'claudian-provider-model-picker-empty',
         text: loadingCatalog
           ? options.loadingCatalogText
@@ -439,6 +439,10 @@ export function renderProviderModelPicker(
           ? options.emptyCatalogText
           : 'No models match your filter.',
       });
+      if (loadingCatalog) {
+        emptyEl.setAttribute('role', 'status');
+        emptyEl.setAttribute('aria-live', 'polite');
+      }
       return;
     }
 
@@ -500,6 +504,7 @@ export function renderProviderModelPicker(
   };
 
   const renderAll = (): void => {
+    pickerEl.setAttribute('aria-busy', String(loadingCatalog));
     renderSummary();
     renderSelected();
     renderProviderSelect();
@@ -521,6 +526,7 @@ export function renderProviderModelPicker(
     loadingCatalog = true;
     catalogLoadFailed = false;
     renderAll();
+    await waitForNextPaint(pickerEl);
     try {
       catalogLoadFailed = await options.loadCatalog(force) === 'failed';
     } catch {
@@ -541,4 +547,11 @@ export function renderProviderModelPicker(
     void loadCatalog(false);
   }
   return { refresh: renderAll };
+}
+
+function waitForNextPaint(element: HTMLElement): Promise<void> {
+  const view = element.ownerDocument.defaultView ?? window;
+  return new Promise(resolve => {
+    view.requestAnimationFrame(() => resolve());
+  });
 }
