@@ -289,6 +289,37 @@ describe('renderProviderModelPicker discovery status', () => {
     expect(statusEl.textContent).toBe('Loaded 1 model.');
   });
 
+  it('holds discovery until a second frame so the loading state can paint', async () => {
+    const frames = captureHostFrames();
+    const loadCatalog = jest.fn(async (): Promise<'loaded'> => 'loaded');
+    const container = document.body.appendChild(document.createElement('div'));
+    const state = populatedState();
+
+    renderProviderModelPicker(buildOptions(container, loadCatalog, () => state));
+    await settle();
+
+    within(container).getByRole('button', { name: 'Refresh' }).click();
+    await settle();
+
+    expect(frames).toHaveLength(1);
+    expect(loadCatalog).not.toHaveBeenCalled();
+    expect(getStatusEl(container).textContent).toBe(LOADING_TEXT);
+
+    frames.shift()?.(0);
+    await settle();
+
+    expect(frames).toHaveLength(1);
+    expect(loadCatalog).not.toHaveBeenCalled();
+    expect(getStatusEl(container).textContent).toBe(LOADING_TEXT);
+
+    frames.shift()?.(0);
+    await settle();
+
+    expect(loadCatalog).toHaveBeenCalledTimes(1);
+    expect(loadCatalog).toHaveBeenCalledWith(true);
+    expect(getStatusEl(container).textContent).toBe('Loaded 2 models.');
+  });
+
   it('schedules the pre-discovery paint on the owner window of a popout document', async () => {
     const hostFrame = jest.spyOn(window, 'requestAnimationFrame');
     const popoutDocument = document.implementation.createHTMLDocument('popout');
@@ -318,7 +349,14 @@ describe('renderProviderModelPicker discovery status', () => {
     expect(loadCatalog).not.toHaveBeenCalled();
     expect(getStatusEl(container).textContent).toBe(LOADING_TEXT);
 
-    popoutFrames[0](0);
+    popoutFrames.shift()?.(0);
+    await settle();
+
+    expect(hostFrame).not.toHaveBeenCalled();
+    expect(popoutFrames).toHaveLength(1);
+    expect(loadCatalog).not.toHaveBeenCalled();
+
+    popoutFrames.shift()?.(0);
     await settle();
 
     expect(hostFrame).not.toHaveBeenCalled();

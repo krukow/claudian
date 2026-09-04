@@ -578,8 +578,16 @@ export function renderProviderModelPicker(
   return { refresh: renderAll };
 }
 
+/**
+ * Resolves after two animation frames so the loading state paints before discovery starts.
+ * A single frame runs before paint, letting an immediately-resolving load erase the state
+ * unseen.
+ */
 function waitForNextPaint(element: HTMLElement): Promise<void> {
+  const ownerWindow = element.ownerDocument.defaultView;
   return new Promise(resolve => {
-    scheduleAnimationFrame(() => resolve(), element.ownerDocument.defaultView);
+    scheduleAnimationFrame(() => {
+      scheduleAnimationFrame(() => resolve(), ownerWindow);
+    }, ownerWindow);
   });
 }
