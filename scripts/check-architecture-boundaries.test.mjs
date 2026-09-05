@@ -1022,11 +1022,13 @@ test('performance policy enforces the main bundle budget and reports health delt
 test('bundle-critical runtime dependencies require exact manifest and lock agreement', () => {
   assert.deepEqual(bundleCriticalRuntimeDependencies, [
     '@anthropic-ai/claude-agent-sdk',
+    '@github/copilot-sdk',
     'smol-toml',
   ]);
   const packageJson = {
     dependencies: {
       '@anthropic-ai/claude-agent-sdk': '0.3.226',
+      '@github/copilot-sdk': '1.0.11',
       'smol-toml': '1.7.1',
     },
   };
@@ -1034,6 +1036,7 @@ test('bundle-critical runtime dependencies require exact manifest and lock agree
     packages: {
       '': { dependencies: { ...packageJson.dependencies } },
       'node_modules/@anthropic-ai/claude-agent-sdk': { version: '0.3.226' },
+      'node_modules/@github/copilot-sdk': { version: '1.0.11' },
       'node_modules/smol-toml': { version: '1.7.1' },
     },
   };
@@ -1043,6 +1046,7 @@ test('bundle-critical runtime dependencies require exact manifest and lock agree
     },
     packages: {
       '@anthropic-ai/claude-agent-sdk': ['@anthropic-ai/claude-agent-sdk@0.3.226'],
+      '@github/copilot-sdk': ['@github/copilot-sdk@1.0.11'],
       'smol-toml': ['smol-toml@1.7.1'],
     },
   };
@@ -1056,6 +1060,22 @@ test('bundle-critical runtime dependencies require exact manifest and lock agree
     [{
       actual: '^0.3.220',
       dependency: '@anthropic-ai/claude-agent-sdk',
+      expected: 'an exact version',
+      source: 'package.json',
+    }],
+  );
+
+  const rangedCopilotManifest = structuredClone(packageJson);
+  rangedCopilotManifest.dependencies['@github/copilot-sdk'] = '^1.0.11';
+  assert.deepEqual(
+    inspectRuntimeDependencyParity({
+      bunLock,
+      packageJson: rangedCopilotManifest,
+      packageLock,
+    }),
+    [{
+      actual: '^1.0.11',
+      dependency: '@github/copilot-sdk',
       expected: 'an exact version',
       source: 'package.json',
     }],
