@@ -73,9 +73,10 @@ Running a bare `copilot` signs in to the shared `~/.copilot` install instead and
 | Plan mode | No |
 | Subagents and background agents | No |
 | Provider slash commands | No |
-| Skills, plugins, and MCP servers | No — switched off for every session |
+| Skills and MCP servers | No — disabled in the session configuration |
+| Plugin selection | No — see the plugin isolation limit below |
 
-Anything marked No is absent rather than refused on principle: Claudian advertises the capability as unsupported so no part of the UI offers it.
+Unsupported capabilities are not offered in Claudian's UI.
 
 ## Data, storage, and network
 
@@ -83,7 +84,8 @@ Anything marked No is absent rather than refused on principle: Claudian advertis
 - **Session state**: the CLI writes its own session data under the per-vault `COPILOT_HOME` Claudian creates outside your notes — under `Application Support` on macOS, `%LOCALAPPDATA%` on Windows, and `$XDG_STATE_HOME` or `~/.local/state` on Linux, in a directory named after the vault's path. Claudian treats that data as read-only and never deletes it, except for the short-lived sessions it creates for titles and inline edits.
 - **Settings**: Copilot settings live in `.claudian/claudian-settings.json` inside the vault, in plain text. Never put a token or an API key there.
 - **Environment**: Claudian forwards a small host environment to the CLI and accepts only `LANG` and `LC_ALL` from provider settings. PATH, proxy reachability, and certificate trust come from the environment Obsidian itself runs in, because a vault syncs and can be shared. `COPILOT_HOME` and PATH are set by Claudian and cannot be overridden.
-- **Switched off for every session**: telemetry, the shared on-disk embedding cache, keychain-backed MCP token storage, MCP servers and apps, remote sessions and export, the cross-session store, host git operations, memory, scheduling, skills, file hooks, plugin directories, and instruction and configuration discovery outside the vault.
+- **Switched off for every session**: telemetry, the shared on-disk embedding cache, keychain-backed MCP token storage, MCP servers and apps, remote sessions and export, the cross-session store, host git operations, memory, scheduling, skills, file hooks, additional plugin directories, and instruction and configuration discovery outside the vault.
+- **Plugin isolation limit**: the SDK mode needed for keychain sign-in does not clear plugins already installed in this vault's `COPILOT_HOME`. Keep that home dedicated to Claudian and do not install CLI plugins into it. Plugins installed there can affect sessions even though Claudian exposes no plugin controls; disabling additional plugin directories does not disable installed plugins.
 
 ## Install footprint
 
