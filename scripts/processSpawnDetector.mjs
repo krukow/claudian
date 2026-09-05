@@ -22,15 +22,18 @@ function normalizeModuleName(moduleName) {
 }
 
 /**
- * The module a `require` or dynamic `import` names, or `unresolvable` when the specifier
- * is not a literal the gate can read. A specifier it cannot read could name anything,
- * including `child_process`, so it is never silently accepted.
+ * The module a call names, or `unresolvable` when the specifier is not a literal the gate
+ * can read. `require`, a dynamic `import`, and `process.getBuiltinModule` all hand out the
+ * same module, the last of them without an import a bundler would ever see. A specifier
+ * the gate cannot read could name anything, including `child_process`, so it is never
+ * silently accepted.
  */
 function readRequiredModule(node) {
-  const isRequire = ts.isCallExpression(node) && isRequireCallee(node.expression);
-  const isDynamicImport = ts.isCallExpression(node)
-    && node.expression.kind === ts.SyntaxKind.ImportKeyword;
-  if (!isRequire && !isDynamicImport) return null;
+  if (!ts.isCallExpression(node)) return null;
+  const namesModule = isRequireCallee(node.expression)
+    || node.expression.kind === ts.SyntaxKind.ImportKeyword
+    || isBuiltinModuleCallee(node.expression);
+  if (!namesModule) return null;
 
   const [specifier] = node.arguments;
   if (!specifier || !ts.isStringLiteralLike(specifier)) return 'unresolvable';
@@ -41,6 +44,15 @@ function readRequiredModule(node) {
 function isRequireCallee(callee) {
   if (ts.isIdentifier(callee)) return callee.text === 'require';
   return ts.isPropertyAccessExpression(callee) && callee.name.text === 'require';
+}
+
+/**
+ * `process.getBuiltinModule(...)`, however the source reaches it: through `globalThis`,
+ * or destructured off `process` and called on its own.
+ */
+function isBuiltinModuleCallee(callee) {
+  if (ts.isIdentifier(callee)) return callee.text === 'getBuiltinModule';
+  return ts.isPropertyAccessExpression(callee) && callee.name.text === 'getBuiltinModule';
 }
 
 function createBindings() {

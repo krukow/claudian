@@ -86,6 +86,47 @@ test('reaching require through an object is process spawning', () => {
 });
 
 /**
+ * `process.getBuiltinModule` hands out the same builtin `require` does, without an import
+ * and without a bundler ever seeing it. A gate that only read imports and `require` would
+ * pass a spawn reached this way.
+ */
+test('reaching child_process through getBuiltinModule is process spawning', () => {
+  for (const source of [
+    "process.getBuiltinModule('child_process').spawn(cliPath, args);",
+    "process.getBuiltinModule('node:child_process').execFile(cliPath, args);",
+    "globalThis.process.getBuiltinModule('child_process').spawnSync(cliPath);",
+    "const { getBuiltinModule } = process;\ngetBuiltinModule('node:child_process');",
+  ]) {
+    assert.deepEqual(reasons(source), ["imports 'child_process'"], source);
+  }
+});
+
+test('calling a child_process API through a getBuiltinModule binding is process spawning', () => {
+  assert.deepEqual(
+    reasons("const cp = process.getBuiltinModule('node:child_process');\ncp.exec(command);"),
+    ["imports 'child_process'", 'calls cp.exec()'],
+  );
+  assert.deepEqual(
+    reasons("const { spawn } = process.getBuiltinModule('child_process');\nspawn(cliPath);"),
+    ["imports 'child_process'", 'calls spawn()'],
+  );
+});
+
+test('another builtin reached the same way is not process spawning', () => {
+  assert.deepEqual(
+    reasons("const fs = process.getBuiltinModule('node:fs');\nfs.readFileSync(cliPath);"),
+    [],
+  );
+});
+
+test('a builtin module specifier the gate cannot read is reported', () => {
+  assert.deepEqual(
+    reasons('const cp = process.getBuiltinModule(moduleName);\ncp.spawn(command);'),
+    ['requires a module specifier that cannot be read'],
+  );
+});
+
+/**
  * A specifier the gate cannot read could name anything, including `child_process`. It is
  * reported rather than resolved, because a gate that silently passes what it cannot read
  * is not a gate.
