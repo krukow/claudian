@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { isExistingFile } from '../../../utils/cliBinaryLocator';
+import { toAbsoluteCopilotPath } from './CopilotAbsolutePath';
 import {
   isCopilotNpmLoaderPath,
   isCopilotNpmPackageLoader,
@@ -98,7 +99,7 @@ export function resolveCopilotCliEntry(
     realPath: environment.realPath ?? realPathQuietly,
   };
 
-  const candidate = toAbsoluteCliPath(cliPath, resolved.platform);
+  const candidate = toAbsoluteCopilotPath(cliPath, resolved.platform);
   if (!candidate) {
     return null;
   }
@@ -119,38 +120,11 @@ export function resolveCopilotCliEntry(
 
 /**
  * The candidate as the canonical absolute path the SDK will spawn, or null when it is not
- * one.
- *
- * The SDK spawns the CLI with the vault as the working directory, so a path that is not
- * absolute names a file beside the user's notes rather than an install: a note, an
- * attachment, or a synced folder called `copilot` is what a signed-in turn would run, and
- * the same setting would mean a different program in every vault. There is nothing to
- * fall back to once a path is ambiguous, so an entry that is not absolute is left
- * unresolved for the caller to report as the configuration failure it is — including for
- * a discovered one, because a relative entry on the host's own PATH resolves against that
+ * one, is `toAbsoluteCopilotPath` — the same rule the CLI's data directory is held to,
+ * since both are resolved against the vault when they are not absolute. A discovered path
+ * is held to it as well: a relative entry on the host's own PATH resolves against that
  * same working directory.
- *
- * A Windows path is absolute only when it names a drive or a UNC share, which is the same
- * distinction a launcher's own references are read with: `\tools\copilot.exe` and
- * `C:copilot.exe` are both resolved against the working directory's drive, which is the
- * vault's. What is left is normalized, so a path that walks through itself names its file
- * once and the SDK identity that path belongs to holds still.
  */
-function toAbsoluteCliPath(
-  cliPath: string | null,
-  platform: NodeJS.Platform,
-): string | null {
-  const candidate = cliPath?.trim();
-  if (!candidate) {
-    return null;
-  }
-  if (platform !== 'win32') {
-    return path.posix.isAbsolute(candidate) ? path.posix.normalize(candidate) : null;
-  }
-  return DRIVE_QUALIFIED_PATH.test(candidate) || candidate.startsWith('\\\\')
-    ? path.win32.normalize(candidate)
-    : null;
-}
 
 /**
  * The `@github/copilot` launcher an entry leads to, or null when it leads to none.

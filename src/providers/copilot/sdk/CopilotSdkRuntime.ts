@@ -1,4 +1,5 @@
 import type { CopilotReasoningEffort } from '../models';
+import { isAbsoluteCopilotPath } from '../runtime/CopilotAbsolutePath';
 import {
   acquireNativeWithin,
   copilotNativeSilenceError,
@@ -75,11 +76,13 @@ function loadCopilotSdk(): Promise<CopilotSdkModule> {
  */
 export const copilotSdkRuntime: CopilotSdkRuntime = {
   async createClient(options: CopilotSdkClientOptions): Promise<CopilotSdkClient> {
-    if (!options.baseDirectory.trim()) {
+    if (!isAbsoluteCopilotPath(options.baseDirectory)) {
       throw copilotConfigurationError(
-        'The Copilot CLI was given no data directory of its own. `COPILOT_HOME` must name '
-        + 'a per-vault directory, or the CLI writes this vault\'s agent state into the '
-        + 'shared `~/.copilot`.',
+        'The Copilot CLI was given no usable data directory of its own. `COPILOT_HOME` '
+        + 'must name an absolute per-vault directory: an empty one leaves it unset, so '
+        + 'the CLI writes this vault\'s agent state into the user\'s shared '
+        + '`~/.copilot`, and a relative one is resolved against the vault the CLI is '
+        + 'spawned in, so that state lands inside the notes it is meant to stay out of.',
       );
     }
 

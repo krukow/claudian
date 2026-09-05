@@ -185,6 +185,26 @@ describe('copilotSdkRuntime client construction', () => {
     expect(FakeSdkCopilotClient.instances).toEqual([]);
   });
 
+  /**
+   * The SDK spawns the CLI with the vault as its working directory, so a relative
+   * `baseDirectory` is resolved against vault content: this vault's agent state would be
+   * written into the notes `COPILOT_HOME` exists to keep it out of, and would be indexed,
+   * synced, and shared with them. The last place that can tell is here, before a CLI is
+   * started against it.
+   */
+  it.each(['state/copilot', './state/copilot', '../state', 'copilot'])(
+    'refuses the relative data directory %j',
+    async (baseDirectory) => {
+      await expect(copilotSdkRuntime.createClient({
+        baseDirectory,
+        cliPath: '/usr/local/bin/copilot',
+        environment: {},
+        workingDirectory: '/vault',
+      })).rejects.toThrow(/COPILOT_HOME/);
+      expect(FakeSdkCopilotClient.instances).toEqual([]);
+    },
+  );
+
   it('opts every created and resumed session into an explicit tool list', async () => {
     const client = await createClient();
     await client.createSession(sessionConfig());

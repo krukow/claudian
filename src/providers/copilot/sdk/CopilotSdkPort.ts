@@ -35,8 +35,9 @@ export interface CopilotSdkClientOptions {
   readonly cliPath: string;
   /**
    * `COPILOT_HOME` for the spawned CLI, kept outside vault content. Empty mode requires
-   * a persistence location of its own, and an empty one would leave the CLI writing this
-   * vault's agent state into the user's shared `~/.copilot`.
+   * a persistence location of its own; an empty one would leave the CLI writing this
+   * vault's agent state into the user's shared `~/.copilot`, and a relative one is
+   * resolved against the vault the CLI is spawned in, so it must be absolute.
    */
   readonly baseDirectory: string;
   /** Complete environment for the CLI process. Not merged with `process.env` downstream. */

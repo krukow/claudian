@@ -1,3 +1,4 @@
+import * as os from 'os';
 import * as path from 'path';
 
 import {
@@ -6,6 +7,18 @@ import {
   isCopilotJavaScriptEntrypoint,
   resolveCopilotHomeDirectory,
 } from '@/providers/copilot/runtime/CopilotRuntimeEnvironment';
+
+type NodeOs = typeof os;
+
+/**
+ * The host locations `resolveCopilotHomeDirectory` falls back to when the environment it
+ * is handed names none. They are the environment boundary this module reads directly, so
+ * they are the only thing stood in for here.
+ */
+jest.mock('node:os', () => {
+  const actual = jest.requireActual<NodeOs>('node:os');
+  return { ...actual, homedir: jest.fn(actual.homedir), tmpdir: jest.fn(actual.tmpdir) };
+});
 
 describe('buildCopilotRuntimeEnvironment', () => {
   const baseInput = {
@@ -522,6 +535,19 @@ describe('isCopilotJavaScriptEntrypoint', () => {
 });
 
 describe('resolveCopilotHomeDirectory', () => {
+  beforeEach(() => {
+    const actual = jest.requireActual<NodeOs>('node:os');
+    jest.mocked(os.homedir).mockImplementation(actual.homedir);
+    jest.mocked(os.tmpdir).mockImplementation(actual.tmpdir);
+  });
+
+  /** A path that means one place wherever it is resolved from, per platform. */
+  function isAbsoluteFor(platform: NodeJS.Platform, value: string): boolean {
+    return platform === 'win32'
+      ? /^(?:[a-zA-Z]:[\\/]|\\\\)/.test(value)
+      : path.posix.isAbsolute(value);
+  }
+
   it('keeps Copilot session data out of the vault', () => {
     const home = resolveCopilotHomeDirectory(
       '/Users/person/Vault',
@@ -530,7 +556,7 @@ describe('resolveCopilotHomeDirectory', () => {
     );
 
     expect(home).toContain(
-      path.join('/Users/person', 'Library', 'Application Support', 'Claudian', 'copilot'),
+      path.posix.join('/Users/person', 'Library', 'Application Support', 'Claudian', 'copilot'),
     );
     expect(home).not.toContain('/Vault');
     expect(home).not.toContain('.claudian');
@@ -539,15 +565,17 @@ describe('resolveCopilotHomeDirectory', () => {
   it('uses the platform application-state location', () => {
     expect(resolveCopilotHomeDirectory('/vault', {
       LOCALAPPDATA: 'C:\\Users\\person\\AppData\\Local',
-    }, 'win32')).toContain(path.join('C:\\Users\\person\\AppData\\Local', 'Claudian', 'copilot'));
+    }, 'win32')).toContain(
+      path.win32.join('C:\\Users\\person\\AppData\\Local', 'Claudian', 'copilot'),
+    );
 
     expect(resolveCopilotHomeDirectory('/vault', {
       HOME: '/home/person',
       XDG_STATE_HOME: '/home/person/.state',
-    }, 'linux')).toContain(path.join('/home/person/.state', 'claudian', 'copilot'));
+    }, 'linux')).toContain(path.posix.join('/home/person/.state', 'claudian', 'copilot'));
 
     expect(resolveCopilotHomeDirectory('/vault', { HOME: '/home/person' }, 'linux'))
-      .toContain(path.join('/home/person', '.local', 'state', 'claudian', 'copilot'));
+      .toContain(path.posix.join('/home/person', '.local', 'state', 'claudian', 'copilot'));
   });
 
   it('gives each vault its own store and leaks no path information', () => {
@@ -565,6 +593,113 @@ describe('resolveCopilotHomeDirectory', () => {
     expect(resolveCopilotHomeDirectory('/vaults/work/', environment, 'linux'))
       .toBe(resolveCopilotHomeDirectory('/vaults/work', environment, 'linux'));
   });
+
+  /**
+   * `COPILOT_HOME` is handed to a CLI the SDK spawns with the vault as its working
+   * directory, so a relative one is resolved against vault content: this vault's agent
+   * state would be written into the notes it is meant to stay out of, and would be
+   * indexed, synced, and shared with them. A host variable that names a relative location
+   * therefore names nothing, and the next absolute candidate answers instead.
+   */
+  it.each([
+    ['linux', { HOME: '/home/person', XDG_STATE_HOME: 'state' },
+      path.posix.join('/home/person', '.local', 'state', 'claudian')],
+    ['linux', { HOME: '/home/person', XDG_STATE_HOME: './state' },
+      path.posix.join('/home/person', '.local', 'state', 'claudian')],
+    ['win32', { LOCALAPPDATA: 'AppData\\Local', USERPROFILE: 'C:\\Users\\person' },
+      path.win32.join('C:\\Users\\person', 'AppData', 'Local', 'Claudian')],
+    ['darwin', { HOME: 'person/Library', USERPROFILE: '/Users/person' },
+      path.posix.join('/Users/person', 'Library', 'Application Support', 'Claudian')],
+  ] as ReadonlyArray<[NodeJS.Platform, NodeJS.ProcessEnv, string]>)(
+    'ignores a relative %s state location',
+    (platform, environment, expectedRoot) => {
+      const home = resolveCopilotHomeDirectory('/vault', environment, platform);
+
+      expect(home.startsWith(expectedRoot)).toBe(true);
+      expect(isAbsoluteFor(platform, home)).toBe(true);
+    },
+  );
+
+  /**
+   * Windows resolves a drive-relative or root-relative reference against the working
+   * directory's drive, which is the vault's, so neither shape names a place either.
+   */
+  it.each(['C:AppData\\Local', '\\AppData\\Local', 'AppData/Local'])(
+    'ignores the Windows state location %s',
+    (localAppData) => {
+      const home = resolveCopilotHomeDirectory(
+        'C:\\Vault',
+        { LOCALAPPDATA: localAppData, USERPROFILE: 'C:\\Users\\person' },
+        'win32',
+      );
+
+      expect(home).toContain(
+        path.win32.join('C:\\Users\\person', 'AppData', 'Local', 'Claudian', 'copilot'),
+      );
+    },
+  );
+
+  /**
+   * There is no candidate left to fall through to, and no answer that names the vault is
+   * acceptable, so a host that supplies no absolute location of its own still receives an
+   * absolute one it can write to.
+   */
+  it.each(['darwin', 'linux', 'win32'] as ReadonlyArray<NodeJS.Platform>)(
+    'always answers with an absolute directory on %s',
+    (platform) => {
+      for (const environment of [
+        {},
+        { HOME: 'person', LOCALAPPDATA: 'local', USERPROFILE: 'person', XDG_STATE_HOME: 'state' },
+      ]) {
+        const home = resolveCopilotHomeDirectory('/vaults/work', environment, platform);
+
+        expect(isAbsoluteFor(platform, home)).toBe(true);
+        expect(home).toMatch(/[0-9a-f]{16}$/);
+        expect(home).not.toContain('vaults');
+      }
+    },
+  );
+
+  /**
+   * The last resort is the host's own temporary location rather than anything derived
+   * from the vault, and it is still keyed by vault so two vaults never share a store. A
+   * host that reports no absolute home is what reaches it, so `os.homedir` stands in for
+   * one here.
+   */
+  it.each([
+    ['darwin', { TMPDIR: '/var/folders/9x' }, path.posix.join('/var/folders/9x', 'Claudian', 'copilot')],
+    ['linux', { TMPDIR: '/var/tmp' }, path.posix.join('/var/tmp', 'claudian', 'copilot')],
+    ['win32', { TEMP: 'D:\\Temp' }, path.win32.join('D:\\Temp', 'Claudian', 'copilot')],
+  ] as ReadonlyArray<[NodeJS.Platform, NodeJS.ProcessEnv, string]>)(
+    'falls back to the %s temporary location, never to the vault',
+    (platform, environment, expected) => {
+      jest.mocked(os.homedir).mockReturnValue('person');
+      const home = resolveCopilotHomeDirectory('/vaults/work', environment, platform);
+
+      expect(home).toContain(expected);
+      expect(isAbsoluteFor(platform, home)).toBe(true);
+    },
+  );
+
+  /**
+   * With neither a home nor a temporary location to read, the answer is a platform
+   * constant. Deriving one from the working directory would put the store in the vault,
+   * which is the one place it may never be.
+   */
+  it.each([
+    ['darwin', path.posix.join('/tmp', 'Claudian', 'copilot')],
+    ['linux', path.posix.join('/tmp', 'claudian', 'copilot')],
+    ['win32', path.win32.join('C:\\Temp', 'Claudian', 'copilot')],
+  ] as ReadonlyArray<[NodeJS.Platform, string]>)(
+    'answers with a %s platform default when the host names nothing absolute',
+    (platform, expected) => {
+      jest.mocked(os.homedir).mockReturnValue('person');
+      jest.mocked(os.tmpdir).mockReturnValue('temp');
+
+      expect(resolveCopilotHomeDirectory('/vaults/work', {}, platform))
+        .toContain(expected);
+    },
+  );
 });
 
 /**

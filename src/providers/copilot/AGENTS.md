@@ -28,6 +28,7 @@ not what a later layer will do with them.
 | `sdk/CopilotClientFactory` | CLI resolution, runtime environment, client identity, and the auth gate |
 | `sdk/CopilotRuntimeError` | Failure categorization onto `ProviderExecutionErrorCategory`, and what each category leaves unusable |
 | `runtime/CopilotCliResolver` | Discovering the user-installed `copilot` binary from settings and the host |
+| `runtime/CopilotAbsolutePath` | What counts as an absolute path for a CLI spawned in the vault, and the canonical form of one |
 | `runtime/CopilotCliEntry` | Narrowing a discovered path to the executable the SDK is handed, and requiring it to be absolute |
 | `runtime/CopilotNativeCliBinary` | Where an npm install's native platform binary lives |
 | `runtime/CopilotRuntimeEnvironment` | `COPILOT_HOME` placement, the CLI process environment, and the canonical form of a configured environment |
@@ -99,9 +100,12 @@ not what a later layer will do with them.
   the CLI. Empty mode also makes two things contractual, which is why the port requires
   them rather than leaving them to a later layer: a data directory of Claudian's own, and
   an explicit `availableTools` list on every session. `baseDirectory` is checked for
-  content as well as presence, because the SDK only tests that one was supplied and an
+  absoluteness, not just presence, because the SDK only tests that one was supplied: an
   empty one leaves `COPILOT_HOME` unset, which puts this vault's agent state in the
-  user's shared `~/.copilot`. Empty mode also flips tool filter precedence to deny-wins,
+  user's shared `~/.copilot`, and a relative one is resolved against the vault the CLI is
+  spawned in, which puts it inside the notes. That check is the last one before a CLI is
+  started, so it stays here even though `resolveCopilotHomeDirectory` already guarantees
+  it. Empty mode also flips tool filter precedence to deny-wins,
   so an `excludedTools` entry overrides the same tool in `availableTools`; a later
   execution layer reads its own tool list that way rather than the other way round.
 - Remote sessions, remote export, MCP apps, the built-in session store, host git
@@ -164,6 +168,16 @@ not what a later layer will do with them.
 - `COPILOT_HOME` is a per-vault directory under the OS application-state location, keyed
   by a hash of the vault path. Copilot session state is agent data, not vault content, so
   it must never live under the vault — including under `.claudian/`.
+- That directory is always absolute, by the same rule the CLI path is held to in
+  `runtime/CopilotAbsolutePath`. Every host variable it is built from — `XDG_STATE_HOME`,
+  `LOCALAPPDATA`, `HOME`, `USERPROFILE`, and the temporary-location variables — is
+  untrusted input that may name a relative location, and a relative `COPILOT_HOME` is
+  resolved against the vault the CLI is spawned in. One that does is read as naming
+  nothing and the next candidate answers: the platform's own location, then the host's
+  home, then the host's temporary location, then a platform constant. Nothing is ever
+  derived from the vault or the working directory, which are the two places the store may
+  not be. A temporary location is last because it is the one place the store is not
+  expected to survive.
 
 ## Failure and Budget Rules
 

@@ -3,6 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { getEnhancedPath } from '../../../utils/env';
+import { toAbsoluteCopilotPath } from './CopilotAbsolutePath';
 
 /**
  * Environment variables the Copilot CLI needs from the host to locate a shell, resolve
@@ -284,38 +285,126 @@ export function buildCopilotRuntimeEnvironment(
  * of the vault: it must not be indexed, synced as notes, or picked up by Claudian's own
  * vault-relative tooling. The vault path is hashed so two vaults never share a store and
  * the directory name carries no user path information.
+ *
+ * The answer is always absolute. The CLI is spawned with the vault as its working
+ * directory, so a relative `COPILOT_HOME` would put this vault's agent state inside the
+ * notes it exists to stay out of — and every host variable this is built from is
+ * untrusted input that can name a relative location. A variable that does is read as
+ * naming nothing, and the next candidate answers instead.
  */
 export function resolveCopilotHomeDirectory(
   vaultPath: string,
   environment: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): string {
+  const paths = platform === 'win32' ? path.win32 : path.posix;
   const vaultKey = createHash('sha256')
-    .update(path.resolve(vaultPath))
+    .update(paths.resolve(vaultPath))
     .digest('hex')
     .slice(0, 16);
-  return path.join(resolveApplicationStateRoot(environment, platform), 'copilot', vaultKey);
+  return paths.join(resolveApplicationStateRoot(environment, platform), 'copilot', vaultKey);
 }
 
+/**
+ * The application-state directory this vault's store lives under: the first location the
+ * platform names that is absolute, and the host's own temporary location when it names
+ * none.
+ *
+ * Falling back to a temporary directory keeps the guarantee that matters — agent state
+ * lands somewhere writable that is neither the vault nor another vault's store — on a
+ * host that reports no home at all. It is last because a temporary location is the one
+ * place that store is not expected to survive.
+ */
 function resolveApplicationStateRoot(
   environment: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
 ): string {
-  const home = environment.HOME || environment.USERPROFILE || os.homedir();
+  const paths = platform === 'win32' ? path.win32 : path.posix;
+  const directoryName = platform === 'win32' || platform === 'darwin'
+    ? 'Claudian'
+    : 'claudian';
 
+  for (const candidate of applicationStateRoots(environment, platform)) {
+    const absolute = toAbsoluteCopilotPath(candidate, platform);
+    if (absolute) {
+      return paths.join(absolute, directoryName);
+    }
+  }
+  return paths.join(temporaryRoot(environment, platform), directoryName);
+}
+
+function* applicationStateRoots(
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): Generator<string | undefined> {
   if (platform === 'win32') {
-    const localAppData = environment.LOCALAPPDATA;
-    return localAppData
-      ? path.join(localAppData, 'Claudian')
-      : path.join(home, 'AppData', 'Local', 'Claudian');
+    yield environment.LOCALAPPDATA;
+    for (const home of homeDirectories(environment, platform)) {
+      yield path.win32.join(home, 'AppData', 'Local');
+    }
+    return;
   }
-
   if (platform === 'darwin') {
-    return path.join(home, 'Library', 'Application Support', 'Claudian');
+    for (const home of homeDirectories(environment, platform)) {
+      yield path.posix.join(home, 'Library', 'Application Support');
+    }
+    return;
   }
 
-  const xdgStateHome = environment.XDG_STATE_HOME;
-  return xdgStateHome
-    ? path.join(xdgStateHome, 'claudian')
-    : path.join(home, '.local', 'state', 'claudian');
+  yield environment.XDG_STATE_HOME;
+  for (const home of homeDirectories(environment, platform)) {
+    yield path.posix.join(home, '.local', 'state');
+  }
+}
+
+function* homeDirectories(
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): Generator<string> {
+  for (const candidate of [environment.HOME, environment.USERPROFILE, homeDirectoryQuietly()]) {
+    const absolute = toAbsoluteCopilotPath(candidate, platform);
+    if (absolute) {
+      yield absolute;
+    }
+  }
+}
+
+/**
+ * The host's temporary location, and a platform default when it names none of its own.
+ * The default is a constant rather than anything derived from the vault or the working
+ * directory, which are the two places this fallback exists to avoid.
+ */
+function temporaryRoot(
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): string {
+  const candidates = [
+    environment.TMPDIR,
+    environment.TEMP,
+    environment.TMP,
+    temporaryDirectoryQuietly(),
+  ];
+  for (const candidate of candidates) {
+    const absolute = toAbsoluteCopilotPath(candidate, platform);
+    if (absolute) {
+      return absolute;
+    }
+  }
+  return platform === 'win32' ? 'C:\\Temp' : '/tmp';
+}
+
+function homeDirectoryQuietly(): string | undefined {
+  try {
+    return os.homedir();
+  } catch {
+    return undefined;
+  }
+}
+
+function temporaryDirectoryQuietly(): string | undefined {
+  try {
+    return os.tmpdir();
+  } catch {
+    return undefined;
+  }
 }
