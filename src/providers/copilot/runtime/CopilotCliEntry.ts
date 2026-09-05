@@ -48,6 +48,11 @@ const MIXED_CASE_JS_SUFFIX = /\.js$/i;
 export interface CopilotCliEntryEnvironment {
   readonly arch: string;
   readonly fileExists: (filePath: string) => boolean;
+  /**
+   * What the filesystem calls the file at this path, or null when there is none. Two
+   * paths naming one file share it; two paths naming different files never do.
+   */
+  readonly fileIdentity: (filePath: string) => string | null;
   readonly isMuslLinux: () => boolean;
   readonly platform: NodeJS.Platform;
   readonly readFile: (filePath: string) => string | null;
@@ -62,7 +67,7 @@ export interface CopilotCliEntryEnvironment {
  * untouched. On Windows npm installs the CLI as a `copilot.cmd` launcher, which `spawn`
  * rejects; the launcher names the package's JavaScript entry, so that entry is resolved
  * instead. A JavaScript entry spelled in another case is rewritten to the spelling the
- * SDK recognises, where the filesystem resolves both names to the same file.
+ * SDK recognises, but only where the filesystem identifies both spellings as one file.
  *
  * Every supported npm install then lands on `@github/copilot`'s `npm-loader.js`, directly
  * or through the symlink npm puts on PATH, and that loader only `spawnSync`s the native
@@ -72,7 +77,8 @@ export interface CopilotCliEntryEnvironment {
  *
  * A launcher that names nothing resolvable, an entry the filesystem tells apart from its
  * lowercase spelling, and a Copilot install with no platform package all return null
- * rather than a path that only fails at spawn time or a process nothing can stop.
+ * rather than a path that only fails at spawn time, launches the wrong program, or leaves
+ * a process nothing can stop.
  */
 export function resolveCopilotCliEntry(
   cliPath: string | null,
@@ -81,6 +87,7 @@ export function resolveCopilotCliEntry(
   const resolved: CopilotCliEntryEnvironment = {
     arch: environment.arch ?? process.arch,
     fileExists: environment.fileExists ?? isExistingFile,
+    fileIdentity: environment.fileIdentity ?? fileIdentityQuietly,
     isMuslLinux: environment.isMuslLinux ?? isMuslLinuxHost,
     platform: environment.platform ?? process.platform,
     readFile: environment.readFile ?? readFileQuietly,
@@ -97,7 +104,7 @@ export function resolveCopilotCliEntry(
   if (target === null) {
     return null;
   }
-  const entry = normalizeJavaScriptSuffix(target, resolved.fileExists);
+  const entry = normalizeJavaScriptSuffix(target, resolved.fileIdentity);
   if (entry === null) {
     return null;
   }
@@ -137,20 +144,24 @@ function linkedLoaderPath(
  *
  * Nothing tells the SDK to launch through Node other than that suffix, so a path spelled
  * any other way is handed to the process launcher as if it were an executable, which no
- * platform can start. Rewriting it only preserves which file is looked up on a filesystem
- * that resolves both spellings to the same one, so the rewritten path has to exist before
- * it is used; a filesystem that tells the two apart leaves the entry unresolved for the
+ * platform can start. Rewriting it only preserves which file is launched where the
+ * filesystem calls both spellings the same file, and existence does not say that: on a
+ * case-sensitive filesystem `copilot.JS` and `copilot.js` can both exist and be different
+ * programs, so an existence check would silently swap one for the other. The two names
+ * are compared by what the filesystem identifies them as instead, and a filesystem that
+ * tells them apart — or that identifies neither — leaves the entry unresolved for the
  * caller to report as the configuration failure it is.
  */
 function normalizeJavaScriptSuffix(
   cliPath: string,
-  fileExists: (filePath: string) => boolean,
+  fileIdentity: (filePath: string) => string | null,
 ): string | null {
   if (!MIXED_CASE_JS_SUFFIX.test(cliPath) || cliPath.endsWith(LOWERCASE_JS_SUFFIX)) {
     return cliPath;
   }
   const normalized = cliPath.slice(0, -LOWERCASE_JS_SUFFIX.length) + LOWERCASE_JS_SUFFIX;
-  return fileExists(normalized) ? normalized : null;
+  const identity = fileIdentity(cliPath);
+  return identity !== null && identity === fileIdentity(normalized) ? normalized : null;
 }
 
 export function isWindowsCliShim(cliPath: string): boolean {
@@ -250,6 +261,22 @@ function readFileQuietly(filePath: string): string | null {
 function realPathQuietly(filePath: string): string | null {
   try {
     return fs.realpathSync(filePath);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What the filesystem calls the file at this path: its device and inode, which two names
+ * for one file share and two names for different files do not.
+ *
+ * `realpath` cannot answer this. It resolves symlinks but leaves the spelling as given,
+ * so on macOS it returns two different paths for two names of one file.
+ */
+function fileIdentityQuietly(filePath: string): string | null {
+  try {
+    const stats = fs.statSync(filePath);
+    return `${stats.dev}:${stats.ino}`;
   } catch {
     return null;
   }

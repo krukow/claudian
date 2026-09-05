@@ -342,16 +342,36 @@ describe('resolveCopilotCliEntry', () => {
  * therefore handed to the process launcher as if it were an executable, which no platform
  * can start, while Claudian has already told Electron to behave as Node for it.
  *
- * Rewriting the suffix is only safe where the filesystem resolves it to the same file, so
- * the rewritten path has to exist before it is used, and a filesystem that tells the two
- * apart leaves the path unresolved for the caller to report as a configuration failure.
+ * Rewriting the suffix only preserves which file is launched where the filesystem calls
+ * both spellings the same file, and existence alone does not say that: on a case-
+ * sensitive filesystem `copilot.JS` and `copilot.js` can both exist and be different
+ * programs. The two names are compared by what the filesystem identifies them as, and
+ * anything else leaves the path unresolved for the caller to report as the configuration
+ * failure it is.
  */
 describe('resolveCopilotCliEntry with a JavaScript entry spelled in another case', () => {
   const MIXED_CASE_ENTRY = 'C:\\Users\\me\\AppData\\Roaming\\npm\\copilot.JS';
 
+  /** macOS and Windows: every spelling of a name leads to one file. */
+  function caseInsensitiveFilesystem() {
+    return {
+      fileExists: () => true,
+      fileIdentity: (filePath: string) => filePath.toLowerCase(),
+    };
+  }
+
+  /** Linux: a name is a name, so two spellings are two files unless one is absent. */
+  function caseSensitiveFilesystem(...present: readonly string[]) {
+    const files = new Set(present);
+    return {
+      fileExists: (filePath: string) => files.has(filePath),
+      fileIdentity: (filePath: string) => (files.has(filePath) ? filePath : null),
+    };
+  }
+
   it('spells the entry the way the SDK recognises it', () => {
     expect(resolveCopilotCliEntry(MIXED_CASE_ENTRY, {
-      fileExists: () => true,
+      ...caseInsensitiveFilesystem(),
       platform: 'win32',
       readFile: () => null,
     })).toBe('C:\\Users\\me\\AppData\\Roaming\\npm\\copilot.js');
@@ -359,15 +379,49 @@ describe('resolveCopilotCliEntry with a JavaScript entry spelled in another case
 
   it('rewrites only the suffix, leaving a mixed-case directory alone', () => {
     expect(resolveCopilotCliEntry('/opt/Copilot/NPM-Loader.Js', {
-      fileExists: () => true,
+      ...caseInsensitiveFilesystem(),
       platform: 'darwin',
       readFile: () => null,
     })).toBe('/opt/Copilot/NPM-Loader.js');
   });
 
-  it('leaves the entry unresolved when the filesystem tells the two names apart', () => {
+  it('leaves the entry unresolved when only the spelling given exists', () => {
     expect(resolveCopilotCliEntry('/opt/copilot/npm-loader.JS', {
-      fileExists: (filePath: string) => filePath.endsWith('.JS'),
+      ...caseSensitiveFilesystem('/opt/copilot/npm-loader.JS'),
+      platform: 'linux',
+      readFile: () => null,
+    })).toBeNull();
+  });
+
+  /**
+   * Both names exist and neither is the other: rewriting the suffix here would hand the
+   * SDK a different program than the one the settings named.
+   */
+  it('leaves the entry unresolved when both spellings are different files', () => {
+    expect(resolveCopilotCliEntry('/opt/copilot/npm-loader.JS', {
+      ...caseSensitiveFilesystem(
+        '/opt/copilot/npm-loader.JS',
+        '/opt/copilot/npm-loader.js',
+      ),
+      platform: 'linux',
+      readFile: () => null,
+    })).toBeNull();
+  });
+
+  it('rewrites the suffix when both spellings lead to one file', () => {
+    const linkedIdentity = 'inode:7';
+    expect(resolveCopilotCliEntry('/opt/copilot/npm-loader.JS', {
+      fileExists: () => true,
+      fileIdentity: () => linkedIdentity,
+      platform: 'linux',
+      readFile: () => null,
+    })).toBe('/opt/copilot/npm-loader.js');
+  });
+
+  it('leaves the entry unresolved when the filesystem cannot identify it', () => {
+    expect(resolveCopilotCliEntry('/opt/copilot/npm-loader.JS', {
+      fileExists: () => true,
+      fileIdentity: () => null,
       platform: 'linux',
       readFile: () => null,
     })).toBeNull();
@@ -375,7 +429,7 @@ describe('resolveCopilotCliEntry with a JavaScript entry spelled in another case
 
   it('resolves a launcher that names its entry in another case', () => {
     expect(resolveCopilotCliEntry('C:\\npm\\copilot.cmd', {
-      fileExists: () => true,
+      ...caseInsensitiveFilesystem(),
       platform: 'win32',
       readFile: () => '@ECHO off\r\n"%_prog%"  "%dp0%\\npm-loader.JS" %*',
     })).toBe('C:\\npm\\npm-loader.js');
@@ -384,6 +438,7 @@ describe('resolveCopilotCliEntry with a JavaScript entry spelled in another case
   it('leaves an already lowercase entry untouched', () => {
     expect(resolveCopilotCliEntry('/opt/copilot/npm-loader.js', {
       fileExists: () => false,
+      fileIdentity: () => null,
       platform: 'linux',
       readFile: () => null,
     })).toBe('/opt/copilot/npm-loader.js');
