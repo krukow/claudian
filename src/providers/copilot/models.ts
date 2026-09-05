@@ -170,9 +170,7 @@ export function resolveCopilotContextWindow(
   const rawModelId = decodeCopilotModelId(modelId);
   const customLimit = customContextLimits[modelId]
     ?? (rawModelId ? customContextLimits[rawModelId] : undefined);
-  return isPositiveFiniteNumber(customLimit)
-    ? customLimit
-    : COPILOT_CONTEXT_WINDOW_FALLBACK;
+  return readWholeTokenCount(customLimit) ?? COPILOT_CONTEXT_WINDOW_FALLBACK;
 }
 
 export function formatCopilotReasoningLabel(effort: CopilotReasoningEffort): string {
@@ -199,7 +197,7 @@ function normalizeCopilotDiscoveredModel(value: unknown): CopilotDiscoveredModel
     && reasoningEfforts.includes(declaredDefault)
     ? declaredDefault
     : undefined;
-  const contextWindow = readPositiveFiniteNumber(
+  const contextWindow = readWholeTokenCount(
     value.contextWindow ?? value.maxContextWindowTokens,
   );
   const description = readTrimmedString(value.description);
@@ -235,18 +233,27 @@ function normalizeReasoningEfforts(value: unknown): CopilotReasoningEffort[] {
   ));
 }
 
+/**
+ * A token count as whole tokens, or undefined when the value describes no count at all.
+ *
+ * Context windows arrive from the CLI catalog and from settings, and both are read as
+ * untrusted input. Validation happens after flooring rather than before it, because a
+ * fractional value is positive right up until it is floored: 0.4 tokens would pass a
+ * positive check and land as a window of zero, which every caller then divides a turn's
+ * budget by.
+ */
+function readWholeTokenCount(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return undefined;
+  }
+  const tokens = Math.floor(value);
+  return tokens >= 1 ? tokens : undefined;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 function readTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
-}
-
-function readPositiveFiniteNumber(value: unknown): number | undefined {
-  return isPositiveFiniteNumber(value) ? Math.floor(value) : undefined;
-}
-
-function isPositiveFiniteNumber(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }

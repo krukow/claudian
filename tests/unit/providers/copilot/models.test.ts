@@ -97,6 +97,21 @@ describe('normalizeCopilotDiscoveredModels', () => {
     expect(model.contextWindow).toBeUndefined();
   });
 
+  /**
+   * A context window is a token count, so it is read as whole tokens. A value below one
+   * whole token describes no window at all, and keeping it would leave every turn's
+   * budget divided by a window of zero rather than by the shared default.
+   */
+  it('ignores a context window that is not a whole token', () => {
+    for (const maxContextWindowTokens of [0.4, 0.999, -0.5]) {
+      const [model] = normalizeCopilotDiscoveredModels([
+        { id: 'gpt-5', maxContextWindowTokens },
+      ]);
+
+      expect(model.contextWindow).toBeUndefined();
+    }
+  });
+
   it('keeps the last entry when a model id repeats', () => {
     expect(normalizeCopilotDiscoveredModels([
       { id: 'gpt-5', name: 'First' },
@@ -198,6 +213,25 @@ describe('resolveCopilotContextWindow', () => {
   it('falls back to the shared default for an unknown model', () => {
     expect(resolveCopilotContextWindow('copilot/unknown', models))
       .toBe(COPILOT_CONTEXT_WINDOW_FALLBACK);
+  });
+
+  /**
+   * Custom limits are typed into settings, so they are read as whole tokens on the way
+   * out. A limit below one whole token names no window the caller could divide by, and
+   * the shared default is a usable answer where that value is not.
+   */
+  it('falls back to the shared default for a limit below one whole token', () => {
+    for (const limit of [0.4, 0.999, 0, -8]) {
+      expect(resolveCopilotContextWindow('copilot/no-window', models, {
+        'copilot/no-window': limit,
+      })).toBe(COPILOT_CONTEXT_WINDOW_FALLBACK);
+    }
+  });
+
+  it('reads a fractional custom limit as whole tokens', () => {
+    expect(resolveCopilotContextWindow('copilot/no-window', models, {
+      'copilot/no-window': 64_000.7,
+    })).toBe(64_000);
   });
 });
 
