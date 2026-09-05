@@ -2059,3 +2059,46 @@ describe('ConversationRepository deletion, fork, and rewind persistence', () => 
     })).rejects.toThrow('Conversation ID is permanently deleted');
   });
 });
+
+/**
+ * The Copilot provider does not read the CLI's private session store, so the disposition
+ * it returns is decided entirely from the reference the conversation holds and the session
+ * the runtime says it lost. The repository persists exactly what that decision changed.
+ */
+describe('ConversationRepository missing Copilot session persistence', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  function createCopilotConversation(sessionId: string | null): Conversation {
+    return { ...createConversation('copilot-conversation'), providerId: 'copilot', sessionId };
+  }
+
+  it('persists the dropped reference when the runtime lost the named session', async () => {
+    const conversation = createCopilotConversation('copilot-session-1');
+    const { repository, persistence } = createRepository(conversation);
+
+    await expect(repository.handleMissingProviderSession(
+      conversation.id,
+      'copilot-session-1',
+    )).resolves.toBe('reset');
+
+    expect(conversation.sessionId).toBeNull();
+    expect(persistence.saveMetadata).toHaveBeenCalledWith(
+      expect.objectContaining({ id: conversation.id, sessionId: null }),
+    );
+  });
+
+  it('writes nothing when the runtime names a session the conversation left behind', async () => {
+    const conversation = createCopilotConversation('copilot-session-2');
+    const { repository, persistence } = createRepository(conversation);
+
+    await expect(repository.handleMissingProviderSession(
+      conversation.id,
+      'copilot-session-1',
+    )).resolves.toBe('preserved');
+
+    expect(conversation.sessionId).toBe('copilot-session-2');
+    expect(persistence.saveMetadata).not.toHaveBeenCalled();
+  });
+});
