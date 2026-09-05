@@ -103,6 +103,33 @@ describe('toCopilotRuntimeError', () => {
   });
 });
 
+/**
+ * The message `@github/copilot-sdk` throws from `CopilotClient.start` when the path it
+ * was handed names nothing, quoted exactly from the SDK.
+ *
+ * Claudian resolves the CLI before every start, so this is what a path that stopped
+ * naming a binary in between — an uninstall, an upgrade that moved it, a removable
+ * volume — looks like. It carries no `ENOENT` and nothing else the categorizer reads, so
+ * without recognizing it the SDK's own way of saying "wrong CLI path" was reported as a
+ * transport failure the user was invited to retry, and the CLI cannot be reinstalled by
+ * sending the turn again.
+ */
+describe('toCopilotRuntimeError for the SDK missing-CLI failure', () => {
+  it.each([
+    '/opt/homebrew/bin/copilot',
+    'C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\@github\\copilot\\npm-loader.js',
+  ])('reports the path %s as unrecoverable configuration', (cliPath) => {
+    const error = toCopilotRuntimeError(
+      new Error(`Copilot CLI not found at ${cliPath}. Ensure @github/copilot is installed.`),
+      'transport',
+    );
+
+    expect(error.category).toBe('configuration');
+    expect(error.recoverable).toBe(false);
+    expect(error.nativeReset).toBe('none');
+  });
+});
+
 describe('toCopilotSendError', () => {
   it('reports a turn that never reached idle as an actionable transport failure', () => {
     const error = toCopilotSendError(

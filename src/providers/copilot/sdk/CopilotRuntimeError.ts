@@ -105,6 +105,19 @@ const CONFIGURATION_PATTERN =
 const SEND_TIMEOUT_PATTERN = /^Timeout after \d+ms waiting for session\.idle$/;
 
 /**
+ * The shape `CopilotClient.start` throws with when the path it was handed names nothing.
+ *
+ * Claudian resolves the CLI before every start, so this is a path that stopped naming a
+ * binary in between, which the user fixes by reinstalling or by pointing settings
+ * somewhere else. The SDK raises it as a plain `Error` carrying none of the keywords the
+ * categorizer reads, so it is matched by its whole shape: a message that only mentioned
+ * the CLI would say nothing about what failed, while this one is the SDK's own way of
+ * saying the configured path is wrong.
+ */
+const CLI_PATH_MISSING_PATTERN =
+  /^Copilot CLI not found at .+\. Ensure @github\/copilot is installed\.$/;
+
+/**
  * Maps a `send` failure onto the provider contract.
  *
  * A timeout is reported as a transport failure with an actionable message: the CLI is
@@ -158,7 +171,9 @@ export function describeError(error: unknown): string {
 function categorizeMessage(message: string): ProviderExecutionErrorCategory | null {
   if (MISSING_SESSION_PATTERN.test(message)) return 'provider-session-missing';
   if (AUTHENTICATION_PATTERN.test(message)) return 'authentication';
-  if (CONFIGURATION_PATTERN.test(message)) return 'configuration';
+  if (CONFIGURATION_PATTERN.test(message) || CLI_PATH_MISSING_PATTERN.test(message)) {
+    return 'configuration';
+  }
   if (PROCESS_EXIT_PATTERN.test(message)) return 'process-exited';
   if (TRANSPORT_PATTERN.test(message)) return 'transport';
   return null;
