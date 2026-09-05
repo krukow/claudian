@@ -1,4 +1,5 @@
 import { TEST_CODEX_CATALOG } from '@test/helpers/codexModels';
+import { createFakeOwnerDocument, type FakeOwnerDocument } from '@test/helpers/FakeOwnerDocument';
 
 import { getCodexProviderSettings } from '@/providers/codex/settings';
 import { renderCodexModelPicker } from '@/providers/codex/ui/CodexModelPicker';
@@ -43,6 +44,7 @@ interface FakeElement {
   classes: Set<string>;
   disabled: boolean;
   open: boolean;
+  ownerDocument: FakeOwnerDocument;
   parent: FakeElement | null;
   placeholder: string;
   tag: string;
@@ -76,6 +78,7 @@ function createElement(
     classes,
     disabled: false,
     open: false,
+    ownerDocument: createFakeOwnerDocument(),
     parent,
     placeholder: '',
     tag,

@@ -1,5 +1,7 @@
 import { Setting } from 'obsidian';
 
+import { scheduleAnimationFrame } from '@/utils/animationFrame';
+
 const ALL_PROVIDERS_KEY = 'all';
 const VISIBLE_MODELS_DESCRIPTION = 'Choose which models are available in the chat selector. Drag to reorder them; the provider uses the first currently usable model as its default. Select at least one model to use this provider.';
 
@@ -78,7 +80,12 @@ export function renderProviderModelPicker(
   let providerFilter = ALL_PROVIDERS_KEY;
   let loadingCatalog = false;
   let catalogLoadFailed = false;
+  let catalogLoadAttempted = false;
   let draggedModelId: string | null = null;
+
+  const statusEl = pickerEl.createDiv({ cls: 'claudian-provider-model-picker-status' });
+  statusEl.setAttribute('role', 'status');
+  statusEl.setAttribute('aria-live', 'polite');
 
   const summaryEl = pickerEl.createDiv({ cls: 'claudian-provider-model-picker-summary' });
   const selectedEl = pickerEl.createDiv({ cls: 'claudian-provider-model-picker-selected' });
@@ -114,6 +121,7 @@ export function renderProviderModelPicker(
   const providerSelectEl = controlsEl.createEl('select', {
     cls: 'claudian-provider-model-picker-provider',
   });
+  providerSelectEl.setAttribute('aria-label', 'Filter by provider');
   providerSelectEl.addEventListener('change', () => {
     providerFilter = providerSelectEl.value;
     renderList();
@@ -499,7 +507,32 @@ export function renderProviderModelPicker(
     }
   };
 
+  const statusMessage = (state: ProviderModelPickerState): string => {
+    if (loadingCatalog) {
+      return options.loadingCatalogText;
+    }
+    if (catalogLoadFailed) {
+      return options.failedCatalogText;
+    }
+    if (!catalogLoadAttempted) {
+      return '';
+    }
+    if (state.discoveredCount <= 0) {
+      return options.emptyCatalogText;
+    }
+    return `Loaded ${state.discoveredCount} ${state.discoveredCount === 1 ? 'model' : 'models'}.`;
+  };
+
+  const renderStatus = (): void => {
+    const message = statusMessage(options.getState());
+    if (statusEl.textContent !== message) {
+      statusEl.setText(message);
+    }
+  };
+
   const renderAll = (): void => {
+    catalogEl.setAttribute('aria-busy', String(loadingCatalog));
+    renderStatus();
     renderSummary();
     renderSelected();
     renderProviderSelect();
@@ -522,11 +555,13 @@ export function renderProviderModelPicker(
     catalogLoadFailed = false;
     renderAll();
     try {
+      await waitForNextPaint(pickerEl);
       catalogLoadFailed = await options.loadCatalog(force) === 'failed';
     } catch {
       catalogLoadFailed = true;
     } finally {
       loadingCatalog = false;
+      catalogLoadAttempted = true;
       renderAll();
     }
   };
@@ -541,4 +576,18 @@ export function renderProviderModelPicker(
     void loadCatalog(false);
   }
   return { refresh: renderAll };
+}
+
+/**
+ * Resolves after two animation frames so the loading state paints before discovery starts.
+ * A single frame runs before paint, letting an immediately-resolving load erase the state
+ * unseen.
+ */
+function waitForNextPaint(element: HTMLElement): Promise<void> {
+  const ownerWindow = element.ownerDocument.defaultView;
+  return new Promise(resolve => {
+    scheduleAnimationFrame(() => {
+      scheduleAnimationFrame(() => resolve(), ownerWindow);
+    }, ownerWindow);
+  });
 }
