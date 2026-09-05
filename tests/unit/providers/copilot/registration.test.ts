@@ -130,24 +130,18 @@ describe('copilotProviderRegistration', () => {
     }) } as never)).toBe('copilot/gpt-5');
     expect(resolve?.({ settings: withEnabledModels(['gpt-5'], {
       titleGenerationModel: 'grok/grok-4',
-    }) } as never)).toBe('copilot/gpt-5');
+    }) } as never)).toBeUndefined();
   });
 
-  /**
-   * An empty selection is the Auto setting, and Auto routes the title turn to whichever
-   * provider is answering. Copilot turns need a model named explicitly, so Auto has to
-   * resolve to one: the first model the user enabled, which is the same one the chat
-   * model selector defaults to.
-   */
-  it('titles with the first enabled model when the selection is Auto', () => {
+  it('leaves Auto model resolution to execution', () => {
     const resolve = copilotProviderRegistration.resolveTitleGenerationModel;
     const settings = withEnabledModels(['gpt-5-mini', 'gpt-5'], {
       titleGenerationModel: '',
     });
 
-    expect(resolve?.({ settings } as never)).toBe('copilot/gpt-5-mini');
+    expect(resolve?.({ settings } as never)).toBeUndefined();
     expect(resolve?.({ settings: withEnabledModels(['gpt-5-mini', 'gpt-5'], {}) } as never))
-      .toBe('copilot/gpt-5-mini');
+      .toBeUndefined();
   });
 
   /**
@@ -164,13 +158,13 @@ describe('copilotProviderRegistration', () => {
   });
 
   /** A selection the user has since hidden is not a model a turn may still run with. */
-  it('falls back to an enabled model when the selection was disabled', () => {
+  it('does not forward a disabled title model', () => {
     const resolve = copilotProviderRegistration.resolveTitleGenerationModel;
     const settings = withEnabledModels(['gpt-5'], {
       titleGenerationModel: 'copilot/gpt-5-mini',
     });
 
-    expect(resolve?.({ settings } as never)).toBe('copilot/gpt-5');
+    expect(resolve?.({ settings } as never)).toBeUndefined();
   });
 
   it('exposes no subagent adapter while subagents are unsupported', () => {

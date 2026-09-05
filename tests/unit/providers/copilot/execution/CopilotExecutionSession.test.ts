@@ -1,3 +1,4 @@
+import { AuxiliarySessionController } from '@/core/auxiliary/AuxiliarySessionController';
 import type {
   ProviderApprovalInteractionRequest,
   ProviderExecutionEvent,
@@ -7,6 +8,7 @@ import type {
   ProviderQuestionInteractionRequest,
   ProviderSessionConfig,
 } from '@/core/execution';
+import { ProviderExecutionLifecycleRegistry } from '@/core/execution';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
 import { CopilotExecutionBackend } from '@/providers/copilot/execution/CopilotExecutionBackend';
 import {
@@ -141,6 +143,76 @@ describe('CopilotExecutionBackend', () => {
 });
 
 describe('CopilotExecutionSession turn lifecycle', () => {
+  it.each(['inline-edit', 'instruction'] as const)(
+    'uses the first enabled model for %s without a model override',
+    async (owner) => {
+      const host = createHost();
+      updateCopilotProviderSettings(host.settings, {
+        discoveredModels: ['gpt-5', 'gpt-5-mini'].map(rawId => ({
+          displayName: rawId,
+          rawId,
+          reasoningEfforts: [],
+          supportsReasoning: false,
+          supportsVision: false,
+        })),
+        visibleModels: ['gpt-5-mini', 'gpt-5'],
+      });
+      const runtime = createRuntime((sdkSession) => {
+        sdkSession.sendBehavior = async () => {
+          sdkSession.emit(sdkEvent('assistant.message_delta', {
+            deltaContent: 'Edited note.',
+            messageId: 'message-1',
+          }));
+        };
+      });
+      const controller = new AuxiliarySessionController({
+        backend: new CopilotExecutionBackend(host, { runtime }),
+        interactionPort: createSessionConfig().interactionPort,
+        lifecycleRegistry: new ProviderExecutionLifecycleRegistry(),
+        vaultWorkingDirectory: VAULT_PATH,
+      }, owner, { kind: 'read-only' });
+      await controller.startRoot();
+
+      try {
+        const result = await controller.execute({
+          prompt: 'Edit this note.',
+          systemPrompt: 'Return the edited note.',
+        });
+
+        expect(result).toBe('Edited note.');
+        expect(runtime.lastClient?.lastSession?.config.model).toBe('gpt-5-mini');
+      } finally {
+        await controller.dispose();
+      }
+    },
+  );
+
+  it('reports usage against the resolved default model', async () => {
+    const runtime = createRuntime((sdkSession) => {
+      sdkSession.sendBehavior = async () => {
+        sdkSession.emit(sdkEvent('assistant.usage', {
+          cacheReadTokens: 500,
+          inputTokens: 2000,
+          model: 'gpt-5',
+        }));
+      };
+    });
+    const session = new CopilotExecutionBackend(createHost(), { runtime })
+      .createSession(createSessionConfig());
+
+    try {
+      const events = await collect(session.execute(createRequest({
+        configuration: { systemInstructions: { kind: 'provider-default' } },
+      })).events);
+
+      expect(events.find(event => event.type === 'usage_updated')).toMatchObject({
+        usage: { contextTokens: 2500, contextWindow: 200_000, percentage: 1.25 },
+      });
+    } finally {
+      await session.dispose();
+    }
+  });
+
   it('streams a turn from start to completion', async () => {
     const runtime = createRuntime((sdkSession) => {
       sdkSession.sendBehavior = async () => {
@@ -296,8 +368,10 @@ describe('CopilotExecutionSession turn lifecycle', () => {
   });
 
   it('fails closed when no enabled Copilot model is selected', async () => {
+    const host = createHost();
+    updateCopilotProviderSettings(host.settings, { visibleModels: [] });
     const runtime = createRuntime();
-    const session = new CopilotExecutionBackend(createHost(), { runtime })
+    const session = new CopilotExecutionBackend(host, { runtime })
       .createSession(createSessionConfig());
 
     const events = turnFlow(await collect(session.execute(createRequest({

@@ -45,7 +45,7 @@ mode, images, subagents, provider commands, skills, plugins, and MCP are absent,
 | `execution/CopilotExecutionSession` | The client, the live native session, the lease each turn leaves behind, and every fence between them |
 | `history/CopilotConversationHistoryService` | Which native session a conversation refers to, and what a runtime that lost it changes |
 | `capabilities.ts` | What the provider advertises, and therefore what the UI offers |
-| `registration.ts` | The provider's place in the built-in catalog, its environment key claim, and the model a title turn runs with |
+| `registration.ts` | The provider's place in the built-in catalog, its environment key claim, and explicit title-model overrides |
 | `ui/CopilotChatUIConfig` | The models, reasoning options, and context windows the chat surface reads |
 | `ui/CopilotSettingsTab` | The Copilot settings surface, composed from shared settings helpers |
 
@@ -366,11 +366,7 @@ mode, images, subagents, provider commands, skills, plugins, and MCP are absent,
 - Input the provider cannot carry is reported on the turn rather than dropped. An image
   reaches nothing — the CLI receives a text prompt and `capabilities.ts` advertises no
   image support — so the turn says which attachments were not sent.
-- The title turn resolves its own model, because a Copilot turn names one explicitly and
-  the Auto setting names none. A Copilot-qualified selection stays a Copilot selection even
-  when the user has since hidden it: routing it elsewhere would title the conversation with
-  a model that provider owns none of. With nothing enabled the turn is left without a model
-  rather than given one the user never turned on.
+- Execution resolves an omitted model to the first enabled model before constructing the run, so native calls and usage share one selection. Without an enabled model it remains a configuration error, never a request for the CLI's default. Registration forwards only enabled title-model overrides; a stale Copilot-qualified title selection stays routed to Copilot and uses execution's default resolution.
 
 ## Model and Settings Rules
 

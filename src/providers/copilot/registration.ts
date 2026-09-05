@@ -31,25 +31,14 @@ export const copilotProviderRegistration: ProviderModule = {
   capabilities: COPILOT_PROVIDER_CAPABILITIES,
   chatUIConfig: copilotChatUIConfig,
   createExecutionBackend: plugin => new CopilotExecutionBackend(plugin),
-  /**
-   * The model a title turn runs with.
-   *
-   * A Copilot turn names its model explicitly, so an empty selection — the Auto setting —
-   * has to resolve to one or auto-titling can never run. It resolves to the model the
-   * chat selector would default to: the first one the user enabled. A selection the user
-   * has since hidden, or one another provider owns, is not a model a turn may run with
-   * either, so it resolves the same way. With nothing enabled there is no provider
-   * default to reach for, and the turn is left without a model rather than given one the
-   * user never turned on.
-   */
+  /** Forward an enabled title override; execution owns default model resolution. */
   resolveTitleGenerationModel: (plugin) => {
     const selection = typeof plugin.settings.titleGenerationModel === 'string'
       ? plugin.settings.titleGenerationModel.trim()
       : '';
-    if (selection && copilotChatUIConfig.ownsModel(selection, plugin.settings)) {
-      return selection;
-    }
-    return copilotChatUIConfig.getDefaultModel?.(plugin.settings) ?? undefined;
+    return selection && copilotChatUIConfig.ownsModel(selection, plugin.settings)
+      ? selection
+      : undefined;
   },
   displayName: 'Copilot',
   environmentKeyPatterns: [

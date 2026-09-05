@@ -13,7 +13,11 @@ import type {
 } from '../../../core/execution';
 import type { ProviderHost } from '../../../core/providers/ProviderHost';
 import type { CopilotReasoningEffort } from '../models';
-import { decodeCopilotModelId, isCopilotReasoningEffort } from '../models';
+import {
+  decodeCopilotModelId,
+  encodeCopilotModelId,
+  isCopilotReasoningEffort,
+} from '../models';
 import {
   type CopilotClientFactory,
   type CopilotClientIdentity,
@@ -34,7 +38,7 @@ import type {
   CopilotSdkSession,
   CopilotSdkSessionConfig,
 } from '../sdk/CopilotSdkPort';
-import { getCopilotProviderSettings } from '../settings';
+import { getCopilotProviderSettings, getEnabledCopilotModels } from '../settings';
 import { CopilotEventNormalizer } from './CopilotEventNormalizer';
 import type { CopilotExecutionEventDraft } from './CopilotExecutionEventDraft';
 import { CopilotInteractionHandler } from './CopilotInteractionHandler';
@@ -208,10 +212,11 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
     });
   }
 
-  execute(request: ProviderExecutionRequest): ProviderExecutionRun {
+  execute(incomingRequest: ProviderExecutionRequest): ProviderExecutionRun {
     if (this.disposed) throw new Error('Copilot execution session is disposed.');
     if (this.active) throw new Error('Copilot execution session is already executing.');
 
+    const request = this.resolveRequestModel(incomingRequest);
     const run = new CopilotExecutionRunState(
       randomUUID(),
       randomUUID(),
@@ -395,6 +400,23 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
       return;
     }
     this.updateSnapshot('idle');
+  }
+
+  private resolveRequestModel(request: ProviderExecutionRequest): ProviderExecutionRequest {
+    if (request.configuration.model?.trim()) {
+      return request;
+    }
+    const [model] = getEnabledCopilotModels(getCopilotProviderSettings(this.host.settings));
+    if (!model) {
+      return request;
+    }
+    return {
+      ...request,
+      configuration: {
+        ...request.configuration,
+        model: encodeCopilotModelId(model.rawId),
+      },
+    };
   }
 
   /**

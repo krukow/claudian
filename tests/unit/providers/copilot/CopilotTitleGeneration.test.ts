@@ -83,11 +83,7 @@ async function generateTitle(settings: Record<string, unknown>): Promise<{
   return { client, result };
 }
 
-/**
- * A Copilot turn names its model explicitly, so the title generation the registration
- * feeds has to name one too. Auto — an empty selection — is the setting a fresh vault
- * carries, and it has to reach the CLI as the model the user actually enabled.
- */
+/** Auto must reach the CLI as an enabled model, resolved by the execution boundary. */
 describe('Copilot title generation', () => {
   it('titles a conversation with the first enabled model when the setting is Auto',
     async () => {
