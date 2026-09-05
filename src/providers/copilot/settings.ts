@@ -73,6 +73,14 @@ export function getCopilotProviderSettings(
   };
 }
 
+/**
+ * Writes the runtime and model foundation's own fields, and only those.
+ *
+ * The provider's persisted configuration is one object shared with every layer built on
+ * this one, so it is merged into rather than replaced: a field this module does not know
+ * about belongs to a layer that does, or to a newer Claudian than the vault is currently
+ * opened with, and replacing the object would discard it.
+ */
 export function updateCopilotProviderSettings(
   settings: Record<string, unknown>,
   updates: Partial<CopilotProviderSettings>,
@@ -126,7 +134,10 @@ export function updateCopilotProviderSettings(
     ),
   };
 
-  setProviderConfig(settings, 'copilot', next as unknown as Record<string, unknown>);
+  setProviderConfig(settings, 'copilot', {
+    ...getProviderConfig(settings, 'copilot'),
+    ...next,
+  });
   return next;
 }
 

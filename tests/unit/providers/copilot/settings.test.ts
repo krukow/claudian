@@ -1,3 +1,7 @@
+import {
+  getProviderConfig,
+  setProviderConfig,
+} from '@/core/providers/providerConfig';
 import type { CopilotDiscoveredModel } from '@/providers/copilot/models';
 import {
   DEFAULT_COPILOT_PROVIDER_SETTINGS,
@@ -99,6 +103,41 @@ describe('getCopilotProviderSettings', () => {
 
     expect(providerSettings.visibleModels).toEqual(['claude-sonnet-4.5']);
     expect(providerSettings.modelAliases).toEqual({ 'claude-sonnet-4.5': 'Sonnet' });
+  });
+});
+
+/**
+ * Only the runtime and model foundation is written through this module, while the
+ * provider's persisted configuration is one object shared with every layer built on it.
+ * A write that replaced that object would discard whatever another layer — or a newer
+ * Claudian than the one the vault is opened with — had persisted beside these fields.
+ */
+describe('updateCopilotProviderSettings against configuration it does not own', () => {
+  it('keeps a field it does not know about', () => {
+    const settings: Record<string, unknown> = {};
+    setProviderConfig(settings, 'copilot', { permissionMode: 'ask' });
+
+    updateCopilotProviderSettings(settings, { enabled: true });
+
+    expect(getProviderConfig(settings, 'copilot')).toMatchObject({
+      enabled: true,
+      permissionMode: 'ask',
+    });
+  });
+
+  it('writes its own fields over the persisted ones', () => {
+    const settings: Record<string, unknown> = {};
+    setProviderConfig(settings, 'copilot', {
+      environmentVariables: 'LANG=C',
+      permissionMode: 'ask',
+    });
+
+    updateCopilotProviderSettings(settings, { environmentVariables: 'LANG=en_US.UTF-8' });
+
+    expect(getProviderConfig(settings, 'copilot')).toMatchObject({
+      environmentVariables: 'LANG=en_US.UTF-8',
+      permissionMode: 'ask',
+    });
   });
 });
 
