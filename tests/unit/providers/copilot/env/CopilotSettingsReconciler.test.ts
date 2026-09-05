@@ -3,10 +3,12 @@ import {
   computeCopilotEnvironmentHash,
   copilotSettingsReconciler,
 } from '@/providers/copilot/env/CopilotSettingsReconciler';
+import { buildCopilotRuntimeEnvironment } from '@/providers/copilot/runtime/CopilotRuntimeEnvironment';
 import {
   getCopilotProviderSettings,
   updateCopilotProviderSettings,
 } from '@/providers/copilot/settings';
+import { parseEnvironmentVariables } from '@/utils/env';
 
 function createConversation(overrides: Partial<Conversation> = {}): Conversation {
   return {
@@ -56,9 +58,58 @@ describe('computeCopilotEnvironmentHash', () => {
     const settings = enabledSettings();
     const before = computeCopilotEnvironmentHash(settings);
 
-    updateCopilotProviderSettings(settings, { environmentVariables: 'COPILOT_HOME=/tmp/home' });
+    updateCopilotProviderSettings(settings, { environmentVariables: 'LANG=en_US.UTF-8' });
 
     expect(computeCopilotEnvironmentHash(settings)).not.toBe(before);
+  });
+});
+
+/**
+ * The fingerprint says what runtime a session and a catalog belong to, so it has to be
+ * taken from the environment the CLI is actually handed rather than from the text it was
+ * written in. `buildCopilotRuntimeEnvironment` resolves configured entries without regard
+ * to case and lets the last one win, which is how Windows reads them, so two texts that
+ * differ only in the order of two spellings of one variable start two different runtimes.
+ */
+describe('computeCopilotEnvironmentHash against the environment the CLI receives', () => {
+  const LOWERCASE_FIRST = 'lang=en_US.UTF-8\nLANG=C';
+  const UPPERCASE_FIRST = 'LANG=C\nlang=en_US.UTF-8';
+
+  function environmentOf(environmentVariables: string): Record<string, string> {
+    return buildCopilotRuntimeEnvironment({
+      baseDirectory: '/state/claudian/copilot/vault',
+      cliPath: '/opt/copilot/bin/copilot',
+      processEnvironment: { PATH: '/usr/bin' },
+      providerEnvironment: parseEnvironmentVariables(environmentVariables),
+      trustedPath: '/opt/copilot/bin:/usr/bin',
+    });
+  }
+
+  function fingerprintOf(environmentVariables: string): string {
+    const settings = enabledSettings();
+    updateCopilotProviderSettings(settings, { environmentVariables });
+    return computeCopilotEnvironmentHash(settings);
+  }
+
+  it('separates orderings that start different runtimes', () => {
+    expect(environmentOf(LOWERCASE_FIRST).LANG).not.toBe(environmentOf(UPPERCASE_FIRST).LANG);
+    expect(fingerprintOf(LOWERCASE_FIRST)).not.toBe(fingerprintOf(UPPERCASE_FIRST));
+  });
+
+  it('gives one identity to the spellings that start one runtime', () => {
+    expect(environmentOf('lang=en_US.UTF-8').LANG)
+      .toBe(environmentOf('LANG=en_US.UTF-8').LANG);
+    expect(fingerprintOf('lang=en_US.UTF-8')).toBe(fingerprintOf('LANG=en_US.UTF-8'));
+  });
+
+  /**
+   * An entry the allow-list does not name never reaches the CLI, so it describes no
+   * runtime the catalog could belong to. Moving the fingerprint for it would discard a
+   * catalog the user would then have to rediscover for nothing.
+   */
+  it('ignores an entry the CLI never receives', () => {
+    expect(environmentOf('COPILOT_HOME=/tmp/home')).toEqual(environmentOf(''));
+    expect(fingerprintOf('COPILOT_HOME=/tmp/home')).toBe(fingerprintOf(''));
   });
 });
 

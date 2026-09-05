@@ -5,26 +5,36 @@ import type { ProviderSettingsReconciler } from '../../../core/providers/types';
 import type { Conversation } from '../../../core/types';
 import { getHostnameKey, parseEnvironmentVariables } from '../../../utils/env';
 import { decodeCopilotModelId, encodeCopilotModelId } from '../models';
+import { resolveCopilotConfigurableEnvironment } from '../runtime/CopilotRuntimeEnvironment';
 import { getCopilotProviderSettings, updateCopilotProviderSettings } from '../settings';
 
 /**
  * Inputs that change which Copilot account, CLI, or data directory a session binds to.
  * A change to any of them invalidates the discovered catalog and every live session.
+ *
+ * The environment reaches the fingerprint resolved rather than as the text it was typed
+ * in, because the runtime it names is started from the resolved form: the allow-list
+ * decides which entries exist, case decides which of two spellings is the same variable,
+ * and order decides which of them wins. Fingerprinting the text instead would give one
+ * identity to two settings that start different CLIs, and two identities to settings that
+ * start the same one.
  */
 export function computeCopilotEnvironmentHash(settings: Record<string, unknown>): string {
   const providerSettings = getCopilotProviderSettings(settings);
-  const environmentText = getRuntimeEnvironmentText(settings, 'copilot');
   const cliPathInputs = createCliPathFingerprintInputs(
     providerSettings.cliPathsByHost[getHostnameKey()],
     providerSettings.cliPath,
   );
-  const environmentKeys = Object.keys(parseEnvironmentVariables(environmentText)).sort(
-    (left, right) => left.localeCompare(right),
+  const configuredEnvironment = resolveCopilotConfigurableEnvironment(
+    parseEnvironmentVariables(getRuntimeEnvironmentText(settings, 'copilot')),
   );
   return createRuntimeInputFingerprint({
-    additionalInputs: cliPathInputs,
-    environmentKeys,
-    environmentText,
+    additionalInputs: {
+      ...cliPathInputs,
+      configuredEnvironment: JSON.stringify(Object.entries(configuredEnvironment)),
+    },
+    environmentKeys: [],
+    environmentText: '',
   });
 }
 

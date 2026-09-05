@@ -133,7 +133,7 @@ describe('createCopilotWorkspaceServices.refreshModelCatalog', () => {
     const services = createServices(host, [{ kind: 'loaded', models: [GPT_5] }]);
 
     await services.refreshModelCatalog();
-    updateCopilotProviderSettings(settings, { environmentVariables: 'HTTPS_PROXY=http://p' });
+    updateCopilotProviderSettings(settings, { environmentVariables: 'LANG=en_US.UTF-8' });
 
     expect((await services.refreshModelCatalog()).changed).toBe(true);
     expect(getCopilotProviderSettings(settings).environmentHash)
@@ -162,7 +162,7 @@ describe('createCopilotWorkspaceServices.refreshModelCatalog', () => {
   it.each<[string, (settings: Record<string, unknown>) => void]>([
     ['the environment changed', (settings) => {
       updateCopilotProviderSettings(settings, {
-        environmentVariables: 'HTTPS_PROXY=http://proxy:8080',
+        environmentVariables: 'LANG=en_US.UTF-8',
       });
     }],
     ['the CLI path changed', (settings) => {

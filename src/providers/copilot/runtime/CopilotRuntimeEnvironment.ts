@@ -93,6 +93,45 @@ function resolveConfigurableEnvironmentKey(key: string): string | undefined {
   return CONFIGURABLE_ENVIRONMENT_KEYS_BY_LOWERCASE.get(key.trim().toLowerCase());
 }
 
+/**
+ * The configured entries exactly as the CLI receives them: only the keys the allow-list
+ * names, each under the allow-list's own spelling, the last of two spellings winning, and
+ * ordered by key so the same environment always reads the same way.
+ *
+ * Everything that has to agree on what a configured environment is goes through here.
+ * Resolution is lossy on purpose — `lang` and `LANG` are one variable to the CLI, and an
+ * entry the allow-list does not name is not one at all — so a caller that read the
+ * settings text instead would disagree with the process that was started. The
+ * environment fingerprint is such a caller: it identifies the runtime a session and a
+ * discovered catalog belong to, and two texts that resolve to one environment name one
+ * runtime while two that resolve differently name two.
+ */
+export function resolveCopilotConfigurableEnvironment(
+  providerEnvironment: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const resolved = new Map<string, string>();
+  for (const [key, value] of Object.entries(providerEnvironment)) {
+    const configurableKey = resolveConfigurableEnvironmentKey(key);
+    if (configurableKey && typeof value === 'string') {
+      resolved.set(configurableKey, value);
+    }
+  }
+  return Object.fromEntries(
+    [...resolved].sort(([left], [right]) => compareCodeUnits(left, right)),
+  );
+}
+
+/**
+ * Orders keys by code unit rather than by `localeCompare`, so the order does not depend
+ * on the collation the host happens to ship.
+ */
+function compareCodeUnits(left: string, right: string): number {
+  if (left === right) {
+    return 0;
+  }
+  return left < right ? -1 : 1;
+}
+
 export interface CopilotRuntimeEnvironmentInput {
   /** Absolute `COPILOT_HOME` for this vault. */
   readonly baseDirectory: string;
@@ -156,11 +195,10 @@ export function buildCopilotRuntimeEnvironment(
     }
   }
 
-  for (const [key, value] of Object.entries(input.providerEnvironment)) {
-    const configurableKey = resolveConfigurableEnvironmentKey(key);
-    if (configurableKey && typeof value === 'string') {
-      environment[configurableKey] = value;
-    }
+  for (const [key, value] of Object.entries(
+    resolveCopilotConfigurableEnvironment(input.providerEnvironment),
+  )) {
+    environment[key] = value;
   }
 
   environment.COPILOT_HOME = input.baseDirectory;
