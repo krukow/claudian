@@ -11,6 +11,7 @@
     "build:css": "node scripts/build-css.mjs",
     "dev": "npm run build:css && node esbuild.config.mjs",
     "build": "node scripts/build.mjs production",
+    "check:copilot-keychain": "node scripts/run-jest.js tests/integration/providers/copilot/CopilotSdkRuntime.keychain.smoke.test.ts",
     "check:lockfile": "bun install --frozen-lockfile --ignore-scripts",
     "check:open-handles": "node scripts/check-open-handles.mjs",
     "check:performance": "node scripts/check-startup-performance.mjs",

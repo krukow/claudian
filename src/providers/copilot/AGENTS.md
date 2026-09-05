@@ -198,7 +198,13 @@ not what a later layer will do with them.
   accepting a token key would be offering to keep one. Nothing here falls back to the `gh`
   CLI either: `gh` may happen to be on the host's PATH and answer for the CLI, but it is
   not what Claudian promises, and a fix that relied on it would leave every host without
-  it signed out.
+  it signed out. `npm run check:copilot-keychain` proves that against a real CLI with
+  every `gh` directory removed from the PATH the CLI is handed, so an authenticated answer
+  can only have come out of the keychain. It runs only when
+  `CLAUDIAN_COPILOT_KEYCHAIN_SMOKE_HOME` names a `COPILOT_HOME` that has been signed in
+  to, and is skipped otherwise, so no automated run depends on a machine being signed in.
+  Run it when the SDK, the client options, or the CLI moves: it is the only check that
+  sees a keychain the SDK boundary cannot.
 - `COPILOT_HOME` is a per-vault directory under the OS application-state location, keyed
   by a hash of the vault path. Copilot session state is agent data, not vault content, so
   it must never live under the vault — including under `.claudian/`.
