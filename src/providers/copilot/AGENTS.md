@@ -23,7 +23,7 @@ not what a later layer will do with them.
 
 | Component | Owns |
 | --- | --- |
-| `sdk/CopilotSdkRuntime` | SDK construction, the SDK defaulting mode, the start, session-opening, and shutdown bounds, and every capability switched off for Claudian |
+| `sdk/CopilotSdkRuntime` | SDK construction, the SDK defaulting mode and what it leaves Claudian to state, the start, session-opening, and shutdown bounds, and every capability switched off for Claudian |
 | `sdk/CopilotNativeBudget` | How long a cold start and any one native acquisition or release may take, and what silence means |
 | `sdk/CopilotClientFactory` | CLI resolution, runtime environment, client identity, and the auth gate |
 | `sdk/CopilotRuntimeError` | Failure categorization onto `ProviderExecutionErrorCategory`, and what each category leaves unusable |
@@ -103,25 +103,46 @@ not what a later layer will do with them.
   addon out of the bundle. `sdk/CopilotSdkRuntime` is written against that envelope, so
   adding an SDK feature that reaches those modules requires revisiting it, not deleting
   it.
-- The client is constructed with `mode: 'empty'`, so the SDK's ambient CLI behaviour is
-  opted into rather than inherited: the default `copilot-cli` mode hands a session the
-  coding agent's own tool set, instruction discovery, and cross-session capabilities, and
-  the switches turned off below would only hold for as long as that list kept pace with
-  the CLI. Empty mode also makes two things contractual, which is why the port requires
-  them rather than leaving them to a later layer: a data directory of Claudian's own, and
-  an explicit `availableTools` list on every session. `baseDirectory` is checked for
-  absoluteness, not just presence, because the SDK only tests that one was supplied: an
-  empty one leaves `COPILOT_HOME` unset, which puts this vault's agent state in the
-  user's shared `~/.copilot`, and a relative one is resolved against the vault the CLI is
-  spawned in, which puts it inside the notes. That check is the last one before a CLI is
-  started, so it stays here even though `resolveCopilotHomeDirectory` already guarantees
-  it. Empty mode also flips tool filter precedence to deny-wins,
-  so an `excludedTools` entry overrides the same tool in `availableTools`; a later
-  execution layer reads its own tool list that way rather than the other way round.
-- Remote sessions, remote export, MCP apps, the built-in session store, host git
-  operations, embedding retrieval, memory, infinite sessions, scheduling, and file hooks
-  are switched off explicitly in `sdk/CopilotSdkRuntime` rather than left to an empty-mode
-  default, and never at call sites.
+- The client is constructed with `mode: 'copilot-cli'`, because `mode: 'empty'` is the one
+  thing that writes `COPILOT_DISABLE_KEYTAR=1` into the environment the CLI is spawned
+  with. The SDK writes it after the caller's own environment, so no entry can take it back
+  out, and a CLI that cannot open its credential store reports itself signed out however
+  recently the user signed in — leaving only the `gh` CLI or an explicit token to answer
+  the auth gate, neither of which Claudian promises or owns. `useLoggedInUser` is stated
+  for the same reason: it is what decides whether the CLI may use the sign-in it already
+  has. `baseDirectory` is still checked for absoluteness before a client is built, and
+  that check now matters more, not less: outside empty mode the SDK makes no persistence
+  check at all, so an empty one silently leaves `COPILOT_HOME` unset — putting this
+  vault's agent state in the user's shared `~/.copilot` and reading that install's plugins
+  and configuration — and a relative one lands inside the notes.
+- Leaving empty mode gives up every default it supplied, so `sdk/CopilotSdkRuntime` states
+  each of them on every session it creates or resumes, and never at a call site: session
+  telemetry, the shared on-disk embedding cache and embedding retrieval, keychain-backed
+  MCP OAuth storage, MCP servers and MCP apps, remote sessions and remote export, the
+  built-in session store, host git operations, memory, infinite sessions, scheduling,
+  skills, file hooks, plugin directories, custom instructions and their on-demand
+  discovery, runtime configuration discovery, experimental features, the commit co-author
+  trailer, and the runtime's own `environment_context` description of the host. Several of
+  those default the other way outside empty mode, so an omission is not a smaller session
+  but a coding-agent one. The port exposes none of them: a caller chooses tools, a model,
+  directories, and handlers, and cannot weaken the floor.
+- A session's installed plugins are the exception, and the reason `COPILOT_HOME` isolation
+  is load-bearing rather than tidy. The SDK clears them only in empty mode, through the
+  options patch it sends after create and resume, and exposes no session field for them;
+  `builtinPluginDirectories: []` clears nothing either, because the SDK only sends
+  `plugins.builtin.set` when the list is non-empty. What a session loads is read from the
+  runtime's `COPILOT_HOME`, where both the registry in `config.json` and the plugin cache
+  live, so a per-vault directory of Claudian's own is what makes the list empty. Never
+  point that directory at a shared Copilot install.
+  `tests/integration/providers/copilot/copilotSdkKeychainMode.test.ts` pins all three SDK
+  rules; check it when the SDK moves.
+- Tool filter precedence is deny-wins for every client the SDK builds — it always sends
+  `toolFilterPrecedence: 'excluded'` — so an `excludedTools` entry overrides the same tool
+  in `availableTools`. A later execution layer reads its own tool list that way rather than
+  the other way round. This is not a mode difference; do not treat it as one.
+- `availableTools` is required by the port rather than left to a later layer. Omitting it
+  reads as "keep the CLI's own defaults", which is the ambient behaviour everything above
+  exists to keep out, and the caller would not find out until a turn ran.
 - The CLI does not inherit `process.env`. It receives a small forwarded base, then the
   configured entries the allow-list in `runtime/CopilotRuntimeEnvironment` names, and
   finally `COPILOT_HOME`, `PATH`, and `ELECTRON_RUN_AS_NODE`, which Claudian pins.
@@ -174,7 +195,10 @@ not what a later layer will do with them.
 - Claudian owns no GitHub credential. Sign-in belongs to the CLI and its keychain entry,
   and provider environment entries are persisted in plain text inside the vault, so no
   token key is configurable. A key the provider accepts is a key it offers to store, so
-  accepting a token key would be offering to keep one.
+  accepting a token key would be offering to keep one. Nothing here falls back to the `gh`
+  CLI either: `gh` may happen to be on the host's PATH and answer for the CLI, but it is
+  not what Claudian promises, and a fix that relied on it would leave every host without
+  it signed out.
 - `COPILOT_HOME` is a per-vault directory under the OS application-state location, keyed
   by a hash of the vault path. Copilot session state is agent data, not vault content, so
   it must never live under the vault — including under `.claudian/`.

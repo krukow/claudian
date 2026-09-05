@@ -34,10 +34,14 @@ export interface CopilotSdkClientOptions {
   /** Absolute path to the user-installed `copilot` executable. Never SDK-bundled. */
   readonly cliPath: string;
   /**
-   * `COPILOT_HOME` for the spawned CLI, kept outside vault content. Empty mode requires
-   * a persistence location of its own; an empty one would leave the CLI writing this
-   * vault's agent state into the user's shared `~/.copilot`, and a relative one is
-   * resolved against the vault the CLI is spawned in, so it must be absolute.
+   * `COPILOT_HOME` for the spawned CLI, kept outside vault content.
+   *
+   * Must be absolute, and a per-vault directory of Claudian's own. It is what the runtime
+   * reads a session's installed plugins and global configuration from, and the SDK only
+   * clears those for a client in the mode that also shuts the CLI out of its keychain, so
+   * this directory is the isolation. An empty one leaves `COPILOT_HOME` unset and hands
+   * the CLI the user's shared `~/.copilot`; a relative one is resolved against the vault
+   * the CLI is spawned in.
    */
   readonly baseDirectory: string;
   /** Complete environment for the CLI process. Not merged with `process.env` downstream. */
@@ -45,17 +49,30 @@ export interface CopilotSdkClientOptions {
   readonly workingDirectory: string;
 }
 
+/**
+ * What a caller decides about a session.
+ *
+ * Everything a session could use to read the user's global Copilot configuration or act
+ * outside the vault is deliberately absent: skills, plugin and instruction directories,
+ * MCP servers, file hooks, host git operations, the cross-session store, memory, remote
+ * export, telemetry, persistent embedding and OAuth storage, and runtime configuration
+ * discovery are stated by `CopilotSdkRuntime` on every create and resume, and cannot be
+ * reached — or weakened — from here.
+ */
 export interface CopilotSdkSessionConfig {
   readonly additionalDirectories?: readonly string[];
   /**
    * Tool allow-list. An empty array denies every tool.
    *
-   * Required rather than optional: the client runs in empty mode, where a session that
-   * named no tools is refused by the SDK, and where omitting the list would otherwise
-   * read as "keep the CLI's own defaults" — the ambient coding-agent behaviour empty mode
-   * exists to keep out.
+   * Required rather than optional: omitting it reads as "keep the CLI's own defaults",
+   * which is the ambient coding-agent behaviour every other field here exists to keep out,
+   * and the caller that omitted it would not learn so until a turn ran.
    */
   readonly availableTools: readonly string[];
+  /**
+   * Tool deny-list, which always wins over {@link availableTools}: the SDK sends
+   * `toolFilterPrecedence: 'excluded'` for every client it builds.
+   */
   readonly excludedTools?: readonly string[];
   readonly model: string;
   readonly onEvent: (event: CopilotSdkEvent) => void;
@@ -70,6 +87,13 @@ export interface CopilotSdkSessionConfig {
   readonly workingDirectory: string;
 }
 
+/**
+ * How the caller's instructions reach the runtime's system prompt.
+ *
+ * `replace` supplies the whole message and keeps nothing the runtime would have built.
+ * `append` keeps the runtime's own sections and adds to them — except its account of the
+ * host the CLI is running on, which `CopilotSdkRuntime` always removes.
+ */
 export type CopilotSdkSystemMessage =
   | { readonly mode: 'replace'; readonly content: string }
   | { readonly mode: 'append'; readonly content: string };

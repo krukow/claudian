@@ -30,6 +30,7 @@ import type {
   CopilotSdkSession,
   CopilotSdkSessionConfig,
   CopilotSdkSessionDeletion,
+  CopilotSdkSystemMessage,
 } from './CopilotSdkPort';
 
 type CopilotSdkModule = typeof copilotSdkModule;
@@ -48,18 +49,29 @@ function loadCopilotSdk(): Promise<CopilotSdkModule> {
 /**
  * The single place `@github/copilot-sdk` is constructed.
  *
- * The client runs in empty mode, so the SDK's ambient CLI behaviour is opted into rather
- * than inherited: without it a session picks up the coding agent's own tool set,
- * instruction discovery, and cross-session capabilities, and every switch turned off
- * below would only hold for as long as that list kept pace with the CLI. Empty mode also
- * makes two things contractual — a data directory of the app's own and an explicit tool
- * list on every session — which is why both are required by the port.
+ * The client runs in the SDK's `copilot-cli` defaulting mode, because that is the only
+ * mode which leaves the CLI able to reach its own credential store. `mode: 'empty'` writes
+ * `COPILOT_DISABLE_KEYTAR=1` into the environment the CLI is spawned with — after the
+ * caller's own environment, so nothing can take it back out — and a CLI that cannot open
+ * its keychain reports itself signed out however recently the user signed in. Claudian
+ * owns no GitHub credential and offers nowhere to keep one, so the CLI's own sign-in is
+ * the only thing that can answer the auth gate: no token is handed to the SDK, and the
+ * `gh` CLI is not a fallback Claudian promises.
  *
- * Every capability Claudian does not support is still turned off explicitly rather than
- * left to a mode default: remote sessions and remote export, MCP apps, the built-in
- * session store, host git operations, embedding retrieval, long-term memory, infinite
- * sessions, scheduling, and file hooks. The CLI is always the user-installed executable
- * passed as an absolute path.
+ * What empty mode used to supply is therefore supplied here instead. Every capability
+ * Claudian does not support is stated on each session rather than defaulted: session
+ * telemetry, the shared embedding cache and its retrieval, keychain-backed MCP OAuth
+ * storage, MCP servers and apps, remote sessions and remote export, the built-in session
+ * store, host git operations, long-term memory, infinite sessions, scheduling, skills,
+ * file hooks, plugin directories, custom instructions and their on-demand discovery,
+ * runtime configuration discovery, experimental features, the commit co-author trailer,
+ * and the runtime's own description of the host it is running on. The CLI is always the
+ * user-installed executable passed as an absolute path.
+ *
+ * A session's installed plugins are the one thing that cannot be stated: the SDK exposes
+ * them only through the patch it sends in empty mode. They are read from the runtime's
+ * `COPILOT_HOME`, which is why {@link CopilotSdkClientOptions.baseDirectory} must be a
+ * per-vault directory of Claudian's own and is checked before a CLI is started.
  *
  * The start is bounded here rather than by the caller, because it is the one native call
  * made while the raw SDK client is still private to this module. A caller was handed
@@ -81,8 +93,9 @@ export const copilotSdkRuntime: CopilotSdkRuntime = {
         'The Copilot CLI was given no usable data directory of its own. `COPILOT_HOME` '
         + 'must name an absolute per-vault directory: an empty one leaves it unset, so '
         + 'the CLI writes this vault\'s agent state into the user\'s shared '
-        + '`~/.copilot`, and a relative one is resolved against the vault the CLI is '
-        + 'spawned in, so that state lands inside the notes it is meant to stay out of.',
+        + '`~/.copilot` and reads that install\'s plugins and configuration, and a '
+        + 'relative one is resolved against the vault the CLI is spawned in, so that '
+        + 'state lands inside the notes it is meant to stay out of.',
       );
     }
 
@@ -95,7 +108,8 @@ export const copilotSdkRuntime: CopilotSdkRuntime = {
       }),
       enableRemoteSessions: false,
       logLevel: 'error',
-      mode: 'empty',
+      mode: 'copilot-cli',
+      useLoggedInUser: true,
       workingDirectory: options.workingDirectory,
     } satisfies CopilotClientOptions);
 
@@ -319,6 +333,20 @@ class SdkBackedSession implements CopilotSdkSession {
 /** Ten minutes, matching the longest turn the Copilot CLI will run unattended. */
 const TURN_TIMEOUT_MS = 600_000;
 
+/**
+ * The session Claudian asks for, stated in full.
+ *
+ * Nothing here is left to a runtime default. The SDK only fills these in for a client in
+ * empty mode, which is the mode that shuts the CLI out of its keychain, so a session that
+ * omitted them would inherit the coding agent's own behaviour: telemetry on, an embedding
+ * cache shared on disk between sessions, MCP OAuth tokens written to the OS keychain, a
+ * commit co-author trailer, and whatever instruction, skill, plugin, and MCP sources the
+ * runtime discovers around the vault.
+ *
+ * The caller chooses tools, a model, directories, and the handlers; it cannot reach any of
+ * this, because a session that could would be a session that could read the user's global
+ * Copilot configuration or act outside the vault.
+ */
 function toSessionConfig(config: CopilotSdkSessionConfig): SessionConfig {
   return {
     ...(config.additionalDirectories?.length
@@ -328,27 +356,57 @@ function toSessionConfig(config: CopilotSdkSessionConfig): SessionConfig {
     ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
     availableTools: [...config.availableTools],
     clientName: 'Claudian',
+    coauthorEnabled: false,
     customAgentsLocalOnly: true,
+    embeddingCacheStorage: 'in-memory',
+    enableConfigDiscovery: false,
+    enableExperimentalMode: false,
     enableFileHooks: false,
     enableHostGitOperations: false,
     enableMcpApps: false,
+    enableOnDemandInstructionDiscovery: false,
     enableSessionStore: false,
+    enableSessionTelemetry: false,
     enableSkills: false,
     includeSubAgentStreamingEvents: false,
     infiniteSessions: { enabled: false },
     manageScheduleEnabled: false,
+    mcpOAuthTokenStorage: 'in-memory',
+    mcpServers: {},
     memory: { enabled: false },
     model: config.model,
     onEvent: config.onEvent,
     onPermissionRequest: request => config.onPermissionRequest(request),
     onUserInputRequest: request => config.onUserInputRequest(request),
+    pluginDirectories: [],
     remoteSession: 'off',
     skipCustomInstructions: true,
     skipEmbeddingRetrieval: true,
     streaming: true,
-    systemMessage: config.systemMessage,
+    systemMessage: toSystemMessageConfig(config.systemMessage),
     workingDirectory: config.workingDirectory,
   };
+}
+
+/**
+ * The system message as the runtime receives it, with its own account of the host removed.
+ *
+ * A replaced message has no runtime sections left to strip. An appended one keeps every
+ * section the CLI would build for its own coding agent, `environment_context` among them,
+ * which describes the machine Claudian's session is running on. Asking for the removal by
+ * name is what empty mode used to do on Claudian's behalf; the appended content itself is
+ * unchanged, because the runtime appends it as additional instructions either way.
+ */
+function toSystemMessageConfig(
+  systemMessage: CopilotSdkSystemMessage,
+): SessionConfig['systemMessage'] {
+  return systemMessage.mode === 'replace'
+    ? { content: systemMessage.content, mode: 'replace' }
+    : {
+      content: systemMessage.content,
+      mode: 'customize',
+      sections: { environment_context: { action: 'remove' } },
+    };
 }
 
 /**

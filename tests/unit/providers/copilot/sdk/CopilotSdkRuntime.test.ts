@@ -141,18 +141,19 @@ beforeEach(() => {
 });
 
 /**
- * `mode: 'empty'` is what makes the SDK's ambient CLI behaviour opt-in rather than
- * inherited. Without it the client defaults to `copilot-cli`, where a session picks up
- * the coding agent's own tools, instruction discovery, and cross-session capabilities —
- * everything Claudian switches off one flag at a time would depend on that list staying
- * complete as the CLI grows.
+ * The client is constructed in the SDK's `copilot-cli` defaulting mode, because
+ * `mode: 'empty'` is the one thing that puts `COPILOT_DISABLE_KEYTAR=1` into the spawned
+ * CLI's environment. With the keychain shut off the CLI never opens its credential store,
+ * so the sign-in the user already performed is invisible to it and only the `gh` CLI or an
+ * explicit token could answer the auth gate — neither of which Claudian promises or owns.
  *
- * Empty mode is also a contract: the SDK refuses a client with no persistence location of
- * its own and a session with no explicit tool list, so both are stated here rather than
- * left to a later layer.
+ * Losing empty mode also loses every default it was supplying, so each of them is stated
+ * here instead. The two contracts it enforced are stated too: a persistence location of
+ * Claudian's own, checked in `createClient`, and an explicit tool list, required by the
+ * port.
  */
 describe('copilotSdkRuntime client construction', () => {
-  it('constructs the client in empty mode against the CLI it was handed', async () => {
+  it('constructs a keychain-capable client against the CLI it was handed', async () => {
     await copilotSdkRuntime.createClient({
       baseDirectory: '/state/copilot',
       cliPath: '/usr/local/bin/copilot',
@@ -165,15 +166,32 @@ describe('copilotSdkRuntime client construction', () => {
       baseDirectory: '/state/copilot',
       connection: { env: { COPILOT_HOME: '/state/copilot' }, path: '/usr/local/bin/copilot' },
       enableRemoteSessions: false,
-      mode: 'empty',
+      mode: 'copilot-cli',
+      useLoggedInUser: true,
       workingDirectory: '/vault',
     });
+  });
+
+  /**
+   * The mode that disables the keychain must not come back by accident, and Claudian owns
+   * no credential of its own to fall back on: no token is ever handed to the SDK, so the
+   * CLI's own sign-in is the only thing that can answer the auth gate.
+   */
+  it('never selects the mode that shuts the CLI out of its keychain', async () => {
+    await createClient();
+    const options = FakeSdkCopilotClient.instances[0]?.options;
+
+    expect(options?.mode).not.toBe('empty');
+    expect(options?.gitHubToken).toBeUndefined();
   });
 
   /**
    * An empty `baseDirectory` passes the SDK's own check, which only tests that one was
    * supplied, and then leaves `COPILOT_HOME` unset — so the CLI writes this vault's agent
    * state into the user's shared `~/.copilot`. No CLI is started for it.
+   *
+   * Outside empty mode the SDK makes no persistence check at all, so this is now the only
+   * one there is.
    */
   it('refuses a client with no data directory of its own', async () => {
     await expect(copilotSdkRuntime.createClient({
@@ -227,6 +245,136 @@ describe('copilotSdkRuntime client construction', () => {
     const mandatory: MandatoryKey<CopilotSdkSessionConfig> = 'availableTools';
 
     expect(mandatory).toBe('availableTools');
+  });
+});
+
+/**
+ * What `mode: 'empty'` was supplying on Claudian's behalf, quoted from the SDK's own
+ * `configDefaultsForMode`, `experimentalModeForMode`, and `updateSessionOptionsForMode`,
+ * plus the discovery sources those defaults leave to the session.
+ *
+ * Outside empty mode none of it is supplied, and the runtime's own defaults are the
+ * opposite for several: session telemetry is on, the embedding cache is shared on disk,
+ * MCP OAuth tokens are written to the OS keychain, and the commit co-author trailer is
+ * added. So every entry is now sent by Claudian with each create and resume.
+ */
+const COPILOT_SESSION_FLOOR: Readonly<Record<string, unknown>> = {
+  coauthorEnabled: false,
+  customAgentsLocalOnly: true,
+  embeddingCacheStorage: 'in-memory',
+  enableConfigDiscovery: false,
+  enableExperimentalMode: false,
+  enableFileHooks: false,
+  enableHostGitOperations: false,
+  enableMcpApps: false,
+  enableOnDemandInstructionDiscovery: false,
+  enableSessionStore: false,
+  enableSessionTelemetry: false,
+  enableSkills: false,
+  includeSubAgentStreamingEvents: false,
+  infiniteSessions: { enabled: false },
+  manageScheduleEnabled: false,
+  mcpOAuthTokenStorage: 'in-memory',
+  mcpServers: {},
+  memory: { enabled: false },
+  pluginDirectories: [],
+  remoteSession: 'off',
+  skipCustomInstructions: true,
+  skipEmbeddingRetrieval: true,
+};
+
+/** The floor fields a caller must not be able to reach, and so weaken, through the port. */
+type CopilotSessionFloorField =
+  | 'clientName'
+  | 'coauthorEnabled'
+  | 'configDirectory'
+  | 'customAgents'
+  | 'customAgentsLocalOnly'
+  | 'embeddingCacheStorage'
+  | 'enableConfigDiscovery'
+  | 'enableExperimentalMode'
+  | 'enableFileHooks'
+  | 'enableHostGitOperations'
+  | 'enableMcpApps'
+  | 'enableOnDemandInstructionDiscovery'
+  | 'enableSessionStore'
+  | 'enableSessionTelemetry'
+  | 'enableSkills'
+  | 'gitHubToken'
+  | 'hooks'
+  | 'infiniteSessions'
+  | 'instructionDirectories'
+  | 'manageScheduleEnabled'
+  | 'mcpOAuthTokenStorage'
+  | 'mcpServers'
+  | 'memory'
+  | 'pluginDirectories'
+  | 'remoteSession'
+  | 'skillDirectories'
+  | 'skipCustomInstructions'
+  | 'skipEmbeddingRetrieval';
+
+describe('copilotSdkRuntime session floor', () => {
+  it.each([
+    ['a created session', async (client: CopilotSdkClient) => {
+      await client.createSession(sessionConfig());
+    }],
+    ['a resumed session', async (client: CopilotSdkClient) => {
+      await client.resumeSession('copilot-session-1', sessionConfig());
+    }],
+  ])('states every capability empty mode used to default for %s', async (_name, open) => {
+    const client = await createClient();
+    await open(client);
+    const config = FakeSdkCopilotClient.instances[0]?.sessionConfigs[0];
+
+    expect(config).toMatchObject(COPILOT_SESSION_FLOOR);
+  });
+
+  /**
+   * Empty mode stripped the runtime's `environment_context` section from every system
+   * message it did not fully replace, so the host the CLI runs on never reached the
+   * prompt. `append` no longer does that on its own, so the removal is asked for by name.
+   */
+  it('keeps the host out of an appended system message', async () => {
+    const client = await createClient();
+    await client.createSession(sessionConfig({
+      systemMessage: { content: 'claudian', mode: 'append' },
+    }));
+
+    expect(FakeSdkCopilotClient.instances[0]?.sessionConfigs[0]?.systemMessage).toEqual({
+      content: 'claudian',
+      mode: 'customize',
+      sections: { environment_context: { action: 'remove' } },
+    });
+  });
+
+  /** A replaced system message has no runtime sections left to strip. */
+  it('sends a replaced system message as it was given', async () => {
+    const client = await createClient();
+    await client.createSession(sessionConfig({
+      systemMessage: { content: 'claudian', mode: 'replace' },
+    }));
+
+    expect(FakeSdkCopilotClient.instances[0]?.sessionConfigs[0]?.systemMessage).toEqual({
+      content: 'claudian',
+      mode: 'replace',
+    });
+  });
+
+  /**
+   * The floor is Claudian's, not the caller's: a later execution layer chooses tools, a
+   * model, and directories, and cannot reach any switch that would let a session read the
+   * user's global Copilot configuration or act outside the vault. This only compiles while
+   * none of those fields exists on the port.
+   */
+  it('leaves no consumer able to weaken the floor', () => {
+    type NoFloorFieldIsReachable =
+      Extract<keyof CopilotSdkSessionConfig, CopilotSessionFloorField> extends never
+        ? true
+        : false;
+    const proven: NoFloorFieldIsReachable = true;
+
+    expect(proven).toBe(true);
   });
 });
 
