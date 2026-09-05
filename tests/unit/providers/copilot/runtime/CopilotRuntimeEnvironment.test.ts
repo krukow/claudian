@@ -61,11 +61,11 @@ describe('buildCopilotRuntimeEnvironment', () => {
   it('applies configured entries over the forwarded base, and nothing else', () => {
     const environment = buildCopilotRuntimeEnvironment({
       ...baseInput,
-      processEnvironment: { HOME: '/home/user', PATH: '/usr/bin' },
-      providerEnvironment: { HOME: '/sandbox/home', HTTPS_PROXY: 'http://configured:8080' },
+      processEnvironment: { HOME: '/home/user', LANG: 'C', PATH: '/usr/bin' },
+      providerEnvironment: { HOME: '/sandbox/home', LANG: 'en_US.UTF-8' },
     });
 
-    expect(environment.HTTPS_PROXY).toBe('http://configured:8080');
+    expect(environment.LANG).toBe('en_US.UTF-8');
     expect(environment.HOME).toBe('/home/user');
   });
 
@@ -246,21 +246,51 @@ describe('buildCopilotRuntimeEnvironment configured allow-list', () => {
     expect(configure({ [key]: 'configured' })[key]).toBe('configured');
   });
 
-  it('names only proxy, TLS trust, and locale settings', () => {
-    expect([...COPILOT_CONFIGURABLE_ENVIRONMENT_KEYS].sort()).toEqual([
-      'ALL_PROXY',
-      'CURL_CA_BUNDLE',
-      'HTTPS_PROXY',
-      'HTTP_PROXY',
-      'LANG',
-      'LC_ALL',
-      'NODE_EXTRA_CA_CERTS',
-      'NO_PROXY',
-      'REQUESTS_CA_BUNDLE',
-      'SSL_CERT_DIR',
-      'SSL_CERT_FILE',
-    ]);
+  it('names only locale settings', () => {
+    expect([...COPILOT_CONFIGURABLE_ENVIRONMENT_KEYS].sort()).toEqual(['LANG', 'LC_ALL']);
   });
+
+  /**
+   * Routing and TLS trust decide where the CLI's requests go and which certificates it
+   * accepts, while the CLI is signed in with the user's own GitHub credential. Provider
+   * settings are plain text inside a vault that syncs and can be shared, so a proxy or CA
+   * entry typed there would point an already-authenticated CLI wherever the vault says.
+   * The host process is a different thing entirely: it is the environment the user
+   * already runs Obsidian in, so a corporate proxy or CA set there is inherited, and only
+   * from there.
+   */
+  it.each([
+    'ALL_PROXY',
+    'CURL_CA_BUNDLE',
+    'HTTPS_PROXY',
+    'HTTP_PROXY',
+    'NODE_EXTRA_CA_CERTS',
+    'NO_PROXY',
+    'REQUESTS_CA_BUNDLE',
+    'SSL_CERT_DIR',
+    'SSL_CERT_FILE',
+  ])('refuses a configured %s and keeps the host value', (key) => {
+    const environment = buildCopilotRuntimeEnvironment({
+      ...baseInput,
+      processEnvironment: { [key]: 'host-value', PATH: '/usr/bin' },
+      providerEnvironment: { [key]: 'vault-value' },
+    });
+
+    expect(environment[key]).toBe('host-value');
+  });
+
+  it.each(['https_proxy', 'Node_Extra_CA_Certs', 'ssl_cert_file'])(
+    'refuses a configured %s whatever case it is written in',
+    (key) => {
+      const environment = buildCopilotRuntimeEnvironment({
+        ...baseInput,
+        processEnvironment: { PATH: '/usr/bin' },
+        providerEnvironment: { [key]: 'vault-value' },
+      });
+
+      expect(Object.values(environment)).not.toContain('vault-value');
+    },
+  );
 
   /**
    * A configured entry written in another case is the same variable to the CLI on
@@ -270,13 +300,13 @@ describe('buildCopilotRuntimeEnvironment configured allow-list', () => {
   it('applies a configured entry over the forwarded base under one spelling', () => {
     const environment = buildCopilotRuntimeEnvironment({
       ...baseInput,
-      processEnvironment: { HTTPS_PROXY: 'http://forwarded:8080', PATH: '/usr/bin' },
-      providerEnvironment: { https_proxy: 'http://configured:8080' },
+      processEnvironment: { LANG: 'C', PATH: '/usr/bin' },
+      providerEnvironment: { lang: 'en_US.UTF-8' },
     });
 
-    expect(Object.keys(environment).filter(key => key.toLowerCase() === 'https_proxy'))
-      .toEqual(['HTTPS_PROXY']);
-    expect(environment.HTTPS_PROXY).toBe('http://configured:8080');
+    expect(Object.keys(environment).filter(key => key.toLowerCase() === 'lang'))
+      .toEqual(['LANG']);
+    expect(environment.LANG).toBe('en_US.UTF-8');
   });
 
   /**
@@ -437,18 +467,23 @@ describe('buildCopilotRuntimeEnvironment token migration', () => {
       baseDirectory: '/state/claudian/copilot/vault',
       cliPath: '/opt/copilot/bin/copilot',
       trustedPath: '/opt/copilot/bin:/usr/bin',
-      processEnvironment: { GH_TOKEN: 'host-token', PATH: '/usr/bin' },
+      processEnvironment: {
+        GH_TOKEN: 'host-token',
+        HTTPS_PROXY: 'http://proxy:8080',
+        PATH: '/usr/bin',
+      },
       providerEnvironment: {
         COPILOT_GITHUB_TOKEN: 'ghp_stored',
         GH_TOKEN: 'ghp_stored',
         GITHUB_TOKEN: 'ghp_stored',
-        HTTPS_PROXY: 'http://proxy:8080',
+        LANG: 'en_US.UTF-8',
       },
     });
 
     expect(environment).toEqual({
       COPILOT_HOME: '/state/claudian/copilot/vault',
       HTTPS_PROXY: 'http://proxy:8080',
+      LANG: 'en_US.UTF-8',
       PATH: '/opt/copilot/bin:/usr/bin',
     });
   });

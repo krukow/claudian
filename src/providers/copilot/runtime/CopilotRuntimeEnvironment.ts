@@ -6,8 +6,14 @@ import { getEnhancedPath } from '../../../utils/env';
 
 /**
  * Environment variables the Copilot CLI needs from the host to locate a shell, resolve
- * TLS trust, and reach the network through a proxy. Nothing else from `process.env` is
- * forwarded: the CLI receives this minimal base plus the provider's configured entries.
+ * TLS trust, and reach the network through a proxy.
+ *
+ * These are inherited from the host process and only from there. Proxy reachability and
+ * TLS trust decide where the CLI's requests go and which certificates it accepts, while
+ * the CLI is signed in with the user's own GitHub credential, so they are read from the
+ * environment the user already runs Obsidian in rather than from anything the vault can
+ * say. Nothing else from `process.env` is forwarded: the CLI receives this minimal base
+ * plus the provider's configured entries.
  */
 const FORWARDED_ENVIRONMENT_KEYS: readonly string[] = [
   'ALL_PROXY',
@@ -44,32 +50,30 @@ const FORWARDED_ENVIRONMENT_KEYS: readonly string[] = [
  * Environment variables that reach the CLI from provider settings.
  *
  * Provider entries decide the environment of a process Claudian spawns with the user's
- * own credentials, and they are stored in plain text inside the vault, so they are named
- * rather than filtered: a denial list would have to keep pace with every switch a CLI
- * release adds, while this list refuses the ones nobody has thought of yet.
+ * own credentials, and they are stored in plain text inside a vault that syncs and can be
+ * shared, so they are named rather than filtered: a denial list would have to keep pace
+ * with every switch a CLI release adds, while this list refuses the ones nobody has
+ * thought of yet.
  *
- * These are proxy reachability, TLS trust, and locale — the settings a network or an
- * enterprise host imposes and that Claudian cannot infer. Nothing here names a
- * credential, an endpoint the CLI would present its credential to, or a variable that
- * makes Node or Electron load code: the CLI launches through `process.execPath`, so a
- * loader, debug, or bootstrap variable would turn a settings entry into code running
- * inside the spawned runtime.
+ * Only locale is on it. Proxy reachability and TLS trust are deliberately not: they say
+ * where an already-authenticated CLI sends its requests and which certificates it
+ * accepts, so a vault entry would be enough to route that CLI through someone else's
+ * proxy or make it trust someone else's certificate authority. What a network or an
+ * enterprise host imposes is inherited from the host process instead, through
+ * {@link FORWARDED_ENVIRONMENT_KEYS} — that environment is the one the user already runs
+ * Obsidian in, and whoever controls it controls the app already.
+ *
+ * Nothing here names a credential, an endpoint the CLI would present its credential to,
+ * or a variable that makes Node or Electron load code: the CLI launches through
+ * `process.execPath`, so a loader, debug, or bootstrap variable would turn a settings
+ * entry into code running inside the spawned runtime.
  *
  * Sign-in belongs to the CLI and its OS keychain entry. Claudian owns no GitHub
  * credential and offers nowhere to keep one.
  */
 export const COPILOT_CONFIGURABLE_ENVIRONMENT_KEYS: readonly string[] = [
-  'ALL_PROXY',
-  'CURL_CA_BUNDLE',
-  'HTTP_PROXY',
-  'HTTPS_PROXY',
   'LANG',
   'LC_ALL',
-  'NODE_EXTRA_CA_CERTS',
-  'NO_PROXY',
-  'REQUESTS_CA_BUNDLE',
-  'SSL_CERT_DIR',
-  'SSL_CERT_FILE',
 ];
 
 /**

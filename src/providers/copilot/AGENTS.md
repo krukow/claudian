@@ -91,13 +91,20 @@ not what a later layer will do with them.
   default, and never at call sites.
 - The CLI does not inherit `process.env`. It receives a small forwarded base, then the
   configured entries the allow-list in `runtime/CopilotRuntimeEnvironment` names, and
-  finally `COPILOT_HOME`, `PATH`, and `ELECTRON_RUN_AS_NODE`, which Claudian pins. The
-  allow-list carries proxy reachability, TLS trust, and locale — what a network or an
-  enterprise host imposes and Claudian cannot infer. It is an allow-list rather than a
-  denial list because a denial list has to keep pace with every switch a CLI release
-  adds. Adding a key to it is a security decision: it must be non-secret, must not name
-  an endpoint the CLI would present a credential to, and must not make Node or Electron
-  load code, attach a debugger, or change its bootstrap, because the CLI launches through
+  finally `COPILOT_HOME`, `PATH`, and `ELECTRON_RUN_AS_NODE`, which Claudian pins.
+- What the vault may set and what only the host may set are two different lists. Proxy
+  reachability and TLS trust are inherited from the host process and never configurable:
+  they decide where an already-signed-in CLI sends its requests and which certificates it
+  accepts, and provider settings are plain text in a vault that syncs and can be shared,
+  so a `HTTPS_PROXY` or `NODE_EXTRA_CA_CERTS` entry there would be enough to route that
+  CLI through someone else's proxy or make it trust someone else's certificate authority.
+  The host process environment is trusted for them because it is the environment the user
+  already runs Obsidian in. That leaves locale as the only configurable category, and it
+  is an allow-list rather than a denial list because a denial list has to keep pace with
+  every switch a CLI release adds. Adding a key to it is a security decision: it must be
+  non-secret, must not choose where the CLI connects or what it trusts, must not name an
+  endpoint the CLI would present a credential to, and must not make Node or Electron load
+  code, attach a debugger, or change its bootstrap, because the CLI launches through
   `process.execPath`. Configured entries are matched without regard to case and written
   under the allow-list's own spelling, because Windows resolves environment variables
   that way and a second spelling would sit beside the forwarded value instead of

@@ -80,14 +80,29 @@ describe('CopilotClientFactory runtime PATH', () => {
 
   /**
    * The allow-list still decides everything else, so refusing PATH must not refuse the
-   * proxy, TLS, and locale entries an enterprise host depends on.
+   * locale entries it names.
    */
   it('still carries the configured entries the allow-list names', async () => {
     const identity = await new CopilotClientFactory(createHost(NATIVE_CLI, {
-      sharedEnvironmentVariables: 'PATH=/attacker/bin\nHTTPS_PROXY=http://proxy:8080',
+      sharedEnvironmentVariables: 'PATH=/attacker/bin\nLANG=en_US.UTF-8',
     })).resolveIdentity(VAULT_PATH);
 
-    expect(identity.environment.HTTPS_PROXY).toBe('http://proxy:8080');
+    expect(identity.environment.LANG).toBe('en_US.UTF-8');
+  });
+
+  /**
+   * Routing and TLS trust are host settings, not vault settings: a proxy or CA typed into
+   * the vault would decide where an already-signed-in CLI sends its requests and which
+   * certificates it accepts.
+   */
+  it('never carries a configured proxy or certificate authority', async () => {
+    const identity = await new CopilotClientFactory(createHost(NATIVE_CLI, {
+      sharedEnvironmentVariables:
+        'HTTPS_PROXY=http://attacker:8080\nNODE_EXTRA_CA_CERTS=/vault/attacker.pem',
+    })).resolveIdentity(VAULT_PATH);
+
+    expect(identity.environment.HTTPS_PROXY).not.toBe('http://attacker:8080');
+    expect(identity.environment.NODE_EXTRA_CA_CERTS).not.toBe('/vault/attacker.pem');
   });
 });
 
