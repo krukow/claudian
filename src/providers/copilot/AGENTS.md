@@ -28,7 +28,7 @@ not what a later layer will do with them.
 | `sdk/CopilotClientFactory` | CLI resolution, runtime environment, client identity, and the auth gate |
 | `sdk/CopilotRuntimeError` | Failure categorization onto `ProviderExecutionErrorCategory`, and what each category leaves unusable |
 | `runtime/CopilotCliResolver` | Discovering the user-installed `copilot` binary from settings and the host |
-| `runtime/CopilotAbsolutePath` | What counts as an absolute path for a CLI spawned in the vault, and the canonical form of one |
+| `runtime/CopilotAbsolutePath` | What counts as an absolute path for a CLI spawned in the vault, the canonical form of one, and whether one path lies inside another |
 | `runtime/CopilotCliEntry` | Narrowing a discovered path to the executable the SDK is handed, and requiring it to be absolute |
 | `runtime/CopilotNativeCliBinary` | Where an npm install's native platform binary lives |
 | `runtime/CopilotRuntimeEnvironment` | `COPILOT_HOME` placement, the CLI process environment, and the canonical form of a configured environment |
@@ -228,6 +228,24 @@ not what a later layer will do with them.
   derived from the vault or the working directory, which are the two places the store may
   not be. A temporary location is last because it is the one place the store is not
   expected to survive.
+- Absolute is not enough on its own: a host names locations the vault holds whenever the
+  vault is opened on the home directory, or on a folder above one — `HOME`,
+  `XDG_STATE_HOME`, `LOCALAPPDATA`, and the temporary variables then point back into the
+  notes. Every candidate is tested against the vault with `isCopilotPathWithinRoot`, and a
+  candidate the vault holds — or is — is refused exactly like a relative one, so the
+  search continues to the next host root. The platform constants are held to the rule too,
+  which is why there are two of them per platform: a vault opened on `/tmp` falls through
+  to `/var/tmp`, and one on `C:\Temp` to `C:\Windows\Temp`.
+- That test is lexical and reads no filesystem. It is asked about a store Claudian has not
+  created yet, under host locations that may name nothing on this machine, so resolving
+  through `realpath` would answer for whatever happens to be on disk and would call a
+  directory the vault is about to hold external. Both sides are normalized, and Windows
+  compares without regard to case because that is how it resolves two spellings to one
+  directory.
+- A vault opened on the filesystem root holds every location there is, so
+  `resolveCopilotHomeDirectory` throws rather than answering. There is no directory left
+  that keeps agent state out of the notes, and returning one inside them is the single
+  thing this resolution exists to prevent; the failure says to open the vault on a folder.
 
 ## Failure and Budget Rules
 

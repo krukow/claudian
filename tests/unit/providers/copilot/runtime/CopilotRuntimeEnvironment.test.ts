@@ -700,6 +700,145 @@ describe('resolveCopilotHomeDirectory', () => {
         .toContain(expected);
     },
   );
+
+  /** Whether the vault holds a place, decided the way the named platform would. */
+  function holdsPath(platform: NodeJS.Platform, vaultPath: string, candidate: string): boolean {
+    const paths = platform === 'win32' ? path.win32 : path.posix;
+    const fold = (value: string): string => {
+      const normalized = paths.normalize(value);
+      return platform === 'win32' ? normalized.toLowerCase() : normalized;
+    };
+    const vault = fold(vaultPath);
+    const prefix = vault.endsWith(paths.sep) ? vault : `${vault}${paths.sep}`;
+
+    return fold(candidate) === vault || fold(candidate).startsWith(prefix);
+  }
+
+  /**
+   * An absolute host location still names the vault when the vault holds it — a home, a
+   * state directory, or a temporary directory inside the notes, which is what a vault
+   * opened on the home directory itself gives. Agent state written there would be
+   * indexed, synced, and shared as vault content, so such a candidate names nothing
+   * either and the next host root answers.
+   */
+  it.each([
+    [
+      'linux',
+      '/vaults/work',
+      {
+        HOME: '/vaults/work',
+        TMP: '/var/tmp',
+        TMPDIR: '/vaults/work/tmp',
+        XDG_STATE_HOME: '/vaults/work/.state',
+      },
+      { homedir: '/vaults/work', tmpdir: '/vaults/work/tmp' },
+      path.posix.join('/var/tmp', 'claudian', 'copilot'),
+    ],
+    [
+      'darwin',
+      '/Users/person/Vault',
+      { HOME: '/Users/person/Vault/home', TMPDIR: '/Users/person/Vault/tmp' },
+      { homedir: '/Users/person/Vault/home', tmpdir: '/var/folders/9x' },
+      path.posix.join('/var/folders/9x', 'Claudian', 'copilot'),
+    ],
+    [
+      'win32',
+      'C:\\Vault',
+      {
+        LOCALAPPDATA: 'c:\\vault\\appdata\\local',
+        TEMP: 'C:\\Vault\\Temp',
+        TMP: 'D:\\Temp',
+        USERPROFILE: 'C:\\Vault',
+      },
+      { homedir: 'C:\\Vault', tmpdir: 'C:\\Vault\\Temp' },
+      path.win32.join('D:\\Temp', 'Claudian', 'copilot'),
+    ],
+  ] as ReadonlyArray<[
+    NodeJS.Platform,
+    string,
+    NodeJS.ProcessEnv,
+    { homedir: string; tmpdir: string },
+    string,
+  ]>)(
+    'refuses a %s host location the vault holds',
+    (platform, vaultPath, environment, hostPaths, expectedRoot) => {
+      jest.mocked(os.homedir).mockReturnValue(hostPaths.homedir);
+      jest.mocked(os.tmpdir).mockReturnValue(hostPaths.tmpdir);
+
+      const home = resolveCopilotHomeDirectory(vaultPath, environment, platform);
+
+      expect(home.startsWith(expectedRoot)).toBe(true);
+      expect(isAbsoluteFor(platform, home)).toBe(true);
+      expect(holdsPath(platform, vaultPath, home)).toBe(false);
+    },
+  );
+
+  /**
+   * With every host location inside the vault, the platform constant answers — and it is
+   * held to the same rule, so a vault opened on that constant falls through to the next
+   * external one rather than receiving its own notes back.
+   */
+  it.each([
+    ['linux', '/vaults/work', path.posix.join('/tmp', 'claudian', 'copilot')],
+    ['linux', '/tmp', path.posix.join('/var/tmp', 'claudian', 'copilot')],
+    ['darwin', '/tmp', path.posix.join('/var/tmp', 'Claudian', 'copilot')],
+    ['win32', 'C:\\Temp', path.win32.join('C:\\Windows\\Temp', 'Claudian', 'copilot')],
+  ] as ReadonlyArray<[NodeJS.Platform, string, string]>)(
+    'keeps the %s platform default outside the vault',
+    (platform, vaultPath, expectedRoot) => {
+      const inVault = platform === 'win32'
+        ? `${vaultPath}\\host`
+        : path.posix.join(vaultPath, 'host');
+      jest.mocked(os.homedir).mockReturnValue(inVault);
+      jest.mocked(os.tmpdir).mockReturnValue(inVault);
+
+      const home = resolveCopilotHomeDirectory(vaultPath, {
+        HOME: inVault,
+        LOCALAPPDATA: inVault,
+        TMPDIR: inVault,
+        USERPROFILE: inVault,
+        XDG_STATE_HOME: inVault,
+      }, platform);
+
+      expect(home.startsWith(expectedRoot)).toBe(true);
+      expect(holdsPath(platform, vaultPath, home)).toBe(false);
+    },
+  );
+
+  /**
+   * A vault opened on the filesystem root holds every location there is, so there is no
+   * answer left that keeps agent state out of the notes. That is said rather than
+   * answered with a directory inside the vault.
+   */
+  it.each([
+    ['linux', '/'],
+    ['darwin', '/'],
+    ['win32', 'C:\\'],
+  ] as ReadonlyArray<[NodeJS.Platform, string]>)(
+    'refuses to place %s session state when the vault holds the whole host',
+    (platform, vaultPath) => {
+      expect(() => resolveCopilotHomeDirectory(vaultPath, {}, platform))
+        .toThrow(/outside/i);
+    },
+  );
+
+  /**
+   * The store is keyed by the vault path alone, so a vault that pushes the answer onto
+   * another host root keeps the identity the CLI's session data is filed under.
+   */
+  it('keys the store by vault however the host root was chosen', () => {
+    jest.mocked(os.homedir).mockReturnValue('/vaults/work/home');
+    jest.mocked(os.tmpdir).mockReturnValue('/var/tmp');
+
+    const pushedOut = resolveCopilotHomeDirectory(
+      '/vaults/work',
+      { HOME: '/vaults/work/home' },
+      'linux',
+    );
+    const hosted = resolveCopilotHomeDirectory('/vaults/work', { HOME: '/home/person' }, 'linux');
+
+    expect(path.posix.basename(pushedOut)).toBe(path.posix.basename(hosted));
+  });
 });
 
 /**

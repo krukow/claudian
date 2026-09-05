@@ -42,3 +42,53 @@ export function isAbsoluteCopilotPath(
 ): boolean {
   return toAbsoluteCopilotPath(value, platform) !== null;
 }
+
+/**
+ * Whether a root holds a path, or is that path — decided lexically, the way the platform
+ * the CLI runs on reads the two.
+ *
+ * The question this answers is asked about places that do not exist yet: the directory
+ * Claudian is choosing for a store it has not created, under host locations that may name
+ * nothing on this machine. So no filesystem is consulted. Resolving through `realpath`
+ * would answer for whatever happens to be on disk instead, and would answer "not held"
+ * for a directory the vault will hold the moment it is created.
+ *
+ * Both sides are normalized first, so a path that walks through itself is read as the
+ * place it names, and a trailing separator makes no difference. Windows compares without
+ * regard to case, because that is how it resolves the two paths to one directory.
+ */
+export function isCopilotPathWithinRoot(
+  candidate: string,
+  root: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const paths = platform === 'win32' ? path.win32 : path.posix;
+  const comparableRoot = toComparableCopilotPath(root, platform, paths);
+  const comparableCandidate = toComparableCopilotPath(candidate, platform, paths);
+  if (!comparableRoot || !comparableCandidate) {
+    return false;
+  }
+  if (comparableCandidate === comparableRoot) {
+    return true;
+  }
+  const prefix = comparableRoot.endsWith(paths.sep)
+    ? comparableRoot
+    : `${comparableRoot}${paths.sep}`;
+  return comparableCandidate.startsWith(prefix);
+}
+
+function toComparableCopilotPath(
+  value: string,
+  platform: NodeJS.Platform,
+  paths: typeof path.posix,
+): string {
+  const candidate = value.trim();
+  if (!candidate) {
+    return '';
+  }
+  const normalized = paths.normalize(candidate);
+  const trimmed = normalized.length > 1 && normalized.endsWith(paths.sep)
+    ? normalized.slice(0, -1)
+    : normalized;
+  return platform === 'win32' ? trimmed.toLowerCase() : trimmed;
+}

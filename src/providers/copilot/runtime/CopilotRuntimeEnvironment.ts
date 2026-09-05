@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { getEnhancedPath } from '../../../utils/env';
-import { toAbsoluteCopilotPath } from './CopilotAbsolutePath';
+import { isCopilotPathWithinRoot, toAbsoluteCopilotPath } from './CopilotAbsolutePath';
 
 /**
  * Environment variables the Copilot CLI needs from the host to locate a shell, resolve
@@ -286,11 +286,16 @@ export function buildCopilotRuntimeEnvironment(
  * vault-relative tooling. The vault path is hashed so two vaults never share a store and
  * the directory name carries no user path information.
  *
- * The answer is always absolute. The CLI is spawned with the vault as its working
- * directory, so a relative `COPILOT_HOME` would put this vault's agent state inside the
- * notes it exists to stay out of — and every host variable this is built from is
- * untrusted input that can name a relative location. A variable that does is read as
- * naming nothing, and the next candidate answers instead.
+ * The answer is always absolute, and always outside the vault. The CLI is spawned with
+ * the vault as its working directory, so a relative `COPILOT_HOME` would put this vault's
+ * agent state inside the notes it exists to stay out of — and every host variable this is
+ * built from is untrusted input that can name a relative location, or an absolute one the
+ * vault holds. A variable that does either is read as naming nothing, and the next
+ * candidate answers instead.
+ *
+ * Throws when the vault holds every location this host names, which a vault opened on the
+ * filesystem root does: there is no directory left that keeps agent state out of the
+ * notes, and answering with one inside them is the single thing this must never do.
  */
 export function resolveCopilotHomeDirectory(
   vaultPath: string,
@@ -302,20 +307,22 @@ export function resolveCopilotHomeDirectory(
     .update(paths.resolve(vaultPath))
     .digest('hex')
     .slice(0, 16);
-  return paths.join(resolveApplicationStateRoot(environment, platform), 'copilot', vaultKey);
+  const root = resolveApplicationStateRoot(vaultPath, environment, platform);
+  return paths.join(root, 'copilot', vaultKey);
 }
 
 /**
  * The application-state directory this vault's store lives under: the first location the
- * platform names that is absolute, and the host's own temporary location when it names
- * none.
+ * platform names that is absolute and outside the vault, the host's own temporary
+ * location when it names none, and a platform constant when it names neither.
  *
  * Falling back to a temporary directory keeps the guarantee that matters — agent state
  * lands somewhere writable that is neither the vault nor another vault's store — on a
- * host that reports no home at all. It is last because a temporary location is the one
- * place that store is not expected to survive.
+ * host that reports no usable home at all. It is last because a temporary location is the
+ * one place that store is not expected to survive.
  */
 function resolveApplicationStateRoot(
+  vaultPath: string,
   environment: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
 ): string {
@@ -324,13 +331,38 @@ function resolveApplicationStateRoot(
     ? 'Claudian'
     : 'claudian';
 
-  for (const candidate of applicationStateRoots(environment, platform)) {
+  for (const candidate of stateRootCandidates(environment, platform)) {
     const absolute = toAbsoluteCopilotPath(candidate, platform);
-    if (absolute) {
+    if (absolute && !isCopilotPathWithinRoot(absolute, vaultPath, platform)) {
       return paths.join(absolute, directoryName);
     }
   }
-  return paths.join(temporaryRoot(environment, platform), directoryName);
+  throw new Error(
+    `Copilot session state cannot be stored outside the vault at ${vaultPath}: this vault `
+    + 'holds every application-state and temporary location this host names. Open the '
+    + 'vault on a folder rather than on the whole filesystem, so agent data can be kept '
+    + 'out of your notes.',
+  );
+}
+
+/**
+ * Every location this vault's store may live under, best first: what the platform names
+ * for application state, then what the host names as temporary, then the temporary
+ * locations every host has.
+ *
+ * The last two are constants rather than anything derived from the vault or the working
+ * directory, which are the two places this fallback exists to avoid. There are two of
+ * them so a vault opened on the first is not handed its own notes back.
+ */
+function* stateRootCandidates(
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): Generator<string | undefined> {
+  yield* applicationStateRoots(environment, platform);
+  yield* temporaryRoots(environment);
+  yield* platform === 'win32'
+    ? ['C:\\Temp', 'C:\\Windows\\Temp']
+    : ['/tmp', '/var/tmp'];
 }
 
 function* applicationStateRoots(
@@ -369,28 +401,12 @@ function* homeDirectories(
   }
 }
 
-/**
- * The host's temporary location, and a platform default when it names none of its own.
- * The default is a constant rather than anything derived from the vault or the working
- * directory, which are the two places this fallback exists to avoid.
- */
-function temporaryRoot(
-  environment: NodeJS.ProcessEnv,
-  platform: NodeJS.Platform,
-): string {
-  const candidates = [
-    environment.TMPDIR,
-    environment.TEMP,
-    environment.TMP,
-    temporaryDirectoryQuietly(),
-  ];
-  for (const candidate of candidates) {
-    const absolute = toAbsoluteCopilotPath(candidate, platform);
-    if (absolute) {
-      return absolute;
-    }
-  }
-  return platform === 'win32' ? 'C:\\Temp' : '/tmp';
+/** The temporary locations this host names, in the order the platform reads them. */
+function* temporaryRoots(environment: NodeJS.ProcessEnv): Generator<string | undefined> {
+  yield environment.TMPDIR;
+  yield environment.TEMP;
+  yield environment.TMP;
+  yield temporaryDirectoryQuietly();
 }
 
 function homeDirectoryQuietly(): string | undefined {
