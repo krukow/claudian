@@ -23,7 +23,7 @@ not what a later layer will do with them.
 
 | Component | Owns |
 | --- | --- |
-| `sdk/CopilotSdkRuntime` | SDK construction, the start and shutdown bounds, and every capability switched off for Claudian |
+| `sdk/CopilotSdkRuntime` | SDK construction, the SDK defaulting mode, the start and shutdown bounds, and every capability switched off for Claudian |
 | `sdk/CopilotNativeBudget` | How long a cold start and any one native acquisition or release may take, and what silence means |
 | `sdk/CopilotClientFactory` | CLI resolution, runtime environment, client identity, and the auth gate |
 | `sdk/CopilotRuntimeError` | Failure categorization onto `ProviderExecutionErrorCategory`, and what each category leaves unusable |
@@ -75,9 +75,20 @@ not what a later layer will do with them.
   addon out of the bundle. `sdk/CopilotSdkRuntime` is written against that envelope, so
   adding an SDK feature that reaches those modules requires revisiting it, not deleting
   it.
+- The client is constructed with `mode: 'empty'`, so the SDK's ambient CLI behaviour is
+  opted into rather than inherited: the default `copilot-cli` mode hands a session the
+  coding agent's own tool set, instruction discovery, and cross-session capabilities, and
+  the switches turned off below would only hold for as long as that list kept pace with
+  the CLI. Empty mode also makes two things contractual, which is why the port requires
+  them rather than leaving them to a later layer: a data directory of Claudian's own, and
+  an explicit `availableTools` list on every session. `baseDirectory` is checked for
+  content as well as presence, because the SDK only tests that one was supplied and an
+  empty one leaves `COPILOT_HOME` unset, which puts this vault's agent state in the
+  user's shared `~/.copilot`.
 - Remote sessions, remote export, MCP apps, the built-in session store, host git
   operations, embedding retrieval, memory, infinite sessions, scheduling, and file hooks
-  are switched off in `sdk/CopilotSdkRuntime`, not at call sites.
+  are switched off explicitly in `sdk/CopilotSdkRuntime` rather than left to an empty-mode
+  default, and never at call sites.
 - The CLI does not inherit `process.env`. It receives a small forwarded base, then the
   configured entries the allow-list in `runtime/CopilotRuntimeEnvironment` names, and
   finally `COPILOT_HOME`, `PATH`, and `ELECTRON_RUN_AS_NODE`, which Claudian pins. The

@@ -33,7 +33,11 @@ export interface CopilotSdkAuthStatus {
 export interface CopilotSdkClientOptions {
   /** Absolute path to the user-installed `copilot` executable. Never SDK-bundled. */
   readonly cliPath: string;
-  /** `COPILOT_HOME` for the spawned CLI, kept outside vault content. */
+  /**
+   * `COPILOT_HOME` for the spawned CLI, kept outside vault content. Empty mode requires
+   * a persistence location of its own, and an empty one would leave the CLI writing this
+   * vault's agent state into the user's shared `~/.copilot`.
+   */
   readonly baseDirectory: string;
   /** Complete environment for the CLI process. Not merged with `process.env` downstream. */
   readonly environment: Readonly<Record<string, string>>;
@@ -42,8 +46,15 @@ export interface CopilotSdkClientOptions {
 
 export interface CopilotSdkSessionConfig {
   readonly additionalDirectories?: readonly string[];
-  /** Tool allow-list. An empty array denies every tool; `undefined` keeps CLI defaults. */
-  readonly availableTools?: readonly string[];
+  /**
+   * Tool allow-list. An empty array denies every tool.
+   *
+   * Required rather than optional: the client runs in empty mode, where a session that
+   * named no tools is refused by the SDK, and where omitting the list would otherwise
+   * read as "keep the CLI's own defaults" — the ambient coding-agent behaviour empty mode
+   * exists to keep out.
+   */
+  readonly availableTools: readonly string[];
   readonly excludedTools?: readonly string[];
   readonly model: string;
   readonly onEvent: (event: CopilotSdkEvent) => void;

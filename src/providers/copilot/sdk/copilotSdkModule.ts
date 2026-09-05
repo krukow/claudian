@@ -1,6 +1,7 @@
 import type { SessionConfig } from '@github/copilot-sdk';
 
 export type {
+  CopilotClientOptions,
   CopilotSession,
   ModelInfo,
   PermissionRequest,

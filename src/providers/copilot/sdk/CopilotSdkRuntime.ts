@@ -8,6 +8,7 @@ import {
 } from './CopilotNativeBudget';
 import {
   copilotAuthenticationError,
+  copilotConfigurationError,
   copilotMissingSessionError,
   CopilotRuntimeError,
   describeError,
@@ -15,7 +16,11 @@ import {
   toCopilotSendError,
 } from './CopilotRuntimeError';
 import type * as copilotSdkModule from './copilotSdkModule';
-import type { CopilotSession, SessionConfig } from './copilotSdkModule';
+import type {
+  CopilotClientOptions,
+  CopilotSession,
+  SessionConfig,
+} from './copilotSdkModule';
 import type {
   CopilotSdkClient,
   CopilotSdkClientOptions,
@@ -41,10 +46,18 @@ function loadCopilotSdk(): Promise<CopilotSdkModule> {
 /**
  * The single place `@github/copilot-sdk` is constructed.
  *
- * Every capability Claudian does not support is turned off here rather than at a call
- * site: remote sessions and remote export, MCP apps, the built-in session store, host git
- * operations, embedding retrieval, long-term memory, infinite sessions, scheduling, and
- * file hooks. The CLI is always the user-installed executable passed as an absolute path.
+ * The client runs in empty mode, so the SDK's ambient CLI behaviour is opted into rather
+ * than inherited: without it a session picks up the coding agent's own tool set,
+ * instruction discovery, and cross-session capabilities, and every switch turned off
+ * below would only hold for as long as that list kept pace with the CLI. Empty mode also
+ * makes two things contractual — a data directory of the app's own and an explicit tool
+ * list on every session — which is why both are required by the port.
+ *
+ * Every capability Claudian does not support is still turned off explicitly rather than
+ * left to a mode default: remote sessions and remote export, MCP apps, the built-in
+ * session store, host git operations, embedding retrieval, long-term memory, infinite
+ * sessions, scheduling, and file hooks. The CLI is always the user-installed executable
+ * passed as an absolute path.
  *
  * The start is bounded here rather than by the caller, because it is the one native call
  * made while the raw SDK client is still private to this module. A caller was handed
@@ -56,6 +69,14 @@ function loadCopilotSdk(): Promise<CopilotSdkModule> {
  */
 export const copilotSdkRuntime: CopilotSdkRuntime = {
   async createClient(options: CopilotSdkClientOptions): Promise<CopilotSdkClient> {
+    if (!options.baseDirectory.trim()) {
+      throw copilotConfigurationError(
+        'The Copilot CLI was given no data directory of its own. `COPILOT_HOME` must name '
+        + 'a per-vault directory, or the CLI writes this vault\'s agent state into the '
+        + 'shared `~/.copilot`.',
+      );
+    }
+
     const { CopilotClient, RuntimeConnection } = await loadCopilotSdk();
     const client = new CopilotClient({
       baseDirectory: options.baseDirectory,
@@ -65,8 +86,9 @@ export const copilotSdkRuntime: CopilotSdkRuntime = {
       }),
       enableRemoteSessions: false,
       logLevel: 'error',
+      mode: 'empty',
       workingDirectory: options.workingDirectory,
-    });
+    } satisfies CopilotClientOptions);
 
     const outcome = await settleNativeWithin(client.start(), NATIVE_STARTUP_TIMEOUT_MS);
     if (outcome.kind === 'settled') {
@@ -256,9 +278,9 @@ function toSessionConfig(config: CopilotSdkSessionConfig): SessionConfig {
     ...(config.additionalDirectories?.length
       ? { additionalDirectories: [...config.additionalDirectories] }
       : {}),
-    ...(config.availableTools ? { availableTools: [...config.availableTools] } : {}),
     ...(config.excludedTools?.length ? { excludedTools: [...config.excludedTools] } : {}),
     ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
+    availableTools: [...config.availableTools],
     clientName: 'Claudian',
     customAgentsLocalOnly: true,
     enableFileHooks: false,

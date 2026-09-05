@@ -1,3 +1,5 @@
+import type { CopilotClientOptions, SessionConfig } from '@github/copilot-sdk';
+
 import type {
   CopilotSdkClient,
   CopilotSdkSession,
@@ -34,8 +36,9 @@ class FakeSdkCopilotClient {
   forceStopped = 0;
   started = 0;
   stopped = 0;
+  readonly sessionConfigs: SessionConfig[] = [];
 
-  constructor(readonly options: unknown) {
+  constructor(readonly options: CopilotClientOptions) {
     FakeSdkCopilotClient.instances.push(this);
   }
 
@@ -48,8 +51,17 @@ class FakeSdkCopilotClient {
     return { isAuthenticated: true };
   }
 
-  async createSession(): Promise<FakeSdkCopilotSession> {
+  async createSession(config: SessionConfig): Promise<FakeSdkCopilotSession> {
+    this.sessionConfigs.push(config);
     return new FakeSdkCopilotSession('copilot-session-1');
+  }
+
+  async resumeSession(
+    sessionId: string,
+    config: SessionConfig,
+  ): Promise<FakeSdkCopilotSession> {
+    this.sessionConfigs.push(config);
+    return new FakeSdkCopilotSession(sessionId);
   }
 
   async stop(): Promise<Error[]> {
@@ -94,20 +106,103 @@ async function createClient(): Promise<CopilotSdkClient> {
 
 async function createSession(): Promise<CopilotSdkSession> {
   const client = await createClient();
-  return client.createSession({
+  return client.createSession(sessionConfig());
+}
+
+function sessionConfig(
+  overrides: Partial<CopilotSdkSessionConfig> = {},
+): CopilotSdkSessionConfig {
+  return {
+    availableTools: [],
     model: 'gpt-5',
     onEvent: () => {},
     onPermissionRequest: async () => ({ kind: 'deny' } as never),
     onUserInputRequest: async () => ({} as never),
     systemMessage: { content: 'system', mode: 'replace' },
     workingDirectory: '/vault',
-  } satisfies CopilotSdkSessionConfig);
+    ...overrides,
+  } satisfies CopilotSdkSessionConfig;
 }
 
 beforeEach(() => {
   FakeSdkCopilotClient.instances.length = 0;
   FakeSdkCopilotClient.behavior = {};
 });
+
+/**
+ * `mode: 'empty'` is what makes the SDK's ambient CLI behaviour opt-in rather than
+ * inherited. Without it the client defaults to `copilot-cli`, where a session picks up
+ * the coding agent's own tools, instruction discovery, and cross-session capabilities —
+ * everything Claudian switches off one flag at a time would depend on that list staying
+ * complete as the CLI grows.
+ *
+ * Empty mode is also a contract: the SDK refuses a client with no persistence location of
+ * its own and a session with no explicit tool list, so both are stated here rather than
+ * left to a later layer.
+ */
+describe('copilotSdkRuntime client construction', () => {
+  it('constructs the client in empty mode against the CLI it was handed', async () => {
+    await copilotSdkRuntime.createClient({
+      baseDirectory: '/state/copilot',
+      cliPath: '/usr/local/bin/copilot',
+      environment: { COPILOT_HOME: '/state/copilot' },
+      workingDirectory: '/vault',
+    });
+    const options = FakeSdkCopilotClient.instances[0]?.options;
+
+    expect(options).toMatchObject({
+      baseDirectory: '/state/copilot',
+      connection: { env: { COPILOT_HOME: '/state/copilot' }, path: '/usr/local/bin/copilot' },
+      enableRemoteSessions: false,
+      mode: 'empty',
+      workingDirectory: '/vault',
+    });
+  });
+
+  /**
+   * An empty `baseDirectory` passes the SDK's own check, which only tests that one was
+   * supplied, and then leaves `COPILOT_HOME` unset — so the CLI writes this vault's agent
+   * state into the user's shared `~/.copilot`. No CLI is started for it.
+   */
+  it('refuses a client with no data directory of its own', async () => {
+    await expect(copilotSdkRuntime.createClient({
+      baseDirectory: '',
+      cliPath: '/usr/local/bin/copilot',
+      environment: {},
+      workingDirectory: '/vault',
+    })).rejects.toThrow(/COPILOT_HOME/);
+    expect(FakeSdkCopilotClient.instances).toEqual([]);
+  });
+
+  it('opts every created and resumed session into an explicit tool list', async () => {
+    const client = await createClient();
+    await client.createSession(sessionConfig());
+    await client.resumeSession(
+      'copilot-session-1',
+      sessionConfig({ availableTools: ['builtin:view'] }),
+    );
+
+    expect(FakeSdkCopilotClient.instances[0]?.sessionConfigs.map(
+      config => config.availableTools,
+    )).toEqual([[], ['builtin:view']]);
+  });
+
+  /**
+   * The SDK refuses a session that named no tools, so the port requires the list rather
+   * than leaving a later consumer free to omit it and find out at runtime. This only
+   * compiles while `availableTools` is a mandatory key.
+   */
+  it('leaves no consumer able to omit the tool list', () => {
+    const mandatory: MandatoryKey<CopilotSdkSessionConfig> = 'availableTools';
+
+    expect(mandatory).toBe('availableTools');
+  });
+});
+
+/** The keys of `T` a caller has to supply, as opposed to those it may leave out. */
+type MandatoryKey<T> = {
+  [K in keyof T]-?: undefined extends T[K] ? never : K;
+}[keyof T];
 
 describe('copilotSdkRuntime client shutdown', () => {
   it('reports a clean shutdown without forcing the process down', async () => {
