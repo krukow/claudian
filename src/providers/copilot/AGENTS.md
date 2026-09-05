@@ -23,7 +23,7 @@ not what a later layer will do with them.
 
 | Component | Owns |
 | --- | --- |
-| `sdk/CopilotSdkRuntime` | SDK construction, the SDK defaulting mode, the start and shutdown bounds, and every capability switched off for Claudian |
+| `sdk/CopilotSdkRuntime` | SDK construction, the SDK defaulting mode, the start, session-opening, and shutdown bounds, and every capability switched off for Claudian |
 | `sdk/CopilotNativeBudget` | How long a cold start and any one native acquisition or release may take, and what silence means |
 | `sdk/CopilotClientFactory` | CLI resolution, runtime environment, client identity, and the auth gate |
 | `sdk/CopilotRuntimeError` | Failure categorization onto `ProviderExecutionErrorCategory`, and what each category leaves unusable |
@@ -180,13 +180,22 @@ not what a later layer will do with them.
   `sdk/CopilotSdkRuntime` does it for a start that went silent; a discovery probe's own
   client is shut down for the same reason, so a failed discovery leaves no CLI running.
 - Every native call that acquires something from a runtime that is already up — the
-  authentication gate and the model catalog here — is bounded by the release budget in
-  `sdk/CopilotNativeBudget`, because an acquisition nothing interrupts holds its caller
-  open and holds whatever is queued behind it open with it. A client that arrives after
-  the budget belongs to nobody and is released where it arrives: `acquireNativeWithin`
-  carries the resource so that release has something to act on. Silence acquiring is the
-  same transport failure as silence releasing, from `copilotNativeSilenceError`, and it
-  drops the runtime rather than reusing state whose condition the CLI never reported.
+  authentication gate, the model catalog, and opening or resuming a session here — is
+  bounded by the release budget in `sdk/CopilotNativeBudget`, because an acquisition
+  nothing interrupts holds its caller open and holds whatever is queued behind it open
+  with it. A client that arrives after the budget belongs to nobody and is released where
+  it arrives: `acquireNativeWithin` carries the resource so that release has something to
+  act on. Silence acquiring is the same transport failure as silence releasing, from
+  `copilotNativeSilenceError`, and it drops the runtime rather than reusing state whose
+  condition the CLI never reported.
+- Opening a session is bounded inside `sdk/CopilotSdkRuntime` rather than by its caller,
+  and the CLI that went silent on one is stopped and force-stopped there before the
+  failure is raised. Ending that process is something only the module holding the client
+  can do, and a client whose next call would wait out the same silence is worth nothing to
+  the caller, so the layer above is handed a bounded call and a terminated CLI instead of
+  an unbounded request it would wrap a second deadline around without being able to clean
+  up after it. A session that arrives afterwards is disconnected where it arrives. Do not
+  add a second bound at a call site.
 - Starting a client is the exception, and runs on the longer startup budget instead. A
   start is not a release: spawning the CLI, waiting for it to listen, and handshaking
   versions is cold work a first launch, a slow disk, or a virus scanner stretches well

@@ -1,5 +1,6 @@
 import type { CopilotReasoningEffort } from '../models';
 import {
+  acquireNativeWithin,
   copilotNativeSilenceError,
   NATIVE_OPERATION_TIMEOUT_SECONDS,
   NATIVE_STARTUP_TIMEOUT_MS,
@@ -63,6 +64,11 @@ function loadCopilotSdk(): Promise<CopilotSdkModule> {
  * made while the raw SDK client is still private to this module. A caller was handed
  * nothing it could stop, so a start that never answers is ended here and the CLI it
  * spawned is killed; no client is ever returned once that has happened.
+ *
+ * Opening a session is bounded here for a related reason: ending the CLI that went silent
+ * on one is something only the module that owns the client can do, so the layer above is
+ * given a bounded call and a terminated process rather than an unbounded request it would
+ * have to wrap a deadline around and could not clean up after.
  *
  * It runs on the startup budget rather than the one every release shares, because a cold
  * CLI is still coming up long after a runtime that is already running would have answered.
@@ -130,7 +136,10 @@ class SdkBackedClient implements CopilotSdkClient {
 
   async createSession(config: CopilotSdkSessionConfig): Promise<CopilotSdkSession> {
     try {
-      return new SdkBackedSession(await this.client.createSession(toSessionConfig(config)));
+      return new SdkBackedSession(await this.openSession(
+        this.client.createSession(toSessionConfig(config)),
+        'open a session',
+      ));
     } catch (error) {
       throw toCopilotRuntimeError(error, 'provider');
     }
@@ -141,16 +150,50 @@ class SdkBackedClient implements CopilotSdkClient {
     config: CopilotSdkSessionConfig,
   ): Promise<CopilotSdkSession> {
     try {
-      const session = await this.client.resumeSession(
-        providerSessionId,
-        toSessionConfig(config),
-      );
-      return new SdkBackedSession(session);
+      return new SdkBackedSession(await this.openSession(
+        this.client.resumeSession(providerSessionId, toSessionConfig(config)),
+        'resume the session',
+      ));
     } catch (error) {
       const runtimeError = toCopilotRuntimeError(error, 'provider');
       throw runtimeError.category === 'provider-session-missing'
         ? copilotMissingSessionError(runtimeError.message, providerSessionId)
         : runtimeError;
+    }
+  }
+
+  /**
+   * Waits for a session the CLI is opening, under the shared native release budget.
+   *
+   * Opening one is an acquisition from a runtime that is already up, so it answers or it
+   * does not; a CLI that never answers would otherwise hold the turn that asked open for
+   * as long as it stays silent, and hold whatever is queued behind that turn open with
+   * it. Bounding it here is what lets the layer above call this like any other native
+   * operation instead of wrapping a deadline of its own around an unbounded call.
+   *
+   * A CLI that went silent cannot be asked anything else, so it is stopped and killed
+   * rather than handed back as a client whose next call waits out the same silence, and
+   * the caller is told what happened to it. A session that arrives afterwards belongs to
+   * nobody — the caller already has its failure and the process is gone — so it is
+   * disconnected where it arrives rather than left open, and neither its arrival nor its
+   * refusal replaces the failure that was already reported.
+   */
+  private async openSession(
+    opening: Promise<CopilotSession>,
+    step: string,
+  ): Promise<CopilotSession> {
+    const outcome = await acquireNativeWithin(
+      opening,
+      session => session.disconnect(),
+    );
+    switch (outcome.kind) {
+      case 'settled':
+        return outcome.value;
+      case 'rejected':
+        throw outcome.error;
+      case 'timed-out':
+        await stopQuietly(this.client);
+        throw sessionSilenceError(step);
     }
   }
 
@@ -325,6 +368,19 @@ function shutdownTimeoutError(): CopilotRuntimeError {
     'transport',
     'The Copilot CLI did not shut down within '
     + `${NATIVE_OPERATION_TIMEOUT_SECONDS} seconds and was terminated.`,
+  );
+}
+
+/**
+ * The session a CLI never opened, told as the transport failure it is. The CLI it was
+ * asked of is gone by the time this is raised, so the message says so: the next attempt
+ * starts a fresh one rather than waiting out the same silence.
+ */
+function sessionSilenceError(step: string): CopilotRuntimeError {
+  return new CopilotRuntimeError(
+    'transport',
+    `Copilot did not ${step} within ${NATIVE_OPERATION_TIMEOUT_SECONDS} seconds. `
+    + 'The CLI was terminated; send the message again to start a fresh one.',
   );
 }
 

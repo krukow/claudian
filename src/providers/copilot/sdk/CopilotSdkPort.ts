@@ -96,7 +96,18 @@ export type CopilotSdkSessionDeletion = 'deleted' | 'missing';
 export interface CopilotSdkClient {
   getAuthStatus(): Promise<CopilotSdkAuthStatus>;
   listModels(): Promise<readonly CopilotSdkModel[]>;
+  /**
+   * Opens a session, always settling within the shared native release budget.
+   *
+   * The deadline belongs here rather than to a caller: the CLI a silent request was made
+   * of is stopped and killed before this rejects, which only the owner of that client can
+   * do, and a session that arrives afterwards is disconnected where it arrives. A caller
+   * therefore never has to wrap a deadline of its own around an inner call that might
+   * never answer — it receives a transport failure saying the CLI was terminated, drops
+   * the client, and starts a fresh one.
+   */
   createSession(config: CopilotSdkSessionConfig): Promise<CopilotSdkSession>;
+  /** Resumes a session under the same budget and cleanup as {@link createSession}. */
   resumeSession(
     providerSessionId: string,
     config: CopilotSdkSessionConfig,
@@ -108,7 +119,8 @@ export interface CopilotSdkClient {
    * fully succeed. Rejects with what that stop could not do, so a caller that has to
    * account for the runtime it released learns the CLI was killed rather than shut down.
    *
-   * Always settles within the shared native release budget, unlike
+   * Always settles within the shared native release budget, as
+   * {@link createSession} and {@link resumeSession} do, and unlike
    * {@link CopilotSdkSession}'s abort and disconnect, which their caller bounds. A caller
    * bounds those two because it has to decide what a silent runtime means for a session it
    * might still reuse; a client being stopped is discarded either way, so bounding it here

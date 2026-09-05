@@ -10,12 +10,18 @@ import { copilotSdkRuntime } from '@/providers/copilot/sdk/CopilotSdkRuntime';
 /** The SDK session surface the wrapper drives, with only the turn controls under test. */
 class FakeSdkCopilotSession {
   aborted = 0;
+  disconnected = 0;
 
   constructor(readonly sessionId: string) {}
 
   async abort(): Promise<void> {
     this.aborted += 1;
     await FakeSdkCopilotClient.behavior.abort?.();
+  }
+
+  async disconnect(): Promise<void> {
+    this.disconnected += 1;
+    await FakeSdkCopilotClient.behavior.disconnect?.();
   }
 }
 
@@ -28,6 +34,9 @@ class FakeSdkCopilotClient {
   static readonly instances: FakeSdkCopilotClient[] = [];
   static behavior: {
     abort?: () => Promise<void>;
+    createSession?: () => Promise<FakeSdkCopilotSession>;
+    disconnect?: () => Promise<void>;
+    resumeSession?: () => Promise<FakeSdkCopilotSession>;
     start?: () => Promise<void>;
     stop?: () => Promise<Error[]>;
     forceStop?: () => Promise<void>;
@@ -53,7 +62,8 @@ class FakeSdkCopilotClient {
 
   async createSession(config: SessionConfig): Promise<FakeSdkCopilotSession> {
     this.sessionConfigs.push(config);
-    return new FakeSdkCopilotSession('copilot-session-1');
+    return (await FakeSdkCopilotClient.behavior.createSession?.())
+      ?? new FakeSdkCopilotSession('copilot-session-1');
   }
 
   async resumeSession(
@@ -61,7 +71,8 @@ class FakeSdkCopilotClient {
     config: SessionConfig,
   ): Promise<FakeSdkCopilotSession> {
     this.sessionConfigs.push(config);
-    return new FakeSdkCopilotSession(sessionId);
+    return (await FakeSdkCopilotClient.behavior.resumeSession?.())
+      ?? new FakeSdkCopilotSession(sessionId);
   }
 
   async stop(): Promise<Error[]> {
@@ -573,6 +584,162 @@ describe('copilotSdkRuntime startup budget', () => {
         expect(failure.message).not.toMatch(/far too late/);
         expect(FakeSdkCopilotClient.instances[0]?.forceStopped).toBe(1);
       });
+    });
+  });
+});
+
+/**
+ * Opening a session is a native acquisition from a runtime that is already up, so it runs
+ * on the same budget every release does. A CLI that never answers one would otherwise hold
+ * the turn that asked for it open for as long as it stays silent, and hold whatever is
+ * queued behind that turn open with it.
+ *
+ * The client is the wrapper's own, and a CLI that stopped answering here cannot be asked
+ * anything else, so the runtime ends it rather than handing back a client whose next call
+ * would wait out the same silence.
+ */
+describe('copilotSdkRuntime session budget', () => {
+  it('ends the CLI when a new session never arrives', async () => {
+    await withoutUnhandledRejections(async () => {
+      await withFakeTimers(async () => {
+        FakeSdkCopilotClient.behavior.createSession = () =>
+          neverAnswers<FakeSdkCopilotSession>();
+        const client = await createClient();
+
+        const opening = client.createSession(sessionConfig()).then(
+          () => new Error('the session unexpectedly opened'),
+          (error: unknown) => error as Error,
+        );
+        await jest.advanceTimersByTimeAsync(5_000);
+
+        expect((await opening).message)
+          .toMatch(/did not open a session within 5 seconds.*terminated/);
+        expect(FakeSdkCopilotClient.instances[0]?.stopped).toBe(1);
+        expect(FakeSdkCopilotClient.instances[0]?.forceStopped).toBe(1);
+      });
+    });
+  });
+
+  it('ends the CLI when a resumed session never arrives', async () => {
+    await withoutUnhandledRejections(async () => {
+      await withFakeTimers(async () => {
+        FakeSdkCopilotClient.behavior.resumeSession = () =>
+          neverAnswers<FakeSdkCopilotSession>();
+        const client = await createClient();
+
+        const resuming = client.resumeSession('copilot-session-1', sessionConfig()).then(
+          () => new Error('the session unexpectedly resumed'),
+          (error: unknown) => error as Error,
+        );
+        await jest.advanceTimersByTimeAsync(5_000);
+
+        expect((await resuming).message)
+          .toMatch(/did not resume the session within 5 seconds.*terminated/);
+        expect(FakeSdkCopilotClient.instances[0]?.forceStopped).toBe(1);
+      });
+    });
+  });
+
+  /**
+   * A session that arrives once the budget has elapsed has no caller left to hand it to,
+   * and the CLI holding it has already been killed. Leaving it connected would keep a
+   * session Claudian never returned open on a runtime nothing owns.
+   */
+  it('disconnects a session that arrives after the budget', async () => {
+    await withoutUnhandledRejections(async () => {
+      await withFakeTimers(async () => {
+        const late = new FakeSdkCopilotSession('copilot-session-late');
+        let deliver!: (session: FakeSdkCopilotSession) => void;
+        FakeSdkCopilotClient.behavior.createSession = () => (
+          new Promise<FakeSdkCopilotSession>((resolve) => { deliver = resolve; })
+        );
+        const client = await createClient();
+
+        const opening = client.createSession(sessionConfig()).then(
+          () => new Error('the session unexpectedly opened'),
+          (error: unknown) => error as Error,
+        );
+        await jest.advanceTimersByTimeAsync(5_000);
+        const failure = await opening;
+        deliver(late);
+        await jest.advanceTimersByTimeAsync(0);
+
+        expect(failure.message).toMatch(/did not open a session/);
+        expect(late.disconnected).toBe(1);
+      });
+    });
+  });
+
+  /**
+   * The release of a late session runs on a CLI that was already terminated, so it fails
+   * far more often than it succeeds. Nothing is listening for either outcome by then.
+   */
+  it('absorbs a late session whose release fails', async () => {
+    await withoutUnhandledRejections(async () => {
+      await withFakeTimers(async () => {
+        const late = new FakeSdkCopilotSession('copilot-session-late');
+        let deliver!: (session: FakeSdkCopilotSession) => void;
+        FakeSdkCopilotClient.behavior.createSession = () => (
+          new Promise<FakeSdkCopilotSession>((resolve) => { deliver = resolve; })
+        );
+        FakeSdkCopilotClient.behavior.disconnect = async () => {
+          throw new Error('the connection was already gone');
+        };
+        const client = await createClient();
+
+        const opening = client.createSession(sessionConfig()).then(
+          () => new Error('the session unexpectedly opened'),
+          (error: unknown) => error as Error,
+        );
+        await jest.advanceTimersByTimeAsync(5_000);
+        const failure = await opening;
+        deliver(late);
+        await jest.advanceTimersByTimeAsync(0);
+
+        expect(failure.message).not.toMatch(/already gone/);
+        expect(late.disconnected).toBe(1);
+      });
+    });
+  });
+
+  /**
+   * A CLI that rejects after the budget has no caller left either, and its rejection must
+   * not replace the failure the caller was already given.
+   */
+  it('absorbs a session request that fails after the budget', async () => {
+    await withoutUnhandledRejections(async () => {
+      await withFakeTimers(async () => {
+        let refuse!: (error: unknown) => void;
+        FakeSdkCopilotClient.behavior.createSession = () => (
+          new Promise<FakeSdkCopilotSession>((_resolve, reject) => { refuse = reject; })
+        );
+        const client = await createClient();
+
+        const opening = client.createSession(sessionConfig()).then(
+          () => new Error('the session unexpectedly opened'),
+          (error: unknown) => error as Error,
+        );
+        await jest.advanceTimersByTimeAsync(5_000);
+        const failure = await opening;
+        refuse(new Error('the CLI answered far too late'));
+        await jest.advanceTimersByTimeAsync(5_000);
+
+        expect(failure.message).toMatch(/did not open a session/);
+        expect(failure.message).not.toMatch(/far too late/);
+      });
+    });
+  });
+
+  it('leaves a CLI that answered within the budget running', async () => {
+    await withFakeTimers(async () => {
+      const client = await createClient();
+
+      const session = await client.createSession(sessionConfig());
+      await jest.advanceTimersByTimeAsync(30_000);
+
+      expect(session.sessionId).toBe('copilot-session-1');
+      expect(FakeSdkCopilotClient.instances[0]?.stopped).toBe(0);
+      expect(FakeSdkCopilotClient.instances[0]?.forceStopped).toBe(0);
     });
   });
 });
