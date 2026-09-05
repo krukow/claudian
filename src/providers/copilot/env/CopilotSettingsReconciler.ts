@@ -17,7 +17,8 @@ import { getCopilotProviderSettings, updateCopilotProviderSettings } from '../se
  * decides which entries exist, case decides which of two spellings is the same variable,
  * and order decides which of them wins. Fingerprinting the text instead would give one
  * identity to two settings that start different CLIs, and two identities to settings that
- * start the same one.
+ * start the same one. The resolved entries are therefore the whole environment input, and
+ * no raw text is handed to the fingerprint beside them.
  */
 export function computeCopilotEnvironmentHash(settings: Record<string, unknown>): string {
   const providerSettings = getCopilotProviderSettings(settings);
