@@ -1,3 +1,17 @@
+/**
+ * Installing `@github/copilot-sdk` also installs a Copilot CLI Claudian never runs and a
+ * native addon Obsidian cannot load: `@github/copilot` and `koffi` are ordinary dependencies
+ * of the SDK, and the CLI resolves one per-platform binary package (~276-312 MB unpacked,
+ * whichever platform installs) through its own optional dependencies. There is no opt-out
+ * short of package-manager overrides or a vendored stub, both of which trade a disk cost for
+ * a resolution the SDK can silently break, so the cost is accepted and disclosed instead.
+ *
+ * What this envelope guarantees is narrower and enforceable: none of it reaches `main.js`,
+ * and nothing in the bundle can resolve it at runtime.
+ * `tests/integration/build/copilot-sdk-bundle-envelope.test.ts` builds the SDK through the
+ * envelope and measures both halves — the graph that must be absent, and the stdio JSON-RPC
+ * client that must survive.
+ */
 const fsPromises = require('node:fs/promises');
 const path = require('node:path');
 
@@ -99,6 +113,32 @@ function createCopilotSdkRuntimeAliases() {
   });
 }
 
+/**
+ * Markers whose presence in a built artifact would mean the envelope failed: the native FFI
+ * addon, the in-process transport that loads it, or a path to the CLI that ships inside the
+ * SDK's own dependency graph. The build reads these back out of the bundle, because patching
+ * the SDK source is not the guarantee — the artifact is.
+ */
+const copilotForbiddenBundleMarkers = Object.freeze({
+  'koffi': 'the native FFI addon',
+  'ffiRuntimeHost': 'the in-process FFI transport module',
+  'FfiRuntimeHost.prototype': 'a live in-process FFI transport',
+  'getBundledCliPath': 'the SDK-bundled CLI resolver',
+  '@github/copilot-linux': 'an SDK-bundled CLI platform package',
+  '@github/copilot-darwin': 'an SDK-bundled CLI platform package',
+  '@github/copilot-win32': 'an SDK-bundled CLI platform package',
+  'Could not resolve a @github/copilot platform package':
+    'the SDK-bundled CLI resolution failure path',
+});
+
+function inspectCopilotBundleEnvelope(bundleContents) {
+  return {
+    forbidden: Object.entries(copilotForbiddenBundleMarkers)
+      .filter(([marker]) => bundleContents.includes(marker))
+      .map(([marker, description]) => `${marker} (${description})`),
+  };
+}
+
 function createCopilotSdkBundleEnvelopePlugin() {
   const unsupportedFilter = new RegExp(
     `[\\\\/]node_modules[\\\\/]@github[\\\\/]copilot-sdk[\\\\/]dist[\\\\/](?:cjs[\\\\/])?(?:${
@@ -131,6 +171,7 @@ module.exports = {
   bundledCliResolvers,
   createCopilotSdkBundleEnvelopePlugin,
   createCopilotSdkRuntimeAliases,
+  inspectCopilotBundleEnvelope,
   resolveVscodeJsonRpcNodeEntry,
   stripBundledCliResolvers,
   unsupportedSdkModules,

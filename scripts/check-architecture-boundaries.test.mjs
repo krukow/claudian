@@ -16,7 +16,9 @@ import {
   inspectPluginArtifactReferences,
   mainBudgetBytes,
   preCollabReferenceMainBytes,
+  preCopilotSdkBaselineMainBytes,
   preStep11BundleHealthBaselineBytes,
+  upstreamMainBudgetBytes,
 } from './check-startup-performance.mjs';
 import {
   bundleCriticalRuntimeDependencies,
@@ -1004,15 +1006,35 @@ test('TypeScript resolves the Collab protocol through the installed registry pac
   );
 });
 
+/**
+ * The fork budget is the only hard gate; the upstream ceiling it was raised from stays in
+ * the policy so every report says how far past it the artifact has drifted, and so raising
+ * it again is a visible decision rather than an edit to a single number.
+ */
 test('performance policy enforces the main bundle budget and reports health deltas', () => {
   assert.equal(preStep11BundleHealthBaselineBytes, 4_896_000);
-  assert.equal(mainBudgetBytes, 5_000_000);
+  assert.equal(preCopilotSdkBaselineMainBytes, 4_963_797);
+  assert.equal(upstreamMainBudgetBytes, 5_000_000);
+  assert.equal(mainBudgetBytes, 5_250_000);
+  assert.equal(mainBudgetBytes - upstreamMainBudgetBytes, 250_000);
   assert.deepEqual(inspectArtifactSize(mainBudgetBytes), {
     budgetExceeded: false,
+    copilotSdkBaselineDeltaBytes: mainBudgetBytes - preCopilotSdkBaselineMainBytes,
     healthBaselineDeltaBytes: mainBudgetBytes - preStep11BundleHealthBaselineBytes,
     referenceDeltaBytes: mainBudgetBytes - preCollabReferenceMainBytes,
+    upstreamCeilingExceeded: true,
   });
   assert.equal(inspectArtifactSize(mainBudgetBytes + 1).budgetExceeded, true);
+  assert.equal(inspectArtifactSize(upstreamMainBudgetBytes).upstreamCeilingExceeded, false);
+  assert.equal(
+    inspectArtifactSize(upstreamMainBudgetBytes + 1).upstreamCeilingExceeded,
+    true,
+  );
+  assert.equal(inspectArtifactSize(upstreamMainBudgetBytes + 1).budgetExceeded, false);
+  assert.equal(
+    inspectArtifactSize(preCopilotSdkBaselineMainBytes).copilotSdkBaselineDeltaBytes,
+    0,
+  );
   assert.equal(inspectEvaluationDuration(evaluationIndicatorMs), 'within-indicator');
   assert.equal(inspectEvaluationDuration(evaluationIndicatorMs + 1), 'warning');
   assert.equal(

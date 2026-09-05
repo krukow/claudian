@@ -330,16 +330,21 @@ describe('Collab dependency envelope', () => {
     `)).toBe('["function","function"]');
   });
 
-  it('enforces the hard bundle budget and reports the pre-Step-11 health baseline', () => {
+  it('enforces the fork bundle budget and reports the ceilings it was raised from', () => {
     const script = readFileSync(performanceScriptPath, 'utf8');
 
     expect(script).toContain('preCollabReferenceMainBytes = 3_739_584');
     expect(script).toContain('preStep11BundleHealthBaselineBytes = 4_896_000');
-    expect(script).toContain('mainBudgetBytes = 5_000_000');
+    expect(script).toContain('preCopilotSdkBaselineMainBytes = 4_963_797');
+    expect(script).toContain('upstreamMainBudgetBytes = 5_000_000');
+    expect(script).toContain('mainBudgetBytes = 5_250_000');
     expect(script).toContain('evaluationReviewThresholdMs = 150');
     expect(script).toContain('pre-Collab reference delta');
     expect(script).toContain('pre-Step-11 health baseline delta');
+    expect(script).toContain('pre-Copilot baseline delta');
+    expect(script).toContain('inherited upstream ceiling');
     expect(script).toContain('artifact.budgetExceeded');
+    expect(script).toContain('artifact.upstreamCeilingExceeded');
     expect(script).not.toContain('historicalMainWarningBytes');
     expect(script).not.toContain('mainReviewThresholdBytes');
   });

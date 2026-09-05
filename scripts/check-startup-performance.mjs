@@ -6,46 +6,43 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
+import copilotSdkBundleEnvelopeHelpers from './copilotSdkBundleEnvelope.js';
+
+const { inspectCopilotBundleEnvelope } = copilotSdkBundleEnvelopeHelpers;
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const mainPath = path.join(root, 'main.js');
 const requiredArtifacts = ['main.js', 'manifest.json', 'styles.css'];
 export const preCollabReferenceMainBytes = 3_739_584;
 export const preStep11BundleHealthBaselineBytes = 4_896_000;
-export const mainBudgetBytes = 5_000_000;
+export const preCopilotSdkBaselineMainBytes = 4_963_797;
+
+/**
+ * Upstream ships `main.js` under a 5 MB ceiling and this fork keeps reporting against it, but
+ * the fork also carries a dependency upstream does not: the Copilot SDK measures ~147 KB
+ * through the production bundle path
+ * (`tests/integration/build/copilot-sdk-bundle-envelope.test.ts`), which the pre-Copilot
+ * 4_963_797-byte artifact has no room for. The budget adds 250 KB for that one consumer, so
+ * the first Copilot import lands inside a number that was reviewed rather than discovered on
+ * a red build. Crossing the upstream ceiling is reported on every run; crossing the fork
+ * budget fails it. Raise the budget only against a measured contribution, never to make a
+ * build pass.
+ */
+export const upstreamMainBudgetBytes = 5_000_000;
+export const mainBudgetBytes = 5_250_000;
 export const evaluationIndicatorMs = 50;
 export const evaluationReviewThresholdMs = 150;
 const pluginArtifactNames = ['main.js', 'manifest.json'];
 
-/**
- * Markers whose presence would mean the published bundle carries something the Copilot
- * envelope exists to keep out: the native FFI addon, the in-process transport that loads
- * it, or a path to the CLI that ships inside the SDK's own dependency graph.
- */
-const copilotForbiddenBundleMarkers = Object.freeze({
-  'koffi': 'the native FFI addon',
-  'ffiRuntimeHost': 'the in-process FFI transport module',
-  'FfiRuntimeHost.prototype': 'a live in-process FFI transport',
-  'getBundledCliPath': 'the SDK-bundled CLI resolver',
-  '@github/copilot-linux': 'an SDK-bundled CLI platform package',
-  '@github/copilot-darwin': 'an SDK-bundled CLI platform package',
-  '@github/copilot-win32': 'an SDK-bundled CLI platform package',
-  'Could not resolve a @github/copilot platform package':
-    'the SDK-bundled CLI resolution failure path',
-});
-
-export function inspectCopilotBundleEnvelope(mainContents) {
-  return {
-    forbidden: Object.entries(copilotForbiddenBundleMarkers)
-      .filter(([marker]) => mainContents.includes(marker))
-      .map(([marker, description]) => `${marker} (${description})`),
-  };
-}
+export { inspectCopilotBundleEnvelope };
 
 export function inspectArtifactSize(mainBytes) {
   return {
     budgetExceeded: mainBytes > mainBudgetBytes,
+    copilotSdkBaselineDeltaBytes: mainBytes - preCopilotSdkBaselineMainBytes,
     healthBaselineDeltaBytes: mainBytes - preStep11BundleHealthBaselineBytes,
     referenceDeltaBytes: mainBytes - preCollabReferenceMainBytes,
+    upstreamCeilingExceeded: mainBytes > upstreamMainBudgetBytes,
   };
 }
 
@@ -226,11 +223,21 @@ process.stdout.write(JSON.stringify({
 
   console.log(
     `main.js ${(mainBytes / 1024 / 1024).toFixed(2)} MiB (${mainBytes} bytes); `
+    + `fork budget ${mainBudgetBytes} bytes; `
+    + `inherited upstream ceiling ${upstreamMainBudgetBytes} bytes; `
+    + `pre-Copilot baseline delta ${signed(artifact.copilotSdkBaselineDeltaBytes)} bytes; `
     + `pre-Collab reference delta ${signed(artifact.referenceDeltaBytes)} bytes `
     + `(${signed(deltaMiB.toFixed(2))} MiB); `
     + `pre-Step-11 health baseline delta ${signed(artifact.healthBaselineDeltaBytes)} bytes; `
     + `median cold evaluation ${medianMs.toFixed(1)} ms`,
   );
+  if (artifact.upstreamCeilingExceeded) {
+    console.warn(
+      `main.js is ${mainBytes} bytes, past the inherited upstream ceiling of `
+      + `${upstreamMainBudgetBytes} bytes; ${mainBudgetBytes - mainBytes} bytes of the fork `
+      + 'budget remain.',
+    );
+  }
   const evaluation = inspectEvaluationDuration(medianMs);
   if (evaluation === 'review-required') {
     console.warn(

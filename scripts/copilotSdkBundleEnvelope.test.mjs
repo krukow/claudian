@@ -8,8 +8,10 @@ import copilotSdkBundleEnvelope from './copilotSdkBundleEnvelope.js';
 import { bundleCriticalRuntimeDependencies } from './runtimeDependencyParity.mjs';
 
 const {
+  bundledCliResolvers,
   createCopilotSdkBundleEnvelopePlugin,
   createCopilotSdkRuntimeAliases,
+  inspectCopilotBundleEnvelope,
   resolveVscodeJsonRpcNodeEntry,
   unsupportedSdkModules,
 } = copilotSdkBundleEnvelope;
@@ -103,6 +105,31 @@ test('the FFI transport stub keeps the native koffi addon out of the bundle', ()
   const clientSource = fs.readFileSync(path.join(sdkRoot, 'dist', 'client.js'), 'utf8');
   assert.match(clientSource, /await import\("\.\/ffiRuntimeHost\.js"\)/);
   assert.doesNotMatch(clientSource, /from "koffi"/);
+});
+
+/**
+ * Installing the SDK is not free: `@github/copilot` and `koffi` are ordinary dependencies of
+ * `@github/copilot-sdk`, so every install pulls the native FFI addon and one per-platform
+ * Copilot CLI (~276-312 MB unpacked) into `node_modules`. Claudian bundles and resolves
+ * neither. This test fails when that shape changes, so the disclosure in the envelope and in
+ * the build tests stays true rather than quietly describing an older SDK.
+ */
+test('the SDK install cost the envelope contains is a transitive dependency, not an extra', () => {
+  const sdkManifest = readJson('node_modules/@github/copilot-sdk/package.json');
+  const cliManifest = readJson('node_modules/@github/copilot/package.json');
+  const platformPackages = Object.keys(cliManifest.optionalDependencies ?? {});
+
+  assert.equal(sdkManifest.dependencies.koffi !== undefined, true);
+  assert.equal(sdkManifest.dependencies['@github/copilot'] !== undefined, true);
+  assert.ok(platformPackages.length > 0);
+  assert.ok(platformPackages.every(name => name.startsWith('@github/copilot-')));
+  assert.equal(fs.existsSync(path.join(root, 'node_modules', 'koffi')), true);
+
+  assert.ok('ffiRuntimeHost' in unsupportedSdkModules);
+  assert.deepEqual(bundledCliResolvers, ['getCliPlatformPackageNames', 'getBundledCliPath']);
+  for (const marker of ['koffi', 'getBundledCliPath', '@github/copilot-darwin']) {
+    assert.equal(inspectCopilotBundleEnvelope(marker).forbidden.length, 1);
+  }
 });
 
 test('the production bundle applies the Copilot SDK envelope', () => {
