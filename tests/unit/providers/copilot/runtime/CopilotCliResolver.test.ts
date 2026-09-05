@@ -141,6 +141,115 @@ describe('CopilotCliResolver', () => {
   });
 
   /**
+   * A configured path that names nothing is a setting to fix, not a reason to run
+   * whichever `copilot` the host happens to have: an install that was moved, renamed, or
+   * removed would otherwise be replaced silently by another one, under a path the user
+   * never named and cannot see. Unset is the only state that lets discovery run.
+   */
+  it.each([
+    ['the current host path', { 'current-host': '/missing/copilot' }, ''],
+    ['the legacy path', {}, '/missing/copilot'],
+    ['the current host path with an empty quoted value', { 'current-host': '""' }, ''],
+  ] as ReadonlyArray<[string, Record<string, string>, string]>)(
+    'fails closed when %s names nothing',
+    (_name, hostnamePaths, legacyPath) => {
+      const hostBinary = path.join(parsePathEntries(process.env.PATH ?? '')[0] ?? '', 'copilot');
+      mockedStat.mockImplementation((filePath: string) => {
+        if (filePath === hostBinary) {
+          return { isFile: () => true };
+        }
+        throw new Error(`ENOENT: ${filePath}`);
+      });
+
+      expect(new CopilotCliResolver().resolve(hostnamePaths, legacyPath, '')).toBeNull();
+    },
+  );
+
+  /**
+   * The current host's path is the one this machine was configured with, so a legacy path
+   * synced from another machine never stands in for it.
+   */
+  it('never falls back from a broken host path to the legacy path', () => {
+    mockedStat.mockImplementation((filePath: string) => {
+      if (filePath === '/legacy/copilot') {
+        return { isFile: () => true };
+      }
+      throw new Error(`ENOENT: ${filePath}`);
+    });
+
+    expect(new CopilotCliResolver().resolve(
+      { 'current-host': '/missing/copilot' },
+      '/legacy/copilot',
+      '',
+    )).toBeNull();
+  });
+
+  /**
+   * A path that exists but is not something the SDK can be handed is configured just as
+   * explicitly, so it fails closed for the same reason: a `.cmd` launcher naming nothing
+   * resolvable, or an entry the filesystem does not identify as the lowercase `.js` the
+   * SDK starts through Node.
+   */
+  it('fails closed on a configured path the SDK cannot be handed', () => {
+    const shim = 'C:\\npm\\copilot.cmd';
+    const hostBinary = path.join(parsePathEntries(process.env.PATH ?? '')[0] ?? '', 'copilot');
+    mockedStat.mockImplementation((filePath: string) => {
+      if (filePath === shim || filePath === hostBinary) {
+        return { isFile: () => true };
+      }
+      throw new Error(`ENOENT: ${filePath}`);
+    });
+    (fs.readFileSync as jest.Mock).mockReturnValue('@ECHO OFF\r\nREM nothing to launch\r\n');
+    const original = process.platform;
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+
+    try {
+      expect(new CopilotCliResolver().resolve({ 'current-host': shim }, '', '')).toBeNull();
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        configurable: true,
+        value: original,
+      });
+    }
+  });
+
+  /**
+   * Only an unset path lets discovery run, and a path box holding nothing but whitespace
+   * is unset. Anything else in it is an answer that has to resolve, including a quoted
+   * empty string: it names no install, and reading it as "unset" would hand a signed-in
+   * turn whichever `copilot` the host happens to have.
+   */
+  it.each(['   ', '\t'])('discovers the host CLI when the path box holds %j', (configured) => {
+    const hostBinary = path.join(parsePathEntries(process.env.PATH ?? '')[0] ?? '', 'copilot');
+    mockedStat.mockImplementation((filePath: string) => {
+      if (filePath === hostBinary) {
+        return { isFile: () => true };
+      }
+      throw new Error(`ENOENT: ${filePath}`);
+    });
+
+    expect(new CopilotCliResolver().resolve({ 'current-host': configured }, '', ''))
+      .toBe(hostBinary);
+  });
+
+  /**
+   * A path configured for another machine says nothing about this one, so the host it was
+   * synced to still discovers its own install.
+   */
+  it('discovers the host CLI when only another host names a path', () => {
+    const hostBinary = path.join(parsePathEntries(process.env.PATH ?? '')[0] ?? '', 'copilot');
+    mockedStat.mockImplementation((filePath: string) => {
+      if (filePath === hostBinary) {
+        return { isFile: () => true };
+      }
+      throw new Error(`ENOENT: ${filePath}`);
+    });
+
+    expect(new CopilotCliResolver().resolve({ 'other-host': '/other/copilot' }, '', ''))
+      .toBe(hostBinary);
+  });
+
+  /**
    * A relative entry on the host's own PATH resolves against the working directory too,
    * so discovery through it names vault content just as a configured relative path does.
    */

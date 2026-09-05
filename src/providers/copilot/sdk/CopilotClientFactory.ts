@@ -55,10 +55,12 @@ export class CopilotClientFactory {
     if (!cliPath) {
       throw copilotConfigurationError(
         'The Copilot CLI could not be launched. Install it and set the CLI path in '
-        + 'Copilot settings. The path must be absolute: a relative one is resolved '
-        + 'against the vault, so it would name a note rather than an install. An npm '
-        + 'install is launched through the platform package '
-        + '`@github/copilot-<platform>-<arch>`, so reinstall with '
+        + 'Copilot settings, or clear that path to let Claudian discover the CLI on this '
+        + 'host: a path that is set is the only one tried, so an install that was moved '
+        + 'or removed is never replaced by another one behind your back. The path must '
+        + 'be absolute: a relative one is resolved against the vault, so it would name a '
+        + 'note rather than an install. An npm install is launched through the platform '
+        + 'package `@github/copilot-<platform>-<arch>`, so reinstall with '
         + '`npm install -g @github/copilot` if that package is missing. On Windows point '
         + 'the path at `copilot.exe` or at the npm install; a `.cmd` launcher cannot be '
         + 'started directly. A JavaScript entry must be named with a lowercase `.js`, '

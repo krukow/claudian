@@ -42,14 +42,24 @@ not what a later layer will do with them.
 
 - The `copilot` CLI is user-installed and mandatory. Never resolve, bundle, or distribute
   the CLI that ships inside the SDK: an unresolvable binary is a configuration failure.
+- A configured CLI path is an answer, not a preference. `runtime/CopilotCliResolver` tells
+  an unset path apart from one that is set and does not resolve: where this host names a
+  path — or, for a host that names none, where the legacy field does — that path is the
+  only one considered, and it either resolves to an entry the SDK can be handed or
+  resolves to nothing. Only a path box holding nothing but whitespace lets discovery
+  search the host. Falling through a broken path would run whichever `copilot` the host
+  happens to have, under a path the user never named and cannot see in settings, with the
+  environment and vault access Claudian builds around it — and it would hide the moved,
+  renamed, or removed install that is the actual fault. The failure names both ways out:
+  fix the path, or clear it to let discovery run.
 - The path handed to the SDK is always absolute and normalized, whether it was configured,
   found on the host's PATH, or resolved out of an npm install. The SDK spawns the CLI with
   the vault as the working directory, so a relative path names a note, an attachment, or a
   synced folder rather than an install, and the same setting would mean a different program
   in every vault. `runtime/CopilotCliEntry` gates that before it reads anything else from
-  the path; a configured path that is still relative after expansion fails closed rather
-  than falling through to host discovery, because the CLI that then ran would not be the
-  one settings named. On Windows only a drive-qualified or UNC path counts, which is the
+  the path; a configured path that is still relative after expansion fails closed like
+  any other configured path that does not resolve, because the CLI that then ran would not
+  be the one settings named. On Windows only a drive-qualified or UNC path counts, which is the
   same distinction a launcher's own references are read with: `\tools\copilot.exe` and
   `C:copilot.exe` resolve against the working directory's drive, which is the vault's.
 - The SDK spawns a CLI path that ends in a lowercase `.js` through `process.execPath`,
