@@ -30,11 +30,11 @@ not what a later layer will do with them.
 | `runtime/CopilotCliResolver` | Discovering the user-installed `copilot` binary from settings and the host |
 | `runtime/CopilotCliEntry` | Narrowing a discovered path to the executable the SDK is handed |
 | `runtime/CopilotNativeCliBinary` | Where an npm install's native platform binary lives |
-| `runtime/CopilotRuntimeEnvironment` | `COPILOT_HOME` placement and the CLI process environment |
+| `runtime/CopilotRuntimeEnvironment` | `COPILOT_HOME` placement, the CLI process environment, and the canonical form of a configured environment |
 | `runtime/CopilotModelDiscoveryService` | Its own short-lived client and the discovered catalog |
 | `env/CopilotSettingsReconciler` | The runtime-input fingerprint and what a change to it invalidates |
-| `models.ts` | Model id encoding, catalog normalization, reasoning efforts, and catalog equality |
-| `settings.ts` | Persisted provider settings, their defaults, and their fail-closed decoding |
+| `models.ts` | Model id encoding, catalog normalization, reasoning efforts, context-window reading, and catalog equality |
+| `settings.ts` | Persisted provider settings, their defaults, their fail-closed decoding, and the merge that leaves other layers' fields alone |
 | `app/CopilotWorkspaceServices` | Publishing a discovered catalog only under the runtime it was discovered from |
 
 ## Runtime Rules
@@ -45,14 +45,21 @@ not what a later layer will do with them.
   which under Obsidian is Electron, and anything else directly. `runtime/CopilotCliEntry`
   narrows a discovered path to one of those two shapes — resolving the npm `copilot.cmd`
   launcher to the package's JavaScript entry, rewriting a `.JS` suffix to the spelling the
-  SDK recognises where the filesystem resolves both names to the same file, and failing
-  closed when it names nothing resolvable — and the environment sets `ELECTRON_RUN_AS_NODE`
-  for the JavaScript shape. `isCopilotJavaScriptEntrypoint` mirrors the SDK's own
-  lowercase test rather than matching without regard to case, because telling Electron to
-  behave as Node for a path the SDK would launch directly only hides the failure. Claudian
-  never spawns the CLI itself; the SDK owns `windowsHide`. That is enforced by the spawn
-  gate in `scripts/check-architecture-boundaries.test.mjs`, which reads the syntax tree
-  rather than the name, so `pattern.exec(line)` passes and a real spawn does not.
+  SDK recognises, and failing closed when it names nothing resolvable — and the
+  environment sets `ELECTRON_RUN_AS_NODE` for the JavaScript shape.
+  `isCopilotJavaScriptEntrypoint` mirrors the SDK's own lowercase test rather than
+  matching without regard to case, because telling Electron to behave as Node for a path
+  the SDK would launch directly only hides the failure. The suffix rewrite is allowed only
+  where the filesystem identifies both spellings as one file, by device and inode:
+  existence does not say that, since a case-sensitive filesystem can hold two different
+  programs under the two names, and `realpath` resolves symlinks while leaving the
+  spelling as given, so on macOS it reports two paths for one file. Claudian never spawns
+  the CLI itself; the SDK owns `windowsHide`. That is enforced by the spawn gate in
+  `scripts/check-architecture-boundaries.test.mjs`, which reads the syntax tree rather
+  than the name, so `pattern.exec(line)` passes and a real spawn does not. It reads every
+  route to the module — import, re-export, `require`, dynamic `import`, and
+  `process.getBuiltinModule` — and reports a specifier it cannot resolve rather than
+  passing it.
 - Every supported npm install lands on `@github/copilot`'s `npm-loader.js`, which only
   `spawnSync`s the platform package's native binary. The SDK owns and force-stops the
   process it started, so handing it the loader would leave it stopping a Node process
@@ -84,7 +91,9 @@ not what a later layer will do with them.
   an explicit `availableTools` list on every session. `baseDirectory` is checked for
   content as well as presence, because the SDK only tests that one was supplied and an
   empty one leaves `COPILOT_HOME` unset, which puts this vault's agent state in the
-  user's shared `~/.copilot`.
+  user's shared `~/.copilot`. Empty mode also flips tool filter precedence to deny-wins,
+  so an `excludedTools` entry overrides the same tool in `availableTools`; a later
+  execution layer reads its own tool list that way rather than the other way round.
 - Remote sessions, remote export, MCP apps, the built-in session store, host git
   operations, embedding retrieval, memory, infinite sessions, scheduling, and file hooks
   are switched off explicitly in `sdk/CopilotSdkRuntime` rather than left to an empty-mode
@@ -109,6 +118,11 @@ not what a later layer will do with them.
   under the allow-list's own spelling, because Windows resolves environment variables
   that way and a second spelling would sit beside the forwarded value instead of
   replacing it.
+- `resolveCopilotConfigurableEnvironment` is the one answer to what a configured
+  environment is: the allow-listed entries under the allow-list's spelling, the last of
+  two spellings winning, ordered by key. Everything that has to agree on that goes through
+  it, so a caller that read the settings text instead would disagree with the process that
+  was started.
 - No vault setting contributes to `PATH`, at either end. `resolveCopilotTrustedPath`
   builds the CLI process PATH from the host's own resolution and the CLI Claudian
   resolved, and `runtime/CopilotCliResolver` discovers the binary through the configured
@@ -139,6 +153,14 @@ not what a later layer will do with them.
   failure drops the client so the next runtime starts fresh and re-runs the auth gate.
   `ENOENT` is read as a wrong CLI path before the process-exit shape, because a CLI that
   cannot be spawned is fixed in settings, not by retrying.
+- Two SDK failures carry no category and no keyword the categorizer reads, so each is
+  matched by its whole message shape rather than by a word in it: the turn that never
+  reached `session.idle`, and `Copilot CLI not found at <path>.`, which the SDK throws
+  when the path it was handed names nothing. The second is a configuration failure, not
+  the transport failure its call site would otherwise report — the CLI cannot be
+  reinstalled by sending the turn again. Both shapes are quoted from the SDK; an SDK
+  upgrade that rewords either one silently returns it to the fallback category, so check
+  them when the SDK moves.
 - `CopilotClient.stop` resolves with the errors it hit rather than rejecting. A stop that
   did not do all of it — reported errors, rejected, or never answered — escalates to a
   forced stop and is reported, because the CLI was killed rather than shut down.
@@ -186,11 +208,25 @@ not what a later layer will do with them.
   empty catalog is read as "not rediscovered yet" rather than as authority: a selection,
   its order, its aliases, and its reasoning preferences are retained across an
   invalidation and dropped only against a catalog that has models in it.
+- `updateCopilotProviderSettings` merges into the persisted provider configuration rather
+  than replacing it. That configuration is one object shared with every layer built on
+  this one, so a field this module does not know about belongs to a layer that does, or to
+  a newer Claudian than the vault is currently opened with.
+- A context window is a token count, read as whole tokens and validated after flooring
+  rather than before it, in both the discovered catalog and the custom limits typed into
+  settings. A fractional value is positive right until it is floored, and a window of zero
+  is what every caller then divides a turn's budget by.
 - Catalog equality compares every field, not the id. A model whose context window,
   display name, reasoning efforts, or vision support changed is written back rather than
   hidden behind an id that stayed the same.
-- The environment fingerprint in `env/CopilotSettingsReconciler` names the CLI path,
-  environment text, and environment keys a session binds to. A change to it clears the
+- The environment fingerprint in `env/CopilotSettingsReconciler` names the CLI path and
+  the configured environment the CLI receives, resolved through
+  `resolveCopilotConfigurableEnvironment` rather than read as settings text: the
+  allow-list decides which entries exist, case decides which of two spellings is the same
+  variable, and order decides which of them wins, so the text would give one identity to
+  two settings that start different CLIs and two identities to settings that start the
+  same one. The host-inherited base is deliberately outside it — no vault edit moves it,
+  and Obsidian is restarted to change it. A change to the fingerprint clears the
   discovered catalog and invalidates live Copilot sessions.
 - Model discovery uses its own short-lived client so it never contends with a chat
   session, and drops models the account policy disables. The fingerprint is captured
