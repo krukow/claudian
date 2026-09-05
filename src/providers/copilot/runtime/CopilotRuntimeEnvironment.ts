@@ -316,23 +316,17 @@ export function resolveCopilotHomeDirectory(
     .update(paths.resolve(vaultPath))
     .digest('hex')
     .slice(0, 16);
-  const root = resolveApplicationStateRoot(vaultPath, environment, platform, canonicalize);
-  return paths.join(root, 'copilot', vaultKey);
+  return resolveApplicationStateHome(vaultPath, vaultKey, environment, platform, canonicalize);
 }
 
 /**
- * The application-state directory this vault's store lives under: the first location the
- * platform names that is absolute and outside the vault — under its own spelling and
- * under the name the filesystem gives it — the host's own temporary location when it
- * names none, and a platform constant when it names neither.
- *
- * Falling back to a temporary directory keeps the guarantee that matters — agent state
- * lands somewhere writable that is neither the vault nor another vault's store — on a
- * host that reports no usable home at all. It is last because a temporary location is the
- * one place that store is not expected to survive.
+ * Validate the complete prospective store, since an existing application or per-vault
+ * subdirectory can itself be a symlink. Temporary locations remain last-resort choices
+ * because their state is not expected to survive.
  */
-function resolveApplicationStateRoot(
+function resolveApplicationStateHome(
   vaultPath: string,
+  vaultKey: string,
   environment: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
   canonicalize: CopilotPathCanonicalizer,
@@ -344,11 +338,10 @@ function resolveApplicationStateRoot(
 
   for (const candidate of stateRootCandidates(environment, platform)) {
     const absolute = toAbsoluteCopilotPath(candidate, platform);
-    if (
-      absolute
-      && !isCopilotPathWithinRootThroughLinks(absolute, vaultPath, platform, canonicalize)
-    ) {
-      return paths.join(absolute, directoryName);
+    if (!absolute) continue;
+    const home = paths.join(absolute, directoryName, 'copilot', vaultKey);
+    if (!isCopilotPathWithinRootThroughLinks(home, vaultPath, platform, canonicalize)) {
+      return home;
     }
   }
   throw new Error(

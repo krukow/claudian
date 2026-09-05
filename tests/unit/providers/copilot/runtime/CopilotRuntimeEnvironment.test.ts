@@ -927,6 +927,38 @@ describe('resolveCopilotHomeDirectory through links', () => {
   });
 
   describeOnPosix('on a host with real links', () => {
+    it.each(['application directory', 'copilot directory'])(
+      'rejects a prospective store whose %s links into the vault',
+      (linkedDirectory) => {
+        const root = makeTemporaryRoot();
+        const vault = path.join(root, 'vault');
+        const hostHome = path.join(root, 'home');
+        const stateRoot = process.platform === 'darwin'
+          ? path.join(hostHome, 'Library', 'Application Support')
+          : path.join(hostHome, '.local', 'state');
+        const applicationRoot = path.join(stateRoot, hostDirectoryName);
+        const link = linkedDirectory === 'application directory'
+          ? applicationRoot
+          : path.join(applicationRoot, 'copilot');
+        const external = path.join(root, 'external');
+        fs.mkdirSync(vault);
+        fs.mkdirSync(path.dirname(link), { recursive: true });
+        fs.mkdirSync(external);
+        fs.symlinkSync(vault, link);
+        jest.mocked(os.homedir).mockReturnValue(hostHome);
+        jest.mocked(os.tmpdir).mockReturnValue(external);
+
+        const home = resolveCopilotHomeDirectory(
+          vault,
+          { HOME: hostHome, XDG_STATE_HOME: stateRoot, TMPDIR: external },
+          process.platform,
+        );
+
+        expect(home.startsWith(path.join(external, hostDirectoryName, 'copilot')))
+          .toBe(true);
+      },
+    );
+
     it('refuses a host location that is a link into the vault', () => {
       const root = makeTemporaryRoot();
       const vault = path.join(root, 'vault');
