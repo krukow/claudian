@@ -62,6 +62,10 @@ export interface CopilotCliEntryEnvironment {
 /**
  * Resolves a discovered `copilot` path to the executable the SDK should own.
  *
+ * The path has to be absolute before anything else is read from it. The SDK spawns the
+ * CLI with the vault as the working directory, so a relative path — configured or found
+ * on the host's PATH — names vault content rather than an install, and fails closed here.
+ *
  * The SDK spawns a path ending in a lowercase `.js` through the Node executable and
  * anything else directly, so a native binary or a shebang script passes through
  * untouched. On Windows npm installs the CLI as a `copilot.cmd` launcher, which `spawn`
@@ -75,10 +79,10 @@ export interface CopilotCliEntryEnvironment {
  * process whose child keeps running when the loader is stopped, so the platform package's
  * own executable is resolved and given to the SDK instead.
  *
- * A launcher that names nothing resolvable, an entry the filesystem tells apart from its
- * lowercase spelling, and a Copilot install with no platform package all return null
- * rather than a path that only fails at spawn time, launches the wrong program, or leaves
- * a process nothing can stop.
+ * A path that is not absolute, a launcher that names nothing resolvable, an entry the
+ * filesystem tells apart from its lowercase spelling, and a Copilot install with no
+ * platform package all return null rather than a path that only fails at spawn time,
+ * launches the wrong program, or leaves a process nothing can stop.
  */
 export function resolveCopilotCliEntry(
   cliPath: string | null,
@@ -94,7 +98,7 @@ export function resolveCopilotCliEntry(
     realPath: environment.realPath ?? realPathQuietly,
   };
 
-  const candidate = cliPath?.trim();
+  const candidate = toAbsoluteCliPath(cliPath, resolved.platform);
   if (!candidate) {
     return null;
   }
@@ -111,6 +115,41 @@ export function resolveCopilotCliEntry(
 
   const loader = resolveNpmLoaderPath(entry, resolved);
   return loader ? resolveCopilotNativeBinary(loader, resolved) : entry;
+}
+
+/**
+ * The candidate as the canonical absolute path the SDK will spawn, or null when it is not
+ * one.
+ *
+ * The SDK spawns the CLI with the vault as the working directory, so a path that is not
+ * absolute names a file beside the user's notes rather than an install: a note, an
+ * attachment, or a synced folder called `copilot` is what a signed-in turn would run, and
+ * the same setting would mean a different program in every vault. There is nothing to
+ * fall back to once a path is ambiguous, so an entry that is not absolute is left
+ * unresolved for the caller to report as the configuration failure it is — including for
+ * a discovered one, because a relative entry on the host's own PATH resolves against that
+ * same working directory.
+ *
+ * A Windows path is absolute only when it names a drive or a UNC share, which is the same
+ * distinction a launcher's own references are read with: `\tools\copilot.exe` and
+ * `C:copilot.exe` are both resolved against the working directory's drive, which is the
+ * vault's. What is left is normalized, so a path that walks through itself names its file
+ * once and the SDK identity that path belongs to holds still.
+ */
+function toAbsoluteCliPath(
+  cliPath: string | null,
+  platform: NodeJS.Platform,
+): string | null {
+  const candidate = cliPath?.trim();
+  if (!candidate) {
+    return null;
+  }
+  if (platform !== 'win32') {
+    return path.posix.isAbsolute(candidate) ? path.posix.normalize(candidate) : null;
+  }
+  return DRIVE_QUALIFIED_PATH.test(candidate) || candidate.startsWith('\\\\')
+    ? path.win32.normalize(candidate)
+    : null;
 }
 
 /**

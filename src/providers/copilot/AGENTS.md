@@ -28,7 +28,7 @@ not what a later layer will do with them.
 | `sdk/CopilotClientFactory` | CLI resolution, runtime environment, client identity, and the auth gate |
 | `sdk/CopilotRuntimeError` | Failure categorization onto `ProviderExecutionErrorCategory`, and what each category leaves unusable |
 | `runtime/CopilotCliResolver` | Discovering the user-installed `copilot` binary from settings and the host |
-| `runtime/CopilotCliEntry` | Narrowing a discovered path to the executable the SDK is handed |
+| `runtime/CopilotCliEntry` | Narrowing a discovered path to the executable the SDK is handed, and requiring it to be absolute |
 | `runtime/CopilotNativeCliBinary` | Where an npm install's native platform binary lives |
 | `runtime/CopilotRuntimeEnvironment` | `COPILOT_HOME` placement, the CLI process environment, and the canonical form of a configured environment |
 | `runtime/CopilotModelDiscoveryService` | Its own short-lived client and the discovered catalog |
@@ -41,6 +41,16 @@ not what a later layer will do with them.
 
 - The `copilot` CLI is user-installed and mandatory. Never resolve, bundle, or distribute
   the CLI that ships inside the SDK: an unresolvable binary is a configuration failure.
+- The path handed to the SDK is always absolute and normalized, whether it was configured,
+  found on the host's PATH, or resolved out of an npm install. The SDK spawns the CLI with
+  the vault as the working directory, so a relative path names a note, an attachment, or a
+  synced folder rather than an install, and the same setting would mean a different program
+  in every vault. `runtime/CopilotCliEntry` gates that before it reads anything else from
+  the path; a configured path that is still relative after expansion fails closed rather
+  than falling through to host discovery, because the CLI that then ran would not be the
+  one settings named. On Windows only a drive-qualified or UNC path counts, which is the
+  same distinction a launcher's own references are read with: `\tools\copilot.exe` and
+  `C:copilot.exe` resolve against the working directory's drive, which is the vault's.
 - The SDK spawns a CLI path that ends in a lowercase `.js` through `process.execPath`,
   which under Obsidian is Electron, and anything else directly. `runtime/CopilotCliEntry`
   narrows a discovered path to one of those two shapes — resolving the npm `copilot.cmd`

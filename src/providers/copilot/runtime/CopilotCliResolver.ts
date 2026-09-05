@@ -17,10 +17,12 @@ const COPILOT_BINARY_NAME = 'copilot';
  * environment that CLI receives. An install the host cannot resolve names its path
  * explicitly instead.
  *
- * The discovered path is narrowed to something the SDK can spawn: on Windows npm installs
- * the CLI as a `copilot.cmd` launcher that `spawn` refuses to start, so the package's
- * JavaScript entry is resolved from it, and a launcher that names nothing resolvable
- * fails closed instead of resolving to a path that only breaks at spawn time.
+ * The discovered path is narrowed to something the SDK can spawn: it has to be absolute,
+ * because the SDK spawns the CLI with the vault as the working directory and a relative
+ * path would name vault content instead of an install. On Windows npm installs the CLI as
+ * a `copilot.cmd` launcher that `spawn` refuses to start, so the package's JavaScript
+ * entry is resolved from it, and a launcher that names nothing resolvable fails closed
+ * instead of resolving to a path that only breaks at spawn time.
  */
 export class CopilotCliResolver {
   private readonly resolver = new CachedProviderCliResolver({

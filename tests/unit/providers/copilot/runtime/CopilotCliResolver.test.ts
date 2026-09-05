@@ -104,6 +104,64 @@ describe('CopilotCliResolver', () => {
   });
 
   /**
+   * Under Obsidian the plugin's working directory is the vault, so a configured path that
+   * stays relative after expansion is resolved against vault content: a note, an
+   * attachment, or a synced folder named `copilot` satisfies the existence check and would
+   * be handed to the SDK as the CLI a signed-in turn runs.
+   */
+  it('never resolves a relative configured path to a vault file of the same name', () => {
+    const vaultFile = path.join(process.cwd(), 'copilot');
+    mockedStat.mockImplementation((filePath: string) => {
+      if (filePath === 'copilot' || filePath === vaultFile) {
+        return { isFile: () => true };
+      }
+      throw new Error(`ENOENT: ${filePath}`);
+    });
+
+    expect(new CopilotCliResolver().resolve({ 'current-host': 'copilot' }, '', ''))
+      .toBeNull();
+  });
+
+  /**
+   * An explicitly configured path is the answer the user gave, so a relative one fails
+   * closed rather than quietly searching the host for some other `copilot`: the CLI that
+   * ran would then not be the one settings named.
+   */
+  it('fails closed on a relative configured path instead of searching the host', () => {
+    const hostBinary = path.join(parsePathEntries(process.env.PATH ?? '')[0] ?? '', 'copilot');
+    mockedStat.mockImplementation((filePath: string) => {
+      if (filePath === './copilot' || filePath === hostBinary) {
+        return { isFile: () => true };
+      }
+      throw new Error(`ENOENT: ${filePath}`);
+    });
+
+    expect(new CopilotCliResolver().resolve({ 'current-host': './copilot' }, '', ''))
+      .toBeNull();
+  });
+
+  /**
+   * A relative entry on the host's own PATH resolves against the working directory too,
+   * so discovery through it names vault content just as a configured relative path does.
+   */
+  it('never discovers the CLI through a relative host PATH entry', () => {
+    mockedStat.mockImplementation((filePath: string) => {
+      if (filePath === 'copilot') {
+        return { isFile: () => true };
+      }
+      throw new Error(`ENOENT: ${filePath}`);
+    });
+    const originalPath = process.env.PATH;
+    process.env.PATH = '.';
+
+    try {
+      expect(new CopilotCliResolver().resolve({}, '', '')).toBeNull();
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  /**
    * The resolver hands the SDK what it will spawn, so a Windows npm install has to arrive
    * as the platform package's own executable. The launcher is a Node process whose native
    * child survives the SDK stopping it, and the `.cmd` in front of it cannot be spawned at

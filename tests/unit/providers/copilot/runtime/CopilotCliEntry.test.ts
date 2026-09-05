@@ -337,6 +337,66 @@ describe('resolveCopilotCliEntry', () => {
 });
 
 /**
+ * The SDK spawns the CLI with the vault as the working directory, so a path that is not
+ * absolute names a file beside the user's notes rather than an install. A note, an
+ * attachment, or a synced folder called `copilot` would then be the program a signed-in
+ * turn runs, and the same path would mean a different program in every vault.
+ *
+ * There is nothing to fall back to once a path names something ambiguous, so an entry
+ * that is not absolute is unresolved and the caller reports the configuration failure it
+ * is. A Windows path with no drive is one of those: `\tools\copilot.exe` is resolved
+ * against whichever drive the working directory sits on, which is the vault's.
+ */
+describe('resolveCopilotCliEntry for a path that is not absolute', () => {
+  it.each([
+    ['a bare name', 'copilot'],
+    ['an explicitly current-directory name', './copilot'],
+    ['a JavaScript entry beside the notes', 'copilot.js'],
+    ['a nested relative entry', 'node_modules/.bin/copilot'],
+    ['a parent-relative entry', '../bin/copilot'],
+  ])('leaves %s unresolved on POSIX', (_label, cliPath) => {
+    expect(resolveCopilotCliEntry(cliPath, {
+      fileExists: () => true,
+      fileIdentity: () => 'inode:1',
+      platform: 'darwin',
+      readFile: () => null,
+      realPath: filePath => filePath,
+    })).toBeNull();
+  });
+
+  it.each([
+    ['a bare name', 'copilot.exe'],
+    ['a relative launcher', 'node_modules\\.bin\\copilot.cmd'],
+    ['a drive-relative entry', '\\tools\\copilot.exe'],
+    ['a drive-current-directory entry', 'C:copilot.exe'],
+  ])('leaves %s unresolved on Windows', (_label, cliPath) => {
+    expect(resolveCopilotCliEntry(cliPath, windows({ fileExists: () => true })))
+      .toBeNull();
+  });
+
+  it('keeps a UNC share resolvable', () => {
+    expect(resolveCopilotCliEntry('\\\\build\\tools\\copilot.exe', windows({
+      fileExists: () => true,
+    }))).toBe('\\\\build\\tools\\copilot.exe');
+  });
+
+  /** An absolute path that walks through itself still names one file, so it is canonical. */
+  it.each([
+    ['/opt/copilot/./bin/../bin/copilot', '/opt/copilot/bin/copilot', 'darwin' as NodeJS.Platform],
+    ['C:\\npm\\.\\bin\\..\\copilot.exe', 'C:\\npm\\copilot.exe', 'win32' as NodeJS.Platform],
+  ])('canonicalizes %j', (cliPath, expected, platform) => {
+    expect(resolveCopilotCliEntry(cliPath, {
+      arch: 'x64',
+      fileExists: () => true,
+      isMuslLinux: () => false,
+      platform,
+      readFile: () => null,
+      realPath: filePath => filePath,
+    })).toBe(expected);
+  });
+});
+
+/**
  * The SDK decides how to spawn the CLI by testing whether the path it was given ends in
  * a lowercase `.js`, and launches anything else directly. A path spelled `.JS` is
  * therefore handed to the process launcher as if it were an executable, which no platform
