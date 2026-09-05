@@ -319,6 +319,75 @@ function createDeferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
+/** Externally settled discovery answer, used to order two probes against each other. */
+function createDeferredDiscovery(): {
+  promise: Promise<CopilotModelDiscoveryResult>;
+  resolve: (result: CopilotModelDiscoveryResult) => void;
+} {
+  let resolve!: (result: CopilotModelDiscoveryResult) => void;
+  const promise = new Promise<CopilotModelDiscoveryResult>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+/**
+ * The fingerprint and the provider generation say which runtime a catalog belongs to, not
+ * which request asked for it. Two refreshes started under settings that never moved
+ * therefore give the same answer to both checks, so nothing there can tell an older probe
+ * from a newer one, and an older answer arriving last writes itself over the catalog the
+ * user was just shown.
+ */
+describe('createCopilotWorkspaceServices.refreshModelCatalog under concurrent refreshes', () => {
+  it('publishes only the newest of two discoveries that answered out of order', async () => {
+    const settings: Record<string, unknown> = {};
+    updateCopilotProviderSettings(settings, { enabled: true });
+    const host = createHost(settings);
+    const answers = [createDeferredDiscovery(), createDeferredDiscovery()];
+    let probe = 0;
+    const services = createCopilotWorkspaceServices(host, {
+      modelDiscoveryService: { discoverModels: () => answers[probe++].promise },
+    });
+    const superseded = { ...GPT_5, displayName: 'GPT-5 from the older probe' };
+
+    const older = services.refreshModelCatalog();
+    const newer = services.refreshModelCatalog();
+    answers[1].resolve({ kind: 'loaded', models: [GPT_5] });
+
+    expect(await newer).toMatchObject({ changed: true, persistedSettingsChanged: true });
+
+    answers[0].resolve({ kind: 'loaded', models: [superseded] });
+
+    expect(await older).toEqual({ changed: false });
+    expect(getCopilotProviderSettings(settings).discoveredModels).toEqual([GPT_5]);
+  });
+
+  /**
+   * The newest request is still the one whose answer counts when it arrives last, which is
+   * the ordinary case: the older probe's write is what it supersedes, not its own.
+   */
+  it('publishes the newest discovery when the older one answered first', async () => {
+    const settings: Record<string, unknown> = {};
+    updateCopilotProviderSettings(settings, { enabled: true });
+    const host = createHost(settings);
+    const answers = [createDeferredDiscovery(), createDeferredDiscovery()];
+    let probe = 0;
+    const services = createCopilotWorkspaceServices(host, {
+      modelDiscoveryService: { discoverModels: () => answers[probe++].promise },
+    });
+    const widened = { ...GPT_5, contextWindow: 400_000 };
+
+    const older = services.refreshModelCatalog();
+    const newer = services.refreshModelCatalog();
+    answers[0].resolve({ kind: 'loaded', models: [GPT_5] });
+    await older;
+    answers[1].resolve({ kind: 'loaded', models: [widened] });
+
+    expect(await newer).toMatchObject({ changed: true, persistedSettingsChanged: true });
+    expect(getCopilotProviderSettings(settings).discoveredModels).toEqual([widened]);
+  });
+});
+
 /**
  * A fingerprint says what the runtime inputs are, not whether they held still. Settings
  * that changed and changed back while the CLI was answering produce the fingerprint

@@ -35,7 +35,7 @@ not what a later layer will do with them.
 | `env/CopilotSettingsReconciler` | The runtime-input fingerprint and what a change to it invalidates |
 | `models.ts` | Model id encoding, catalog normalization, reasoning efforts, context-window reading, and catalog equality |
 | `settings.ts` | Persisted provider settings, their defaults, their fail-closed decoding, and the merge that leaves other layers' fields alone |
-| `app/CopilotWorkspaceServices` | Publishing a discovered catalog only under the runtime it was discovered from |
+| `app/CopilotWorkspaceServices` | Publishing a discovered catalog only under the runtime it was discovered from, and only from the newest refresh |
 
 ## Runtime Rules
 
@@ -261,3 +261,9 @@ not what a later layer will do with them.
   never moves back — is captured and revalidated beside the fingerprint. Read that
   generation from `executionLifecycleRegistry`; a revision persisted in settings would
   duplicate it and would have to be kept correct twice.
+- Neither the fingerprint nor the generation says which request an answer belongs to, so
+  two refreshes running against settings that never moved both pass those checks and an
+  older probe answering last would overwrite the catalog the newer one just published.
+  Each refresh takes a monotonic ticket revalidated inside the same transaction: only the
+  newest may publish, and a superseded one reports no change and leaves the catalog it was
+  outrun by alone.

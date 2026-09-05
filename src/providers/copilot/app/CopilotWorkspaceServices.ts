@@ -27,6 +27,7 @@ export function createCopilotWorkspaceServices(
   const cliResolver = new CopilotCliResolver();
   const modelDiscoveryService = options.modelDiscoveryService
     ?? new CopilotModelDiscoveryService(plugin);
+  let latestRefresh = 0;
 
   return {
     cliResolver,
@@ -49,8 +50,16 @@ export function createCopilotWorkspaceServices(
      * settings transition and never moves back, so it is captured and revalidated beside
      * the fingerprint: a catalog is published only when the runtime it describes both
      * matches the settings and never moved while it was being discovered.
+     *
+     * Neither of those says which request an answer belongs to. Two refreshes running
+     * against settings that never moved give the same answer to both checks, so an older
+     * probe answering last would write itself over the catalog the newer one just
+     * published. Each refresh therefore takes a monotonic ticket, revalidated in the same
+     * transaction: only the newest request may publish, and a superseded one leaves the
+     * catalog it was outrun by alone.
      */
     async refreshModelCatalog(): Promise<ProviderModelCatalogRefreshResult> {
+      const refresh = ++latestRefresh;
       const discoveredUnder = computeCopilotEnvironmentHash(plugin.settings);
       const discoveredAtGeneration = plugin.executionLifecycleRegistry
         .getProviderGeneration(COPILOT_PROVIDER_ID);
@@ -63,7 +72,8 @@ export function createCopilotWorkspaceServices(
       await plugin.mutateSettingsConditionally((settings) => {
         const bag = settings as unknown as Record<string, unknown>;
         if (
-          computeCopilotEnvironmentHash(bag) !== discoveredUnder
+          refresh !== latestRefresh
+          || computeCopilotEnvironmentHash(bag) !== discoveredUnder
           || plugin.executionLifecycleRegistry.getProviderGeneration(COPILOT_PROVIDER_ID)
             !== discoveredAtGeneration
         ) {
