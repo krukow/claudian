@@ -89,7 +89,7 @@ export class CopilotClientFactory {
   async createClient(identity: CopilotClientIdentity): Promise<CopilotSdkClient> {
     const client = await this.startClient(identity);
     try {
-      assertAuthenticated(await this.readAuthStatus(client));
+      assertAuthenticated(await this.readAuthStatus(client), identity.baseDirectory);
     } catch (error) {
       await abandonCopilotClient(client);
       throw error;

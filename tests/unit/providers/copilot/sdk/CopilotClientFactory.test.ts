@@ -111,12 +111,18 @@ class FakeStartedClient {
   forceStopped = 0;
   stopped = 0;
 
+  constructor(
+    private readonly authStatus: { isAuthenticated: boolean; statusMessage?: string } = {
+      isAuthenticated: true,
+    },
+  ) {}
+
   async forceStop(): Promise<void> {
     this.forceStopped += 1;
   }
 
-  async getAuthStatus(): Promise<{ isAuthenticated: boolean }> {
-    return { isAuthenticated: true };
+  async getAuthStatus(): Promise<{ isAuthenticated: boolean; statusMessage?: string }> {
+    return this.authStatus;
   }
 
   async stop(): Promise<Error[]> {
@@ -131,6 +137,62 @@ const COLD_START_IDENTITY: CopilotClientIdentity = {
   environment: {},
   workingDirectory: VAULT_PATH,
 };
+
+/**
+ * The CLI keeps one credential per host in the OS keychain, but the record of which
+ * account it belongs to lives in the `COPILOT_HOME` it was signed in with, and Claudian
+ * hands it a per-vault home so this vault's agent state and plugins stay out of the user's
+ * shared install. A home nobody has signed in to is therefore the ordinary first failure,
+ * and the only thing that fixes it is signing in to that home.
+ *
+ * The CLI answers a signed-out gate with "Not authenticated", which says nothing about how
+ * to fix it, and telling the user to run a bare `copilot` would sign them in to
+ * `~/.copilot` and change nothing here.
+ */
+describe('CopilotClientFactory authentication gate', () => {
+  async function refuseSignedOut(
+    statusMessage?: string,
+  ): Promise<{ error: Error; client: FakeStartedClient }> {
+    const client = new FakeStartedClient({
+      isAuthenticated: false,
+      ...(statusMessage ? { statusMessage } : {}),
+    });
+    const runtime: CopilotSdkRuntime = {
+      createClient: async () => client as unknown as CopilotSdkClient,
+    };
+    const error = await new CopilotClientFactory(createHost(NATIVE_CLI, {}), { runtime })
+      .createClient(COLD_START_IDENTITY)
+      .then(() => new Error('the signed-out client was handed back'), (raised: unknown) => (
+        raised as Error
+      ));
+    return { client, error };
+  }
+
+  it.each([
+    ['the CLI said nothing useful', 'Not authenticated'],
+    ['the CLI said nothing at all', undefined],
+  ])('names the home this vault signs in to when %s', async (_name, statusMessage) => {
+    const { error } = await refuseSignedOut(statusMessage);
+
+    expect(error.message).toContain('COPILOT_HOME');
+    expect(error.message).toContain(COLD_START_IDENTITY.baseDirectory);
+  });
+
+  /** What the CLI did say is still reported: it may name an expiry or an SSO refusal. */
+  it('keeps what the CLI said about the sign-in', async () => {
+    const { error } = await refuseSignedOut('Token expired for github.example.com');
+
+    expect(error.message).toContain('Token expired for github.example.com');
+  });
+
+  /** A client no caller will be handed is shut down rather than left running. */
+  it('shuts down the CLI it refused to hand back', async () => {
+    const { client } = await refuseSignedOut('Not authenticated');
+
+    expect(client.stopped).toBe(1);
+    expect(client.forceStopped).toBe(1);
+  });
+});
 
 /**
  * The factory bounds the create as well, so that a runtime which never answers is not

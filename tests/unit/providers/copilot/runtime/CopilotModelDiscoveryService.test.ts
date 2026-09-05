@@ -173,13 +173,15 @@ describe('CopilotModelDiscoveryService', () => {
 
   it('fails with a diagnostic when the CLI is not signed in', async () => {
     const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
-      authStatus: { isAuthenticated: false, statusMessage: 'Run `copilot` to sign in.' },
+      authStatus: { isAuthenticated: false, statusMessage: 'Token expired.' },
     }));
 
     const result = await new CopilotModelDiscoveryService(createHost(), { runtime })
       .discoverModels();
 
-    expect(result).toEqual({ kind: 'failed', message: 'Run `copilot` to sign in.' });
+    expect(result).toMatchObject({ kind: 'failed' });
+    expect(result.kind === 'failed' && result.message).toMatch(/Token expired\./);
+    expect(result.kind === 'failed' && result.message).toMatch(/COPILOT_HOME/);
     expect(runtime.lastClient?.stopped).toBe(1);
   });
 

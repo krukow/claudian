@@ -202,6 +202,16 @@ not what a later layer will do with them.
 - `COPILOT_HOME` is a per-vault directory under the OS application-state location, keyed
   by a hash of the vault path. Copilot session state is agent data, not vault content, so
   it must never live under the vault — including under `.claudian/`.
+- A per-vault `COPILOT_HOME` is a Copilot install the CLI has never been signed in to. The
+  credential itself is shared — the CLI keeps one per host in the OS keychain — but the
+  record of which account it belongs to lives in the home it was signed in with, and
+  without that record the CLI never opens the keychain at all. So the vault's own home is
+  signed in to once, by running the CLI with `COPILOT_HOME` set to it. The authentication
+  failure in `sdk/CopilotSdkRuntime` says exactly that and names the directory: it must
+  not tell the user to run a bare `copilot`, which signs in to the shared install and
+  leaves this vault signed out. What the CLI itself reported is quoted rather than
+  replaced — "Not authenticated" adds nothing, but an expiry or a single-sign-on refusal
+  is the whole answer — and never replaces the instruction.
 - That directory is always absolute, by the same rule the CLI path is held to in
   `runtime/CopilotAbsolutePath`. Every host variable it is built from — `XDG_STATE_HOME`,
   `LOCALAPPDATA`, `HOME`, `USERPROFILE`, and the temporary-location variables — is

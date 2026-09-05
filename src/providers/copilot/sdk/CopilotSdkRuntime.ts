@@ -461,14 +461,34 @@ function describeShutdownErrors(errors: readonly Error[]): CopilotRuntimeError |
   );
 }
 
-export function assertAuthenticated(status: {
-  isAuthenticated: boolean;
-  statusMessage?: string;
-}): void {
-  if (!status.isAuthenticated) {
-    throw copilotAuthenticationError(
-      status.statusMessage
-        ?? 'The Copilot CLI is not signed in. Run `copilot` in a terminal and sign in.',
-    );
+/**
+ * Refuses a client whose CLI is not signed in, and says which sign-in would fix it.
+ *
+ * Claudian hands the CLI a `COPILOT_HOME` of this vault's own, so that this vault's agent
+ * state, plugins, and configuration stay out of the user's shared install. The credential
+ * itself is shared — the CLI keeps one per host in the OS keychain — but the record of
+ * which account it belongs to lives in the home it was signed in with, and without that
+ * record the CLI never opens the keychain. A home nobody has signed in to is therefore the
+ * ordinary first failure, and a bare `copilot` would sign in to `~/.copilot` and change
+ * nothing here, so the directory is named.
+ *
+ * What the CLI said is kept rather than replaced: "Not authenticated" adds nothing, but an
+ * expiry or a single-sign-on refusal is the whole answer.
+ */
+export function assertAuthenticated(
+  status: { isAuthenticated: boolean; statusMessage?: string },
+  baseDirectory: string,
+): void {
+  if (status.isAuthenticated) {
+    return;
   }
+  throw copilotAuthenticationError(
+    `The Copilot CLI is not signed in for this vault${
+      status.statusMessage ? ` (it reports: ${status.statusMessage})` : ''
+    }. Claudian runs the CLI with a \`COPILOT_HOME\` of this vault's own, at `
+    + `\`${baseDirectory}\`, so this vault's agent state and plugins stay out of your `
+    + 'shared Copilot install. Sign in to it once by running the Copilot CLI with '
+    + '`COPILOT_HOME` set to that directory and signing in there; signing in without it '
+    + 'signs in to the shared install instead and leaves this vault signed out.',
+  );
 }
