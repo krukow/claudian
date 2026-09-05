@@ -36,6 +36,8 @@ const signedInHome = process.env.CLAUDIAN_COPILOT_KEYCHAIN_SMOKE_HOME?.trim();
  * Everything the turn then exercises — the client, the auth gate, session creation, the
  * event stream, and disposal — is the shipped path.
  *
+ * `CLAUDIAN_COPILOT_SMOKE_MODEL` selects an explicit model from the account's catalog.
+ *
  * The vault is a temporary directory holding one synthetic note, so no real note reaches
  * the CLI, and no token is read from the environment: sign-in comes from the CLI's own
  * credential store.
@@ -70,7 +72,7 @@ describeWhenSignedIn('Copilot turn against the installed CLI', () => {
       );
     }
 
-    const model = await discoverFirstModel(cliPath);
+    const model = await discoverSmokeModel(cliPath);
     const backend = new CopilotExecutionBackend(
       createHost(vaultPath, model),
       { runtime: runtimeWithSignedInHome() },
@@ -82,38 +84,40 @@ describeWhenSignedIn('Copilot turn against the installed CLI', () => {
       vaultWorkingDirectory: vaultPath,
     });
 
-    const events: ProviderExecutionEvent[] = [];
-    for await (const event of session.execute({
-      configuration: {
-        model: `copilot/${model}`,
-        systemInstructions: {
-          instructions: 'Answer with one word and call no tools.',
-          kind: 'explicit',
+    try {
+      const events: ProviderExecutionEvent[] = [];
+      for await (const event of session.execute({
+        configuration: {
+          model: `copilot/${model}`,
+          systemInstructions: {
+            instructions: 'Answer with one word and call no tools.',
+            kind: 'explicit',
+          },
         },
-      },
-      input: [{ text: 'Reply with the single word READY.', type: 'text' }],
-      signal: new AbortController().signal,
-      toolPolicy: { kind: 'passive' },
-    }).events) {
-      events.push(event);
+        input: [{ text: 'Reply with the single word READY.', type: 'text' }],
+        signal: new AbortController().signal,
+        toolPolicy: { kind: 'passive' },
+      }).events) {
+        events.push(event);
+      }
+
+      const text = events
+        .filter((event): event is Extract<typeof event, { type: 'text_delta' }> => (
+          event.type === 'text_delta'
+        ))
+        .map(event => event.text)
+        .join('');
+
+      expect(events.at(-1)).toMatchObject({ reason: 'completed', type: 'turn_completed' });
+      expect(events.filter(event => event.type === 'turn_completed')).toHaveLength(1);
+      expect(text.trim()).toBe('READY');
+    } finally {
+      await session.dispose();
     }
-
-    const text = events
-      .filter((event): event is Extract<typeof event, { type: 'text_delta' }> => (
-        event.type === 'text_delta'
-      ))
-      .map(event => event.text)
-      .join('');
-
-    expect(events.at(-1)).toMatchObject({ reason: 'completed', type: 'turn_completed' });
-    expect(text.trim()).not.toBe('');
-
-    await expect(session.dispose()).resolves.toBeUndefined();
   });
 });
 
-/** The first model the account may use, so the turn never names one it cannot run. */
-async function discoverFirstModel(cliPath: string): Promise<string> {
+async function discoverSmokeModel(cliPath: string): Promise<string> {
   const client = await copilotSdkRuntime.createClient({
     baseDirectory: signedInHome as string,
     cliPath,
@@ -121,14 +125,20 @@ async function discoverFirstModel(cliPath: string): Promise<string> {
     workingDirectory: process.cwd(),
   });
   try {
-    const [first] = await client.listModels();
-    if (!first) {
-      throw new Error('The signed-in Copilot account offers no models.');
+    const requestedModel = process.env.CLAUDIAN_COPILOT_SMOKE_MODEL?.trim();
+    const models = await client.listModels();
+    const selected = models.find(model => (
+      model.policy?.state !== 'disabled'
+      && (requestedModel ? model.id === requestedModel : model.id !== 'auto')
+    ));
+    if (!selected) {
+      throw new Error(requestedModel
+        ? `The requested Copilot smoke model is unavailable: ${requestedModel}`
+        : 'The signed-in Copilot account offers no explicit models.');
     }
-    return first.id;
+    return selected.id;
   } finally {
-    await client.stop().catch(() => undefined);
-    await client.forceStop().catch(() => undefined);
+    await client.stop();
   }
 }
 

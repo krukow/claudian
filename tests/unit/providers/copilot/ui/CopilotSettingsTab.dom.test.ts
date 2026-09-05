@@ -133,11 +133,11 @@ jest.mock('obsidian', () => {
 import { screen, within } from '@testing-library/dom';
 import { configureAxe } from 'jest-axe';
 
-import { registerBuiltInProviders } from '@/providers';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
 import { ProviderWorkspaceRegistry } from '@/core/providers/ProviderWorkspaceRegistry';
 import type { ProviderSettingsTabRendererContext } from '@/core/providers/types';
 import type { ClaudianSettings } from '@/core/types';
+import { registerBuiltInProviders } from '@/providers';
 import type { CopilotWorkspaceServices } from '@/providers/copilot/app/CopilotWorkspaceServices';
 import { getCopilotProviderSettings } from '@/providers/copilot/settings';
 import { copilotSettingsTabRenderer } from '@/providers/copilot/ui/CopilotSettingsTab';
