@@ -49,9 +49,13 @@ export function isAbsoluteCopilotPath(
  *
  * The question this answers is asked about places that do not exist yet: the directory
  * Claudian is choosing for a store it has not created, under host locations that may name
- * nothing on this machine. So no filesystem is consulted. Resolving through `realpath`
- * would answer for whatever happens to be on disk instead, and would answer "not held"
- * for a directory the vault will hold the moment it is created.
+ * nothing on this machine. So no filesystem is consulted here. A directory the vault will
+ * hold the moment it is created is already held as far as this is concerned, which
+ * resolving through `realpath` alone would deny.
+ *
+ * Two spellings can still reach one place, which no comparison of spellings can see;
+ * `isCopilotPathWithinRootThroughLinks` in `CopilotCanonicalPath` asks this first and
+ * then asks it again of the names the filesystem gives both sides.
  *
  * Both sides are normalized first, so a path that walks through itself is read as the
  * place it names, and a trailing separator makes no difference. Windows compares without

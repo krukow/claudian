@@ -1,6 +1,9 @@
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+import { toAbsoluteCopilotPath } from '@/providers/copilot/runtime/CopilotAbsolutePath';
+import type { CopilotPathCanonicalizer } from '@/providers/copilot/runtime/CopilotCanonicalPath';
 import {
   buildCopilotRuntimeEnvironment,
   COPILOT_CONFIGURABLE_ENVIRONMENT_KEYS,
@@ -838,6 +841,133 @@ describe('resolveCopilotHomeDirectory', () => {
     const hosted = resolveCopilotHomeDirectory('/vaults/work', { HOME: '/home/person' }, 'linux');
 
     expect(path.posix.basename(pushedOut)).toBe(path.posix.basename(hosted));
+  });
+});
+
+/**
+ * A host location the vault holds is refused whichever name it is reached by. A vault, a
+ * home, and a temporary directory are all reached through links on a real host — macOS
+ * puts every temporary directory behind `/var`, which is a link to `/private/var`, and a
+ * vault kept on an external disk or a synced folder is commonly a link itself — so a
+ * comparison of spellings alone calls a directory the vault physically holds external and
+ * writes this vault's agent state into its own notes.
+ */
+describe('resolveCopilotHomeDirectory through links', () => {
+  const actualOs = jest.requireActual<NodeOs>('node:os');
+
+  /**
+   * Symlink creation needs a privilege Windows does not grant by default, so what needs a
+   * real link runs where every host can make one, and the alias-like host is injected.
+   */
+  const describeOnPosix = process.platform === 'win32' ? describe.skip : describe;
+  const hostDirectoryName = process.platform === 'linux' ? 'claudian' : 'Claudian';
+
+  /** A host that reads `/var` as the link to `/private/var` that macOS makes it. */
+  const withPrivateVarAlias: CopilotPathCanonicalizer = (value, platform) => {
+    const absolute = toAbsoluteCopilotPath(value, platform);
+    if (!absolute) {
+      return null;
+    }
+    return absolute === '/var' || absolute.startsWith('/var/')
+      ? `/private${absolute}`
+      : absolute;
+  };
+
+  let temporaryRoot: string | null = null;
+
+  afterEach(() => {
+    if (temporaryRoot) {
+      fs.rmSync(temporaryRoot, { recursive: true, force: true });
+      temporaryRoot = null;
+    }
+  });
+
+  function makeTemporaryRoot(): string {
+    temporaryRoot = fs.mkdtempSync(path.join(actualOs.tmpdir(), 'claudian-copilot-home-'));
+    return temporaryRoot;
+  }
+
+  it('refuses a host location the vault holds under the canonical name for it', () => {
+    jest.mocked(os.homedir).mockReturnValue('/private/var/notes/home');
+    jest.mocked(os.tmpdir).mockReturnValue('/private/var/notes/tmp');
+
+    const home = resolveCopilotHomeDirectory(
+      '/var/notes',
+      { HOME: '/private/var/notes/home', TMPDIR: '/private/var/notes/tmp' },
+      'darwin',
+      withPrivateVarAlias,
+    );
+
+    expect(home.startsWith(path.posix.join('/tmp', 'Claudian', 'copilot'))).toBe(true);
+  });
+
+  /**
+   * Where no canonical name can be read — an unreadable root, a host location that names
+   * nothing — the spelling is all there is, and the lexical answer stands. It still keeps
+   * agent state out of every place the vault is spelled as holding.
+   */
+  it('keeps the lexical answer where the host cannot say', () => {
+    jest.mocked(os.homedir).mockReturnValue('/private/var/notes/home');
+    jest.mocked(os.tmpdir).mockReturnValue('/private/var/notes/tmp');
+
+    const home = resolveCopilotHomeDirectory(
+      '/var/notes',
+      { HOME: '/private/var/notes/home' },
+      'darwin',
+      () => null,
+    );
+
+    expect(home.startsWith(path.posix.join(
+      '/private/var/notes/home',
+      'Library',
+      'Application Support',
+      'Claudian',
+      'copilot',
+    ))).toBe(true);
+  });
+
+  describeOnPosix('on a host with real links', () => {
+    it('refuses a host location that is a link into the vault', () => {
+      const root = makeTemporaryRoot();
+      const vault = path.join(root, 'vault');
+      fs.mkdirSync(path.join(vault, 'state'), { recursive: true });
+      const linkedHome = path.join(root, 'home');
+      fs.symlinkSync(path.join(vault, 'state'), linkedHome);
+      const external = path.join(root, 'external');
+      fs.mkdirSync(external);
+      jest.mocked(os.homedir).mockReturnValue(linkedHome);
+      jest.mocked(os.tmpdir).mockReturnValue(external);
+
+      const home = resolveCopilotHomeDirectory(
+        vault,
+        { HOME: linkedHome, XDG_STATE_HOME: linkedHome },
+        process.platform,
+      );
+
+      expect(home.startsWith(path.join(external, hostDirectoryName, 'copilot'))).toBe(true);
+      expect(home.startsWith(linkedHome)).toBe(false);
+    });
+
+    it('refuses a host location inside a vault that is itself reached through a link', () => {
+      const root = makeTemporaryRoot();
+      const vault = path.join(root, 'vault');
+      fs.mkdirSync(path.join(vault, 'home'), { recursive: true });
+      const linkedVault = path.join(root, 'notes');
+      fs.symlinkSync(vault, linkedVault);
+      const external = path.join(root, 'external');
+      fs.mkdirSync(external);
+      jest.mocked(os.homedir).mockReturnValue(path.join(vault, 'home'));
+      jest.mocked(os.tmpdir).mockReturnValue(external);
+
+      const home = resolveCopilotHomeDirectory(
+        linkedVault,
+        { HOME: path.join(vault, 'home'), XDG_STATE_HOME: path.join(vault, 'home') },
+        process.platform,
+      );
+
+      expect(home.startsWith(path.join(external, hostDirectoryName, 'copilot'))).toBe(true);
+      expect(home.startsWith(vault)).toBe(false);
+    });
   });
 });
 

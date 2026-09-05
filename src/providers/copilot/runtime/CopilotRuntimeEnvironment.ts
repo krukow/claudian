@@ -3,7 +3,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { getEnhancedPath } from '../../../utils/env';
-import { isCopilotPathWithinRoot, toAbsoluteCopilotPath } from './CopilotAbsolutePath';
+import { toAbsoluteCopilotPath } from './CopilotAbsolutePath';
+import {
+  canonicalizeCopilotHostPath,
+  type CopilotPathCanonicalizer,
+  isCopilotPathWithinRootThroughLinks,
+} from './CopilotCanonicalPath';
 
 /**
  * Environment variables the Copilot CLI needs from the host to locate a shell, resolve
@@ -290,8 +295,11 @@ export function buildCopilotRuntimeEnvironment(
  * the vault as its working directory, so a relative `COPILOT_HOME` would put this vault's
  * agent state inside the notes it exists to stay out of — and every host variable this is
  * built from is untrusted input that can name a relative location, or an absolute one the
- * vault holds. A variable that does either is read as naming nothing, and the next
- * candidate answers instead.
+ * vault holds under that spelling or under the name the filesystem gives it. A variable
+ * that does either is read as naming nothing, and the next candidate answers instead.
+ *
+ * `canonicalize` is what reads the filesystem, and it is a parameter so a host whose
+ * links this machine does not have can be stood in for.
  *
  * Throws when the vault holds every location this host names, which a vault opened on the
  * filesystem root does: there is no directory left that keeps agent state out of the
@@ -301,20 +309,22 @@ export function resolveCopilotHomeDirectory(
   vaultPath: string,
   environment: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
+  canonicalize: CopilotPathCanonicalizer = canonicalizeCopilotHostPath,
 ): string {
   const paths = platform === 'win32' ? path.win32 : path.posix;
   const vaultKey = createHash('sha256')
     .update(paths.resolve(vaultPath))
     .digest('hex')
     .slice(0, 16);
-  const root = resolveApplicationStateRoot(vaultPath, environment, platform);
+  const root = resolveApplicationStateRoot(vaultPath, environment, platform, canonicalize);
   return paths.join(root, 'copilot', vaultKey);
 }
 
 /**
  * The application-state directory this vault's store lives under: the first location the
- * platform names that is absolute and outside the vault, the host's own temporary
- * location when it names none, and a platform constant when it names neither.
+ * platform names that is absolute and outside the vault — under its own spelling and
+ * under the name the filesystem gives it — the host's own temporary location when it
+ * names none, and a platform constant when it names neither.
  *
  * Falling back to a temporary directory keeps the guarantee that matters — agent state
  * lands somewhere writable that is neither the vault nor another vault's store — on a
@@ -325,6 +335,7 @@ function resolveApplicationStateRoot(
   vaultPath: string,
   environment: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
+  canonicalize: CopilotPathCanonicalizer,
 ): string {
   const paths = platform === 'win32' ? path.win32 : path.posix;
   const directoryName = platform === 'win32' || platform === 'darwin'
@@ -333,7 +344,10 @@ function resolveApplicationStateRoot(
 
   for (const candidate of stateRootCandidates(environment, platform)) {
     const absolute = toAbsoluteCopilotPath(candidate, platform);
-    if (absolute && !isCopilotPathWithinRoot(absolute, vaultPath, platform)) {
+    if (
+      absolute
+      && !isCopilotPathWithinRootThroughLinks(absolute, vaultPath, platform, canonicalize)
+    ) {
       return paths.join(absolute, directoryName);
     }
   }

@@ -28,7 +28,8 @@ not what a later layer will do with them.
 | `sdk/CopilotClientFactory` | CLI resolution, runtime environment, client identity, and the auth gate |
 | `sdk/CopilotRuntimeError` | Failure categorization onto `ProviderExecutionErrorCategory`, and what each category leaves unusable |
 | `runtime/CopilotCliResolver` | Discovering the user-installed `copilot` binary from settings and the host |
-| `runtime/CopilotAbsolutePath` | What counts as an absolute path for a CLI spawned in the vault, the canonical form of one, and whether one path lies inside another |
+| `runtime/CopilotAbsolutePath` | What counts as an absolute path for a CLI spawned in the vault, the canonical form of one, and whether one path lies inside another by spelling |
+| `runtime/CopilotCanonicalPath` | What the host filesystem calls a path that may not exist yet, and whether one path lies inside another through the links both are reached by |
 | `runtime/CopilotCliEntry` | Narrowing a discovered path to the executable the SDK is handed, and requiring it to be absolute |
 | `runtime/CopilotNativeCliBinary` | Where an npm install's native platform binary lives |
 | `runtime/CopilotRuntimeEnvironment` | `COPILOT_HOME` placement, the CLI process environment, and the canonical form of a configured environment |
@@ -231,17 +232,31 @@ not what a later layer will do with them.
 - Absolute is not enough on its own: a host names locations the vault holds whenever the
   vault is opened on the home directory, or on a folder above one — `HOME`,
   `XDG_STATE_HOME`, `LOCALAPPDATA`, and the temporary variables then point back into the
-  notes. Every candidate is tested against the vault with `isCopilotPathWithinRoot`, and a
-  candidate the vault holds — or is — is refused exactly like a relative one, so the
-  search continues to the next host root. The platform constants are held to the rule too,
-  which is why there are two of them per platform: a vault opened on `/tmp` falls through
-  to `/var/tmp`, and one on `C:\Temp` to `C:\Windows\Temp`.
-- That test is lexical and reads no filesystem. It is asked about a store Claudian has not
-  created yet, under host locations that may name nothing on this machine, so resolving
-  through `realpath` would answer for whatever happens to be on disk and would call a
-  directory the vault is about to hold external. Both sides are normalized, and Windows
-  compares without regard to case because that is how it resolves two spellings to one
-  directory.
+  notes. Every candidate is tested against the vault with
+  `isCopilotPathWithinRootThroughLinks`, and a candidate the vault holds — or is — is
+  refused exactly like a relative one, so the search continues to the next host root. The
+  platform constants are held to the rule too, which is why there are two of them per
+  platform: a vault opened on `/tmp` falls through to `/var/tmp`, and one on `C:\Temp` to
+  `C:\Windows\Temp`.
+- That test asks the spelling first, and the spelling alone is enough to refuse. It is
+  asked about a store Claudian has not created yet, under host locations that may name
+  nothing on this machine, so a directory the vault will hold the moment it is created is
+  already held. Both sides are normalized, and Windows compares without regard to case
+  because that is how it resolves two spellings to one directory.
+- Spelling cannot see that two names reach one place, and on a real host they routinely
+  do: macOS reaches every temporary directory through `/var`, which is a link to
+  `/private/var`, and a vault on an external disk or a synced folder is commonly a link
+  itself. So both sides are canonicalized through `runtime/CopilotCanonicalPath` and
+  compared again. `realpath` answers only for a path that exists, so the nearest existing
+  ancestor is resolved and the part that does not exist yet is appended — the same
+  best-effort resolution `utils/path` performs for vault-relative paths.
+- Canonicalization is a parameter of `resolveCopilotHomeDirectory`, not a fixed call, so a
+  host whose links this machine does not have can be stood in for. The default answers
+  only for the platform the process runs on: a path spelled for another one names nothing
+  here, and resolving `C:\Users\person` against a POSIX filesystem would answer with the
+  working directory, which is the vault. Where either side has no canonical name — an
+  unreadable root, a location that names nothing — the spelling stands, so a host that
+  cannot be read never turns a refusal into consent.
 - A vault opened on the filesystem root holds every location there is, so
   `resolveCopilotHomeDirectory` throws rather than answering. There is no directory left
   that keeps agent state out of the notes, and returning one inside them is the single
