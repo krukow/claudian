@@ -80,6 +80,10 @@ export interface CopilotCliEntryEnvironment {
  * process whose child keeps running when the loader is stopped, so the platform package's
  * own executable is resolved and given to the SDK instead.
  *
+ * What counts as absolute is `toAbsoluteCopilotPath`, the same rule the CLI's data
+ * directory is held to, since both are resolved against that working directory when they
+ * are not absolute.
+ *
  * A path that is not absolute, a launcher that names nothing resolvable, an entry the
  * filesystem tells apart from its lowercase spelling, and a Copilot install with no
  * platform package all return null rather than a path that only fails at spawn time,
@@ -117,14 +121,6 @@ export function resolveCopilotCliEntry(
   const loader = resolveNpmLoaderPath(entry, resolved);
   return loader ? resolveCopilotNativeBinary(loader, resolved) : entry;
 }
-
-/**
- * The candidate as the canonical absolute path the SDK will spawn, or null when it is not
- * one, is `toAbsoluteCopilotPath` — the same rule the CLI's data directory is held to,
- * since both are resolved against the vault when they are not absolute. A discovered path
- * is held to it as well: a relative entry on the host's own PATH resolves against that
- * same working directory.
- */
 
 /**
  * The `@github/copilot` launcher an entry leads to, or null when it leads to none.
