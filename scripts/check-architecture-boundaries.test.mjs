@@ -6,15 +6,19 @@ import * as path from 'node:path';
 import test from 'node:test';
 import ts from 'typescript';
 
+import copilotSdkBundleEnvelopeHelpers from './copilotSdkBundleEnvelope.js';
 import {
   evaluationIndicatorMs,
   evaluationReviewThresholdMs,
   inspectArtifactSize,
+  inspectCopilotBundleEnvelope,
   inspectEvaluationDuration,
   inspectPluginArtifactReferences,
   mainBudgetBytes,
   preCollabReferenceMainBytes,
+  preCopilotSdkBaselineMainBytes,
   preStep11BundleHealthBaselineBytes,
+  upstreamMainBudgetBytes,
 } from './check-startup-performance.mjs';
 import {
   bundleCriticalRuntimeDependencies,
@@ -1002,15 +1006,35 @@ test('TypeScript resolves the Collab protocol through the installed registry pac
   );
 });
 
+/**
+ * The fork budget is the only hard gate; the upstream ceiling it was raised from stays in
+ * the policy so every report says how far past it the artifact has drifted, and so raising
+ * it again is a visible decision rather than an edit to a single number.
+ */
 test('performance policy enforces the main bundle budget and reports health deltas', () => {
   assert.equal(preStep11BundleHealthBaselineBytes, 4_896_000);
-  assert.equal(mainBudgetBytes, 5_000_000);
+  assert.equal(preCopilotSdkBaselineMainBytes, 4_963_797);
+  assert.equal(upstreamMainBudgetBytes, 5_000_000);
+  assert.equal(mainBudgetBytes, 5_250_000);
+  assert.equal(mainBudgetBytes - upstreamMainBudgetBytes, 250_000);
   assert.deepEqual(inspectArtifactSize(mainBudgetBytes), {
     budgetExceeded: false,
+    copilotSdkBaselineDeltaBytes: mainBudgetBytes - preCopilotSdkBaselineMainBytes,
     healthBaselineDeltaBytes: mainBudgetBytes - preStep11BundleHealthBaselineBytes,
     referenceDeltaBytes: mainBudgetBytes - preCollabReferenceMainBytes,
+    upstreamCeilingExceeded: true,
   });
   assert.equal(inspectArtifactSize(mainBudgetBytes + 1).budgetExceeded, true);
+  assert.equal(inspectArtifactSize(upstreamMainBudgetBytes).upstreamCeilingExceeded, false);
+  assert.equal(
+    inspectArtifactSize(upstreamMainBudgetBytes + 1).upstreamCeilingExceeded,
+    true,
+  );
+  assert.equal(inspectArtifactSize(upstreamMainBudgetBytes + 1).budgetExceeded, false);
+  assert.equal(
+    inspectArtifactSize(preCopilotSdkBaselineMainBytes).copilotSdkBaselineDeltaBytes,
+    0,
+  );
   assert.equal(inspectEvaluationDuration(evaluationIndicatorMs), 'within-indicator');
   assert.equal(inspectEvaluationDuration(evaluationIndicatorMs + 1), 'warning');
   assert.equal(
@@ -1019,14 +1043,57 @@ test('performance policy enforces the main bundle budget and reports health delt
   );
 });
 
+test('production bundle policy rejects Copilot SDK code the envelope excludes', () => {
+  assert.deepEqual(inspectCopilotBundleEnvelope('const plugin = {};'), { forbidden: [] });
+  for (const marker of [
+    'koffi',
+    'ffiRuntimeHost',
+    'getBundledCliPath',
+    '@github/copilot-darwin',
+    '@github/copilot-linux',
+    '@github/copilot-win32',
+    'Could not resolve a @github/copilot platform package',
+  ]) {
+    const inspected = inspectCopilotBundleEnvelope(`const plugin = {};\n${marker}`);
+    assert.equal(inspected.forbidden.length, 1, `${marker} was not rejected`);
+    assert.ok(inspected.forbidden[0].startsWith(marker));
+  }
+});
+
+/**
+ * Patching the SDK source is not what keeps the resolvers out of the artifact: the patched
+ * module still names them, and only the production minifier drops the names along with the
+ * bodies that now only throw. The gate above reads the artifact, so it stays stricter than
+ * the patch.
+ */
+test('the Copilot bundle envelope removes the SDK-bundled CLI resolvers', () => {
+  const { stripBundledCliResolvers } = copilotSdkBundleEnvelopeHelpers;
+  const clientPath = path.join(
+    process.cwd(),
+    'node_modules/@github/copilot-sdk/dist/client.js',
+  );
+  const patched = stripBundledCliResolvers(fs.readFileSync(clientPath, 'utf8'), clientPath);
+
+  assert.equal(inspectCopilotBundleEnvelope(patched).forbidden.length > 0, true);
+  assert.match(patched, /function getBundledCliPath\(\) \{ throw new Error\(/);
+  assert.match(patched, /function getCliPlatformPackageNames\(\) \{ throw new Error\(/);
+  assert.equal(patched.includes('@github/copilot-${variant}-${arch}'), false);
+  assert.throws(
+    () => stripBundledCliResolvers('export const nothing = 1;', 'client.js'),
+    /could not neutralize getCliPlatformPackageNames/,
+  );
+});
+
 test('bundle-critical runtime dependencies require exact manifest and lock agreement', () => {
   assert.deepEqual(bundleCriticalRuntimeDependencies, [
     '@anthropic-ai/claude-agent-sdk',
+    '@github/copilot-sdk',
     'smol-toml',
   ]);
   const packageJson = {
     dependencies: {
       '@anthropic-ai/claude-agent-sdk': '0.3.226',
+      '@github/copilot-sdk': '1.0.11',
       'smol-toml': '1.7.1',
     },
   };
@@ -1034,6 +1101,7 @@ test('bundle-critical runtime dependencies require exact manifest and lock agree
     packages: {
       '': { dependencies: { ...packageJson.dependencies } },
       'node_modules/@anthropic-ai/claude-agent-sdk': { version: '0.3.226' },
+      'node_modules/@github/copilot-sdk': { version: '1.0.11' },
       'node_modules/smol-toml': { version: '1.7.1' },
     },
   };
@@ -1043,6 +1111,7 @@ test('bundle-critical runtime dependencies require exact manifest and lock agree
     },
     packages: {
       '@anthropic-ai/claude-agent-sdk': ['@anthropic-ai/claude-agent-sdk@0.3.226'],
+      '@github/copilot-sdk': ['@github/copilot-sdk@1.0.11'],
       'smol-toml': ['smol-toml@1.7.1'],
     },
   };
@@ -1056,6 +1125,22 @@ test('bundle-critical runtime dependencies require exact manifest and lock agree
     [{
       actual: '^0.3.220',
       dependency: '@anthropic-ai/claude-agent-sdk',
+      expected: 'an exact version',
+      source: 'package.json',
+    }],
+  );
+
+  const rangedCopilotManifest = structuredClone(packageJson);
+  rangedCopilotManifest.dependencies['@github/copilot-sdk'] = '^1.0.11';
+  assert.deepEqual(
+    inspectRuntimeDependencyParity({
+      bunLock,
+      packageJson: rangedCopilotManifest,
+      packageLock,
+    }),
+    [{
+      actual: '^1.0.11',
+      dependency: '@github/copilot-sdk',
       expected: 'an exact version',
       source: 'package.json',
     }],
