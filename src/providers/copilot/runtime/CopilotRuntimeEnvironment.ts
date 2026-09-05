@@ -14,6 +14,10 @@ import { getEnhancedPath } from '../../../utils/env';
  * environment the user already runs Obsidian in rather than from anything the vault can
  * say. Nothing else from `process.env` is forwarded: the CLI receives this minimal base
  * plus the provider's configured entries.
+ *
+ * The spelling here is the one the CLI receives. A host sets these variables in whichever
+ * case its own conventions use, so which of them Claudian reads is decided without regard
+ * to case in {@link resolveTrustedHostEnvironment}.
  */
 const FORWARDED_ENVIRONMENT_KEYS: readonly string[] = [
   'ALL_PROXY',
@@ -45,6 +49,20 @@ const FORWARDED_ENVIRONMENT_KEYS: readonly string[] = [
   'USERPROFILE',
   'WINDIR',
 ];
+
+/**
+ * The forwarded keys under one spelling, so the host base is read without regard to case.
+ *
+ * Routing and TLS trust are conventionally spelled in lowercase outside Windows —
+ * `https_proxy` and `no_proxy` are what a shell profile, an onboarding script, and curl's
+ * own documentation set — and Windows resolves environment variables case-insensitively,
+ * so `Path` and `HTTPS_PROXY` are one variable there. Matching the exact spelling only
+ * would drop the proxy or certificate authority the host imposes and send an
+ * already-signed-in CLI direct instead.
+ */
+const FORWARDED_ENVIRONMENT_KEYS_BY_LOWERCASE: ReadonlyMap<string, string> = new Map(
+  FORWARDED_ENVIRONMENT_KEYS.map(key => [key.toLowerCase(), key]),
+);
 
 /**
  * Environment variables that reach the CLI from provider settings.
@@ -132,6 +150,51 @@ function compareCodeUnits(left: string, right: string): number {
   return left < right ? -1 : 1;
 }
 
+/**
+ * The host entries the CLI receives: only the keys the forwarded base names, each under
+ * that base's own spelling, matched without regard to case.
+ *
+ * The vault says nothing here — this is the environment the user already runs Obsidian
+ * in, and the reason it is read case-insensitively is that the variables on it are
+ * conventionally spelled in lowercase outside Windows. One variable must reach the CLI
+ * once, and which spelling won cannot depend on the order a host enumerates its
+ * environment in, so two rules decide it: the forwarded base's own spelling wins whenever
+ * it carries a value, and otherwise the last remaining spelling by code unit does, the
+ * same "last spelling wins" rule the configured environment resolves by. An empty value
+ * is read as absent throughout, so a spelling the host left empty neither reaches the CLI
+ * nor hides the one it filled in.
+ */
+function resolveTrustedHostEnvironment(
+  source: NodeJS.ProcessEnv,
+): ReadonlyMap<string, string> {
+  const resolved = new Map<string, { key: string; value: string }>();
+  for (const [key, value] of Object.entries(source)) {
+    const forwardedKey = FORWARDED_ENVIRONMENT_KEYS_BY_LOWERCASE.get(key.toLowerCase());
+    if (!forwardedKey || typeof value !== 'string' || !value) {
+      continue;
+    }
+    const held = resolved.get(forwardedKey);
+    if (!held || outranksHostSpelling(key, held.key, forwardedKey)) {
+      resolved.set(forwardedKey, { key, value });
+    }
+  }
+  return new Map([...resolved].map(([key, { value }]) => [key, value]));
+}
+
+function outranksHostSpelling(
+  candidate: string,
+  held: string,
+  forwardedKey: string,
+): boolean {
+  if (candidate === forwardedKey) {
+    return true;
+  }
+  if (held === forwardedKey) {
+    return false;
+  }
+  return compareCodeUnits(candidate, held) > 0;
+}
+
 export interface CopilotRuntimeEnvironmentInput {
   /** Absolute `COPILOT_HOME` for this vault. */
   readonly baseDirectory: string;
@@ -181,6 +244,10 @@ export function isCopilotJavaScriptEntrypoint(cliPath: string): boolean {
  * where session data lands, which executables the CLI resolves against, and whether
  * Electron behaves as Node. Nothing else reaches it, so a CLI switch that would let the
  * runtime act without asking has no way in from either side.
+ *
+ * Both halves are resolved to one spelling before they are applied, so a variable the
+ * host and the vault name in different cases is one variable to the CLI rather than two
+ * entries whose winner the CLI decides.
  */
 export function buildCopilotRuntimeEnvironment(
   input: CopilotRuntimeEnvironmentInput,
@@ -188,9 +255,10 @@ export function buildCopilotRuntimeEnvironment(
   const source = input.processEnvironment ?? process.env;
   const environment: Record<string, string> = {};
 
+  const forwarded = resolveTrustedHostEnvironment(source);
   for (const key of FORWARDED_ENVIRONMENT_KEYS) {
-    const value = source[key];
-    if (typeof value === 'string' && value) {
+    const value = forwarded.get(key);
+    if (value) {
       environment[key] = value;
     }
   }

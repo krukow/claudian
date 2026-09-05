@@ -203,6 +203,117 @@ describe('buildCopilotRuntimeEnvironment', () => {
     expect(environment.PATH).toBe('/opt/copilot/bin:/usr/bin');
   });
 
+  /**
+   * Routing and TLS trust are inherited from the host process, and the conventional
+   * spelling for them on macOS and Linux is lowercase: `https_proxy` is what a shell
+   * profile, a corporate onboarding script, and curl's own documentation set. Reading
+   * only the uppercase spelling would drop a proxy or certificate authority the host
+   * imposes and send the CLI direct, so the host base is matched without regard to case
+   * on every platform.
+   */
+  it.each([
+    ['all_proxy', 'ALL_PROXY'],
+    ['curl_ca_bundle', 'CURL_CA_BUNDLE'],
+    ['http_proxy', 'HTTP_PROXY'],
+    ['https_proxy', 'HTTPS_PROXY'],
+    ['no_proxy', 'NO_PROXY'],
+    ['Node_Extra_CA_Certs', 'NODE_EXTRA_CA_CERTS'],
+    ['requests_ca_bundle', 'REQUESTS_CA_BUNDLE'],
+    ['ssl_cert_dir', 'SSL_CERT_DIR'],
+    ['ssl_cert_file', 'SSL_CERT_FILE'],
+  ])('carries a host %s to the CLI as %s', (hostKey, canonicalKey) => {
+    const environment = buildCopilotRuntimeEnvironment({
+      ...baseInput,
+      processEnvironment: { [hostKey]: 'host-value', PATH: '/usr/bin' },
+    });
+
+    expect(environment[canonicalKey]).toBe('host-value');
+    expect(Object.keys(environment).filter(
+      key => key.toLowerCase() === canonicalKey.toLowerCase(),
+    )).toEqual([canonicalKey]);
+  });
+
+  /**
+   * Two spellings of one variable are one variable to the CLI, so exactly one reaches it
+   * and which one it is cannot depend on the order the host happens to enumerate its
+   * environment in. The allow-list's own spelling is the answer whenever it carries a
+   * value.
+   */
+  it.each([
+    ['the canonical spelling first', { HTTPS_PROXY: 'canonical', https_proxy: 'variant' }],
+    ['a variant first', { https_proxy: 'variant', HTTPS_PROXY: 'canonical' }],
+  ])('prefers the canonical host spelling with %s', (_name, processEnvironment) => {
+    const environment = buildCopilotRuntimeEnvironment({
+      ...baseInput,
+      processEnvironment: { ...processEnvironment, PATH: '/usr/bin' },
+    });
+
+    expect(environment.HTTPS_PROXY).toBe('canonical');
+  });
+
+  /**
+   * With no canonical spelling to defer to, the last variant by code unit wins, which is
+   * the same "last spelling wins" rule the configured environment resolves by and is
+   * decided by the spellings themselves rather than by enumeration order.
+   */
+  it.each([
+    ['ascending', { Https_Proxy: 'mixed', https_proxy: 'lower' }],
+    ['descending', { https_proxy: 'lower', Https_Proxy: 'mixed' }],
+  ])('resolves coexisting host variants the same way in %s order', (_name, processEnvironment) => {
+    const environment = buildCopilotRuntimeEnvironment({
+      ...baseInput,
+      processEnvironment: { ...processEnvironment, PATH: '/usr/bin' },
+    });
+
+    expect(environment.HTTPS_PROXY).toBe('lower');
+  });
+
+  /**
+   * An empty value is already read as absent, so a spelling the host left empty does not
+   * hide the one it filled in.
+   */
+  it('reads an empty canonical spelling as absent', () => {
+    const environment = buildCopilotRuntimeEnvironment({
+      ...baseInput,
+      processEnvironment: {
+        HTTPS_PROXY: '',
+        https_proxy: 'http://proxy:8080',
+        PATH: '/usr/bin',
+      },
+    });
+
+    expect(environment.HTTPS_PROXY).toBe('http://proxy:8080');
+  });
+
+  /**
+   * Case-insensitive matching is about which host variable was set, not about what the
+   * vault may say: a proxy or certificate authority typed into provider settings is still
+   * refused however it is spelled, and the host value stands.
+   */
+  it('keeps the host proxy when the vault names the same variable in another case', () => {
+    const environment = buildCopilotRuntimeEnvironment({
+      ...baseInput,
+      processEnvironment: { https_proxy: 'http://corporate:8080', PATH: '/usr/bin' },
+      providerEnvironment: { HTTPS_PROXY: 'http://attacker:8080' },
+    });
+
+    expect(environment.HTTPS_PROXY).toBe('http://corporate:8080');
+  });
+
+  it('never forwards a host variable the allow-list does not name in any case', () => {
+    const environment = buildCopilotRuntimeEnvironment({
+      ...baseInput,
+      processEnvironment: {
+        copilot_allow_all: 'true',
+        github_token: 'ghp_host',
+        PATH: '/usr/bin',
+      },
+    });
+
+    expect(Object.values(environment)).not.toContain('ghp_host');
+    expect(Object.values(environment)).not.toContain('true');
+  });
+
   it('runs Electron as Node when the CLI is a JavaScript entry point', () => {
     const environment = buildCopilotRuntimeEnvironment({
       ...baseInput,

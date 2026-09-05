@@ -128,6 +128,16 @@ not what a later layer will do with them.
   under the allow-list's own spelling, because Windows resolves environment variables
   that way and a second spelling would sit beside the forwarded value instead of
   replacing it.
+- The host base is read without regard to case too, and for a second reason: outside
+  Windows the conventional spelling of a proxy or certificate-authority variable is
+  lowercase, so reading `HTTPS_PROXY` alone would drop the routing and TLS trust the host
+  imposes and send an already-signed-in CLI direct. Each forwarded key reaches the CLI
+  once, under the forwarded list's own spelling. Which of two coexisting spellings that
+  value comes from is decided by the spellings, never by the order a host enumerates its
+  environment in: the forwarded spelling itself wins whenever it carries a value, and
+  otherwise the last remaining one by code unit does. An empty value is absent on both
+  sides. This is about which host variable was set — it grants the vault nothing, and a
+  configured proxy or CA entry is still refused however it is spelled.
 - `resolveCopilotConfigurableEnvironment` is the one answer to what a configured
   environment is: the allow-listed entries under the allow-list's spelling, the last of
   two spellings winning, ordered by key. Everything that has to agree on that goes through
