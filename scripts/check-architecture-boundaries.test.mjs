@@ -6,10 +6,12 @@ import * as path from 'node:path';
 import test from 'node:test';
 import ts from 'typescript';
 
+import copilotSdkBundleEnvelopeHelpers from './copilotSdkBundleEnvelope.js';
 import {
   evaluationIndicatorMs,
   evaluationReviewThresholdMs,
   inspectArtifactSize,
+  inspectCopilotBundleEnvelope,
   inspectEvaluationDuration,
   inspectPluginArtifactReferences,
   mainBudgetBytes,
@@ -1016,6 +1018,47 @@ test('performance policy enforces the main bundle budget and reports health delt
   assert.equal(
     inspectEvaluationDuration(evaluationReviewThresholdMs + 1),
     'review-required',
+  );
+});
+
+test('production bundle policy rejects Copilot SDK code the envelope excludes', () => {
+  assert.deepEqual(inspectCopilotBundleEnvelope('const plugin = {};'), { forbidden: [] });
+  for (const marker of [
+    'koffi',
+    'ffiRuntimeHost',
+    'getBundledCliPath',
+    '@github/copilot-darwin',
+    '@github/copilot-linux',
+    '@github/copilot-win32',
+    'Could not resolve a @github/copilot platform package',
+  ]) {
+    const inspected = inspectCopilotBundleEnvelope(`const plugin = {};\n${marker}`);
+    assert.equal(inspected.forbidden.length, 1, `${marker} was not rejected`);
+    assert.ok(inspected.forbidden[0].startsWith(marker));
+  }
+});
+
+/**
+ * Patching the SDK source is not what keeps the resolvers out of the artifact: the patched
+ * module still names them, and only the production minifier drops the names along with the
+ * bodies that now only throw. The gate above reads the artifact, so it stays stricter than
+ * the patch.
+ */
+test('the Copilot bundle envelope removes the SDK-bundled CLI resolvers', () => {
+  const { stripBundledCliResolvers } = copilotSdkBundleEnvelopeHelpers;
+  const clientPath = path.join(
+    process.cwd(),
+    'node_modules/@github/copilot-sdk/dist/client.js',
+  );
+  const patched = stripBundledCliResolvers(fs.readFileSync(clientPath, 'utf8'), clientPath);
+
+  assert.equal(inspectCopilotBundleEnvelope(patched).forbidden.length > 0, true);
+  assert.match(patched, /function getBundledCliPath\(\) \{ throw new Error\(/);
+  assert.match(patched, /function getCliPlatformPackageNames\(\) \{ throw new Error\(/);
+  assert.equal(patched.includes('@github/copilot-${variant}-${arch}'), false);
+  assert.throws(
+    () => stripBundledCliResolvers('export const nothing = 1;', 'client.js'),
+    /could not neutralize getCliPlatformPackageNames/,
   );
 });
 

@@ -16,6 +16,31 @@ export const evaluationIndicatorMs = 50;
 export const evaluationReviewThresholdMs = 150;
 const pluginArtifactNames = ['main.js', 'manifest.json'];
 
+/**
+ * Markers whose presence would mean the published bundle carries something the Copilot
+ * envelope exists to keep out: the native FFI addon, the in-process transport that loads
+ * it, or a path to the CLI that ships inside the SDK's own dependency graph.
+ */
+const copilotForbiddenBundleMarkers = Object.freeze({
+  'koffi': 'the native FFI addon',
+  'ffiRuntimeHost': 'the in-process FFI transport module',
+  'FfiRuntimeHost.prototype': 'a live in-process FFI transport',
+  'getBundledCliPath': 'the SDK-bundled CLI resolver',
+  '@github/copilot-linux': 'an SDK-bundled CLI platform package',
+  '@github/copilot-darwin': 'an SDK-bundled CLI platform package',
+  '@github/copilot-win32': 'an SDK-bundled CLI platform package',
+  'Could not resolve a @github/copilot platform package':
+    'the SDK-bundled CLI resolution failure path',
+});
+
+export function inspectCopilotBundleEnvelope(mainContents) {
+  return {
+    forbidden: Object.entries(copilotForbiddenBundleMarkers)
+      .filter(([marker]) => mainContents.includes(marker))
+      .map(([marker, description]) => `${marker} (${description})`),
+  };
+}
+
 export function inspectArtifactSize(mainBytes) {
   return {
     budgetExceeded: mainBytes > mainBudgetBytes,
@@ -75,6 +100,13 @@ function run() {
   if (unsupportedChunkReferences.length > 0) {
     throw new Error(
       `main.js depends on files the Obsidian Community Plugin installer does not fetch: ${unsupportedChunkReferences.join(', ')}`,
+    );
+  }
+
+  const copilotEnvelope = inspectCopilotBundleEnvelope(mainContents);
+  if (copilotEnvelope.forbidden.length > 0) {
+    throw new Error(
+      `main.js carries Copilot SDK code the bundle envelope excludes: ${copilotEnvelope.forbidden.join(', ')}`,
     );
   }
 
