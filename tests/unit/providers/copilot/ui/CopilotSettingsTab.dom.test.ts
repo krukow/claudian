@@ -173,27 +173,31 @@ function installObsidianDomHelpers(): void {
   }
 }
 
+type SettingsMutation = (value: ClaudianSettings) => void | Promise<void>;
+
 function createHost(settings: Record<string, unknown>): ProviderHost {
-  const applyMutation = async (
-    mutation: (value: ClaudianSettings) => void | Promise<void>,
-  ): Promise<void> => {
+  const applyMutation = async (mutation: SettingsMutation): Promise<void> => {
     await mutation(settings as unknown as ClaudianSettings);
   };
 
-  return {
+  const host: Pick<
+    ProviderHost,
+    'applyProviderRuntimeSettings'
+    | 'getEnvironmentVariablesForScope'
+    | 'mutateSettings'
+    | 'runProviderExecutionTransition'
+    | 'settings'
+  > = {
     applyProviderRuntimeSettings: async (_providerIds, mutation, onApplied) => {
       await applyMutation(mutation);
       await onApplied?.();
     },
-    executionLifecycleRegistry: { getProviderGeneration: () => 0 },
     getEnvironmentVariablesForScope: () => '',
     mutateSettings: applyMutation,
-    mutateSettingsConditionally: async (mutation) => {
-      await mutation(settings as unknown as ClaudianSettings);
-    },
-    settings,
     runProviderExecutionTransition: async (_providerIds, mutation) => mutation({} as never),
-  } as unknown as ProviderHost;
+    settings: settings as unknown as ClaudianSettings,
+  };
+  return host as ProviderHost;
 }
 
 function renderSettingsTab(
