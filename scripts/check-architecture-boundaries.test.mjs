@@ -7,6 +7,7 @@ import test from 'node:test';
 import ts from 'typescript';
 
 import copilotSdkBundleEnvelopeHelpers from './copilotSdkBundleEnvelope.js';
+import { findProcessSpawnFiles } from './processSpawnDetector.mjs';
 import {
   evaluationIndicatorMs,
   evaluationReviewThresholdMs,
@@ -566,6 +567,45 @@ test('runtime command discovery cannot import shared skill management', () => {
 test('renderer source does not import AsyncLocalStorage', () => {
   const pattern = /import\s*\{[^}]*\bAsyncLocalStorage\b[^}]*\}\s*from\s*['"](?:node:)?async_hooks['"]/s;
   assert.deepEqual(findMatches([sourceRoot], pattern), []);
+});
+
+/**
+ * The Copilot SDK owns spawning the CLI, including `windowsHide` and the choice between
+ * launching a JavaScript entry through the Node executable and running a binary directly.
+ * A spawn inside the provider would duplicate that decision and lose those guarantees.
+ *
+ * Whether a call starts a process is decided on the syntax tree, because the name alone
+ * does not say: `pattern.exec(line)` matches a regular expression, and `store.exec(sql)`
+ * runs a statement. Only a call that resolves to a process-module binding counts.
+ */
+test('the Copilot provider never spawns the CLI itself', () => {
+  const copilotRoot = path.join(providersRoot, 'copilot');
+  const violations = findProcessSpawnFiles(
+    listTypeScriptFiles(copilotRoot).map(normalizeRepositoryPath),
+    file => fs.readFileSync(file, 'utf8'),
+  );
+
+  assert.deepEqual(violations, []);
+});
+
+/**
+ * The gate is only worth having if it reads the code rather than its punctuation. A
+ * regular expression match must pass it, and a real spawn must not.
+ */
+test('the spawn gate separates a RegExp match from a process spawn', () => {
+  const read = source => () => source;
+
+  assert.deepEqual(
+    findProcessSpawnFiles(['sample.ts'], read('SESSION_PATTERN.exec(line);')),
+    [],
+  );
+  assert.deepEqual(
+    findProcessSpawnFiles(
+      ['sample.ts'],
+      read("import { spawn } from 'node:child_process';\nspawn(cliPath, args);"),
+    ),
+    [{ file: 'sample.ts', reasons: ["imports 'child_process'", 'calls spawn()'] }],
+  );
 });
 
 test('tab runtime construction stays private to the factory boundary', () => {

@@ -15,6 +15,7 @@ Do not assume provider parity. Check each provider's `capabilities.ts`, `registr
   - `src/features/collab/AGENTS.md`
   - `src/providers/claude/AGENTS.md`
   - `src/providers/codex/AGENTS.md`
+  - `src/providers/copilot/AGENTS.md`
   - `src/providers/grok/AGENTS.md`
   - `src/providers/opencode/AGENTS.md`
   - `src/providers/pi/AGENTS.md`

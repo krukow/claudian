@@ -30,4 +30,5 @@ run([
   path.join(__dirname, 'check-release-version.test.mjs'),
   path.join(__dirname, 'check-stylelint-config.test.mjs'),
   path.join(__dirname, 'copilotSdkBundleEnvelope.test.mjs'),
+  path.join(__dirname, 'processSpawnDetector.test.mjs'),
 ]);
