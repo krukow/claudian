@@ -143,6 +143,68 @@ describe('CopilotExecutionBackend', () => {
 });
 
 describe('CopilotExecutionSession turn lifecycle', () => {
+  it('does not let a cancelled cold resume destroy an immediate retry', async () => {
+    const firstOpening = createDeferred();
+    const deliverFirst = createDeferred();
+    const cancelledHandleReleased = createDeferred();
+    let openings = 0;
+    let nativeSessionAlive = false;
+    const client = new FakeCopilotSdkClient({
+      sessionGate: async () => {
+        openings += 1;
+        if (openings === 1) {
+          firstOpening.resolve();
+          await deliverFirst.promise;
+        }
+      },
+      onSessionCreated: sdkSession => {
+        nativeSessionAlive = true;
+        // Native disconnect destroys the session ID, not just this SDK handle.
+        sdkSession.disconnectBehavior = async () => {
+          nativeSessionAlive = false;
+          cancelledHandleReleased.resolve();
+        };
+        sdkSession.sendBehavior = async () => {
+          await cancelledHandleReleased.promise;
+          if (!nativeSessionAlive) {
+            throw new Error('The native session was destroyed by a stale resume handle.');
+          }
+          sdkSession.emit(sdkEvent('assistant.message_delta', {
+            deltaContent: 'Retry completed.',
+            messageId: 'retry-message',
+          }));
+        };
+      },
+    });
+    const runtime = new FakeCopilotSdkRuntime(() => client);
+    const session = new CopilotExecutionBackend(createHost(), { runtime }).createSession(
+      createSessionConfig({ resumeSeed: { providerSessionId: 'shared-native-session' } }),
+    );
+    try {
+      const first = session.execute(createRequest());
+      const firstEvents = collect(first.events);
+      await firstOpening.promise;
+      first.cancel();
+      expect((await firstEvents).at(-1)).toMatchObject({ type: 'cancelled' });
+
+      const retry = collect(session.execute(createRequest()).events);
+      await new Promise(resolve => setImmediate(resolve));
+      deliverFirst.resolve();
+      const retryEvents = turnFlow(await retry);
+
+      expect(retryEvents).toContainEqual(expect.objectContaining({
+        text: 'Retry completed.',
+        type: 'text_delta',
+      }));
+      expect(retryEvents.at(-1)).toMatchObject({
+        reason: 'completed', type: 'turn_completed',
+      });
+    } finally {
+      deliverFirst.resolve();
+      await session.dispose();
+    }
+  });
+
   it.each(['inline-edit', 'instruction'] as const)(
     'uses the first enabled model for %s without a model override',
     async (owner) => {
@@ -1332,7 +1394,7 @@ describe('CopilotExecutionSession late native cleanup', () => {
     expect(turnFlow(await collected).at(-1)).toMatchObject({ type: 'cancelled' });
   });
 
-  it('waits for the acquisition a cancelled turn left behind before disposing', async () => {
+  it('drains serialized acquisitions when a retry is disposed', async () => {
     const started = [createDeferred(), createDeferred()];
     const release = [createDeferred(), createDeferred()];
     const clients = [new FakeCopilotSdkClient(), new FakeCopilotSdkClient()];
@@ -1358,8 +1420,8 @@ describe('CopilotExecutionSession late native cleanup', () => {
     cliPath = '/opt/homebrew/bin/copilot';
     const second = session.execute(createRequest());
     const secondEvents = collect(second.events);
-    await started[1]?.promise;
     release[0]?.resolve();
+    await started[1]?.promise;
     await settlePendingWork();
 
     let disposed = false;
