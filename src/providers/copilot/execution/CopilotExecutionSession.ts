@@ -414,7 +414,12 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
    * acquisition the turn that replaced it is still waiting on.
    */
   private acquireSdkSession(active: ActiveExecution): Promise<CopilotSdkSession> {
-    return this.trackAcquisition(this.ensureSdkSession(active));
+    // A stale SDK handle disconnects by native session ID, which a retry may reuse.
+    const previousAcquisitions = Promise.all([...this.acquisitionFlights]);
+    return this.trackAcquisition(previousAcquisitions.then(() => {
+      this.assertRunOwnsNative(active);
+      return this.ensureSdkSession(active);
+    }));
   }
 
   /**
