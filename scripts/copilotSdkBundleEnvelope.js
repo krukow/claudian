@@ -131,11 +131,26 @@ const copilotForbiddenBundleMarkers = Object.freeze({
     'the SDK-bundled CLI resolution failure path',
 });
 
+/**
+ * Stubs the envelope installs in place of the transports Claudian does not support. Their
+ * absence from an artifact that carries the SDK means the envelope stopped applying, which
+ * the forbidden markers alone cannot say: a bundle that dropped the SDK entirely would
+ * pass those vacuously.
+ */
+const copilotRequiredBundleMarkers = Object.freeze([
+  'Copilot in-process FFI transport is disabled in Claudian.',
+  'Copilot SQLite session storage is disabled in Claudian.',
+  'Copilot BYOK request forwarding is disabled in Claudian.',
+  'The Copilot CLI bundled with the SDK is not used by Claudian.',
+]);
+
 function inspectCopilotBundleEnvelope(bundleContents) {
   return {
     forbidden: Object.entries(copilotForbiddenBundleMarkers)
       .filter(([marker]) => bundleContents.includes(marker))
       .map(([marker, description]) => `${marker} (${description})`),
+    missingStubs: copilotRequiredBundleMarkers
+      .filter(marker => !bundleContents.includes(marker)),
   };
 }
 

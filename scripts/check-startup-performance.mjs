@@ -106,6 +106,11 @@ function run() {
       `main.js carries Copilot SDK code the bundle envelope excludes: ${copilotEnvelope.forbidden.join(', ')}`,
     );
   }
+  if (copilotEnvelope.missingStubs.length > 0) {
+    throw new Error(
+      `main.js is missing a fail-closed Copilot SDK stub: ${copilotEnvelope.missingStubs.join(', ')}`,
+    );
+  }
 
   const mainBytes = statSync(mainPath).size;
   const artifact = inspectArtifactSize(mainBytes);

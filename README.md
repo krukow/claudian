@@ -45,6 +45,7 @@ Open the chat sidebar from the ribbon icon or command palette. Select text and u
   - [Grok Build](https://github.com/xai-org/grok-build)
   - [OpenCode](https://github.com/anomalyco/opencode)
   - [Pi](https://github.com/earendil-works/pi)
+  - [GitHub Copilot CLI](https://docs.github.com/copilot) — see [Copilot provider](docs/copilot-provider.md) for the supported CLI versions, sign-in, and capabilities
 - A compatible subscription or API provider, such as [OpenRouter](https://openrouter.ai/docs/guides/guides/claude-code-integration), [Kimi](https://platform.kimi.ai/docs/guide/claude-code-kimi), [GLM](https://docs.z.ai/devpack/tool/claude), or [DeepSeek](https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code) etc.
 - Obsidian v1.13.0+
 - Desktop only (macOS, Linux, Windows)
@@ -90,7 +91,8 @@ npm run build
 
 ## Privacy & Data Use
 
-- **Sent to API**: Your input, attached files, images, and tool call outputs. Depending on the selected provider, data is sent to Anthropic (Claude), OpenAI (Codex), xAI (Grok), or the providers configured in OpenCode or Pi. The destination can be configured through provider settings and environment variables.
+- **Sent to API**: Your input, attached files, images, and tool call outputs. Depending on the selected provider, data is sent to Anthropic (Claude), OpenAI (Codex), xAI (Grok), GitHub (Copilot), or the providers configured in OpenCode or Pi. The destination can be configured through provider settings and environment variables.
+- **Copilot session state**: The Copilot CLI keeps its own session data in a per-vault directory Claudian creates outside your notes, and Claudian never reads or deletes it apart from the short-lived sessions it creates for titles and inline edits. See [Copilot provider](docs/copilot-provider.md).
 - **Collab LAN traffic**: When you explicitly Host or synchronize a Collab Project, Project Git data and authenticated coordination metadata travel directly between invited teammates' devices on the local network. Collab Mode itself does not send Project data to a Claudian cloud service or any third party.
 - **No telemetry or unsolicited background activity**: Claudian does not run telemetry beacons. UI polling timers read local Obsidian/editor selection state only. Network activity is limited to explicit provider runtime work, configured MCP endpoints, provider SDK/CLI calls needed to answer your requests, and explicitly started Collab LAN work.
 
@@ -132,7 +134,7 @@ Either:
 
 ### More help
 
-For provider-specific installation and configuration guidance, refer to the provider documentation linked in the [Requirements](#requirements) section. If you have a feature request or run into a bug, please [submit a GitHub issue](https://github.com/YishenTu/claudian/issues).
+For provider-specific installation and configuration guidance, refer to the provider documentation linked in the [Requirements](#requirements) section. Copilot has its own page: [Copilot provider](docs/copilot-provider.md). If you have a feature request or run into a bug, please [submit a GitHub issue](https://github.com/YishenTu/claudian/issues).
 
 ## Architecture
 

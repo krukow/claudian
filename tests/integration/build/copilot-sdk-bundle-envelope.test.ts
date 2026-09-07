@@ -173,7 +173,8 @@ describe('Copilot SDK bundle envelope', () => {
   });
 
   it('excludes the native FFI addon and the SDK-bundled CLI', () => {
-    expect(inspectCopilotBundleEnvelope(bundleSource)).toEqual({ forbidden: [] });
+    expect(inspectCopilotBundleEnvelope(bundleSource))
+      .toEqual({ forbidden: [], missingStubs: [] });
     expect(bundleInputs.filter(input => (
       input.includes(`/${nativeFfiPackage}/`)
       || input.includes('/@github/copilot/')

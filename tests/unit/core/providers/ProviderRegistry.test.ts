@@ -365,6 +365,76 @@ describe('ProviderRegistry', () => {
     expect(providerCalls).toEqual(['claude']);
   });
 
+  /**
+   * A namespaced selection names its provider whatever the selector currently offers. A
+   * Copilot model the user has since hidden, or one the catalog no longer lists, is still
+   * a Copilot selection: routing it to Claude would title the conversation with a model
+   * from a provider that owns none of it.
+   */
+  it('routes a hidden Copilot title model to Copilot rather than to Claude', async () => {
+    const providerCalls: ProviderId[] = [];
+    const originalCreate = ProviderRegistry.createTitleGenerationService.bind(ProviderRegistry);
+    jest.spyOn(ProviderRegistry, 'createTitleGenerationService')
+      .mockImplementation((plugin: any, providerId?: ProviderId) => {
+        if (!providerId) {
+          return originalCreate(plugin);
+        }
+        providerCalls.push(providerId);
+        return createMockTitleService(providerId);
+      });
+
+    const service = ProviderRegistry.createTitleGenerationService({
+      settings: {
+        titleGenerationModel: 'copilot/gpt-4.1',
+        providerConfigs: {
+          copilot: {
+            discoveredModels: [
+              { displayName: 'GPT-4.1', rawId: 'gpt-4.1' },
+              { displayName: 'GPT-5 mini', rawId: 'gpt-5-mini' },
+            ],
+            enabled: true,
+            visibleModels: ['gpt-5-mini'],
+          },
+        },
+      },
+    } as any);
+
+    await service.generateTitle('conv-1', 'hello', jest.fn());
+
+    expect(providerCalls).toEqual(['copilot']);
+  });
+
+  it('routes a Copilot title model the catalog no longer lists to Copilot', async () => {
+    const providerCalls: ProviderId[] = [];
+    const originalCreate = ProviderRegistry.createTitleGenerationService.bind(ProviderRegistry);
+    jest.spyOn(ProviderRegistry, 'createTitleGenerationService')
+      .mockImplementation((plugin: any, providerId?: ProviderId) => {
+        if (!providerId) {
+          return originalCreate(plugin);
+        }
+        providerCalls.push(providerId);
+        return createMockTitleService(providerId);
+      });
+
+    const service = ProviderRegistry.createTitleGenerationService({
+      settings: {
+        titleGenerationModel: 'copilot/retired-model',
+        providerConfigs: {
+          claude: { enabled: true },
+          copilot: {
+            discoveredModels: [{ displayName: 'GPT-5 mini', rawId: 'gpt-5-mini' }],
+            enabled: true,
+            visibleModels: ['gpt-5-mini'],
+          },
+        },
+      },
+    } as any);
+
+    await service.generateTitle('conv-1', 'hello', jest.fn());
+
+    expect(providerCalls).toEqual(['copilot']);
+  });
+
   it('suppresses stale callbacks when a newer title generation replaces the old one', async () => {
     const originalCreate = ProviderRegistry.createTitleGenerationService.bind(ProviderRegistry);
     const claudeService = createDeferredTitleService();

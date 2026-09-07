@@ -1084,7 +1084,10 @@ test('performance policy enforces the main bundle budget and reports health delt
 });
 
 test('production bundle policy rejects Copilot SDK code the envelope excludes', () => {
-  assert.deepEqual(inspectCopilotBundleEnvelope('const plugin = {};'), { forbidden: [] });
+  assert.deepEqual(
+    inspectCopilotBundleEnvelope('const plugin = {};').forbidden,
+    [],
+  );
   for (const marker of [
     'koffi',
     'ffiRuntimeHost',

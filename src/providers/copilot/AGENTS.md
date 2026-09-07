@@ -3,12 +3,11 @@
 `src/providers/copilot/` adapts the GitHub Copilot CLI through `@github/copilot-sdk` over
 a stdio JSON-RPC subprocess.
 
-Only the runtime and model foundation is here: the SDK boundary, the CLI the SDK is handed,
-the environment that CLI runs with, the model catalog, and the provider settings those
-answers are persisted in. There is no execution pipeline, history service, settings UI,
-capability set, or registration yet, so nothing in this directory is reachable from
-`src/main.ts` and no Copilot conversation can be created. Describe what these modules do,
-not what a later layer will do with them.
+The provider is reachable from `src/main.ts` and ships switched off. It streams text,
+reasoning, tools, approvals, and questions for chat and for the ephemeral title, inline
+edit, and instruction-refinement runs. Native history browsing, replay, rewind, fork, plan
+mode, images, subagents, provider commands, skills, plugins, and MCP are absent, and
+`capabilities.ts` says so; do not describe them as pending here.
 
 ## Dependency Boundary
 
@@ -37,7 +36,18 @@ not what a later layer will do with them.
 | `env/CopilotSettingsReconciler` | The runtime-input fingerprint and what a change to it invalidates |
 | `models.ts` | Model id encoding, catalog normalization, reasoning efforts, context-window reading, and catalog equality |
 | `settings.ts` | Persisted provider settings, their defaults, their fail-closed decoding, and the merge that leaves other layers' fields alone |
-| `app/CopilotWorkspaceServices` | Publishing a discovered catalog only under the runtime it was discovered from, and only from the newest refresh |
+| `app/CopilotWorkspaceServices` | Publishing a discovered catalog only under the runtime it was discovered from, and only from the newest refresh, and the settings tab the provider renders |
+| `execution/CopilotBuiltinTools` | The captured CLI tool catalog, its read-only, mutating, and unsupported groups, and the permission kinds a read-only turn may still reach the user with |
+| `execution/CopilotRequestEncoder` | What one turn becomes: tool selection, prompt and its context, system message, directories, reasoning effort, the inputs a live session is bound to, and the input the provider cannot carry |
+| `execution/CopilotEventNormalizer` | Translating the SDK event stream into provider-neutral events, and which of a delta and its aggregate carries the text |
+| `execution/CopilotUsageBuilder` | Projecting a usage report onto Claudian's contract, and what counts as resident context |
+| `execution/CopilotInteractionHandler` | Which turn an approval or a question belongs to, and refusing the ones no turn owns or the policy forbids |
+| `execution/CopilotExecutionSession` | The client, the live native session, the lease each turn leaves behind, and every fence between them |
+| `history/CopilotConversationHistoryService` | Which native session a conversation refers to, and what a runtime that lost it changes |
+| `capabilities.ts` | What the provider advertises, and therefore what the UI offers |
+| `registration.ts` | The provider's place in the built-in catalog, its environment key claim, and explicit title-model overrides |
+| `ui/CopilotChatUIConfig` | The models, reasoning options, and context windows the chat surface reads |
+| `ui/CopilotSettingsTab` | The Copilot settings surface, composed from shared settings helpers |
 
 ## Runtime Rules
 
@@ -144,6 +154,12 @@ not what a later layer will do with them.
 - `availableTools` is required by the port rather than left to a later layer. Omitting it
   reads as "keep the CLI's own defaults", which is the ambient behaviour everything above
   exists to keep out, and the caller would not find out until a turn ran.
+- Every tool policy therefore names an allow-list. A policy that restricts nothing says so
+  as `builtin:*` — every builtin, and nothing an MCP server or a custom agent registered —
+  rather than by staying silent, and it is the only shape that needs `excludedTools`,
+  because it is the only one that would otherwise match the agent and factory families.
+  The narrower policies name those families nowhere, so a second deny-list on them would
+  restate one rule twice.
 - The CLI does not inherit `process.env`. It receives a small forwarded base, then the
   configured entries the allow-list in `runtime/CopilotRuntimeEnvironment` names, and
   finally `COPILOT_HOME`, `PATH`, and `ELECTRON_RUN_AS_NODE`, which Claudian pins.
@@ -322,6 +338,35 @@ not what a later layer will do with them.
 - An abort and a disconnect are left to their caller to bound, because the caller has to
   decide what a silent runtime means for a session it might still reuse. The port says so;
   do not bind them to a budget here.
+
+## Execution Rules
+
+- A create or a resume is bounded at the SDK boundary, which also ends the CLI that went
+  silent on one. `execution/CopilotExecutionSession` therefore calls both directly: a
+  second deadline here would be waiting on a process this layer was never handed and could
+  not stop, and it would report a silence the boundary has already turned into a transport
+  failure about a CLI that is gone. What stays is the fencing, which is a different
+  question: a session that arrives for a run that was cancelled, replaced, or disposed
+  while the CLI was answering is released where it arrives rather than installed.
+- Every native acquisition a turn starts is published on the session, so disposal drains it
+  instead of tearing down beside it and leaving the late client or session unowned.
+  Disposal terminates because a disposed session refuses further turns.
+- A cancellation and a failure recovery both release native state before ending the run
+  they belong to, and both are published as one lifecycle flight. Disposal joins that
+  flight, so the run ends while its listeners are still attached and whatever the release
+  could not do is reported by the disposal the caller is already waiting on. Only the first
+  disposal waits; every later one repeats what that first one reported.
+- A turn ends exactly once. A cancellation that is followed by a failure, a late native
+  answer, or a disposal does not end it a second time.
+- Native session data is provider-owned and read-only. The only ids this layer deletes are
+  the ephemeral ones it created itself, for a lease it promised to clean up; a deletion
+  that fails is retried through the next client and reported when no next client can exist.
+- Approvals, questions, and events all carry the identity of the live session they came
+  from, so a session Claudian dropped can never answer for the run that replaced it.
+- Input the provider cannot carry is reported on the turn rather than dropped. An image
+  reaches nothing — the CLI receives a text prompt and `capabilities.ts` advertises no
+  image support — so the turn says which attachments were not sent.
+- Execution resolves an omitted model to the first enabled model before constructing the run, so native calls and usage share one selection. Without an enabled model it remains a configuration error, never a request for the CLI's default. Registration forwards only enabled title-model overrides; a stale Copilot-qualified title selection stays routed to Copilot and uses execution's default resolution.
 
 ## Model and Settings Rules
 

@@ -132,6 +132,22 @@ test('the SDK install cost the envelope contains is a transitive dependency, not
   }
 });
 
+/**
+ * The forbidden markers alone cannot say the envelope still applies: a bundle that dropped
+ * the SDK carries none of them either. The stubs it installs are the other half, so an
+ * artifact that links the SDK has to carry all four.
+ */
+test('the envelope reports a bundle that carries the SDK without its fail-closed stubs', () => {
+  const withoutStubs = inspectCopilotBundleEnvelope('nothing here');
+
+  assert.deepEqual(withoutStubs.forbidden, []);
+  assert.equal(withoutStubs.missingStubs.length, 4);
+
+  const withStubs = inspectCopilotBundleEnvelope(withoutStubs.missingStubs.join('\n'));
+
+  assert.deepEqual(withStubs, { forbidden: [], missingStubs: [] });
+});
+
 test('the production bundle applies the Copilot SDK envelope', () => {
   const config = fs.readFileSync(path.join(root, 'esbuild.config.mjs'), 'utf8');
   assert.match(config, /createCopilotSdkRuntimeAliases\(\)/);

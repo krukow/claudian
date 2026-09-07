@@ -1,6 +1,8 @@
 import type { ProviderHost } from '../../../core/providers/ProviderHost';
+import { ProviderWorkspaceRegistry } from '../../../core/providers/ProviderWorkspaceRegistry';
 import type {
   ProviderModelCatalogRefreshResult,
+  ProviderWorkspaceRegistration,
   ProviderWorkspaceServices,
 } from '../../../core/providers/types';
 import { computeCopilotEnvironmentHash } from '../env/CopilotSettingsReconciler';
@@ -8,6 +10,7 @@ import { sameCopilotDiscoveredModels } from '../models';
 import { CopilotCliResolver } from '../runtime/CopilotCliResolver';
 import { CopilotModelDiscoveryService } from '../runtime/CopilotModelDiscoveryService';
 import { getCopilotProviderSettings, updateCopilotProviderSettings } from '../settings';
+import { copilotSettingsTabRenderer } from '../ui/CopilotSettingsTab';
 
 const COPILOT_PROVIDER_ID = 'copilot' as const;
 
@@ -31,6 +34,7 @@ export function createCopilotWorkspaceServices(
 
   return {
     cliResolver,
+    settingsTabRenderer: copilotSettingsTabRenderer,
 
     /**
      * Discovery runs against the CLI, environment, and account the settings named when it
@@ -98,4 +102,13 @@ export function createCopilotWorkspaceServices(
       return published ? { changed: true, persistedSettingsChanged: true } : { changed: false };
     },
   };
+}
+
+export const copilotWorkspaceRegistration:
+ProviderWorkspaceRegistration<CopilotWorkspaceServices> = {
+  initialize: async ({ plugin }) => createCopilotWorkspaceServices(plugin),
+};
+
+export function getCopilotWorkspaceServices(): CopilotWorkspaceServices {
+  return ProviderWorkspaceRegistry.requireServices('copilot') as CopilotWorkspaceServices;
 }
