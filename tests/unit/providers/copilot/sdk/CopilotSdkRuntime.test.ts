@@ -95,6 +95,7 @@ class FakeSdkCopilotClient {
     abort?: () => Promise<void>;
     commands?: Array<{ description?: string; kind: string; name: string }>;
     createSession?: () => Promise<FakeSdkCopilotSession>;
+    deleteSession?: () => Promise<void>;
     disconnect?: () => Promise<void>;
     disableSkill?: () => Promise<void>;
     discoverMcp?: () => Promise<{ servers: Array<{ name: string }> }>;
@@ -165,6 +166,7 @@ class FakeSdkCopilotClient {
 
   async deleteSession(sessionId: string): Promise<void> {
     this.deletedSessions.push(sessionId);
+    await FakeSdkCopilotClient.behavior.deleteSession?.();
   }
 
   async stop(): Promise<Error[]> {
@@ -1097,6 +1099,26 @@ describe('copilotSdkRuntime session resources', () => {
 
     await expect(client.createSession(resourceConfig())).rejects.toThrow('MCP state unavailable');
     expect(FakeSdkCopilotSession.instances[0]?.toolListings).toEqual([]);
+  });
+
+  it('preserves transport recovery and the causes when setup and cleanup all time out', async () => {
+    await withFakeTimers(async () => {
+      FakeSdkCopilotClient.behavior.ensureSkills = () => neverAnswers<void>();
+      FakeSdkCopilotClient.behavior.disconnect = () => neverAnswers<void>();
+      FakeSdkCopilotClient.behavior.deleteSession = () => neverAnswers<void>();
+      const client = await createClient();
+      const opening = client.createSession(resourceConfig()).then(
+        () => undefined, (error: unknown) => error,
+      );
+      await jest.advanceTimersByTimeAsync(40_000);
+
+      expect(await opening).toMatchObject({
+        category: 'transport',
+        message: expect.stringMatching(/preparing selected Copilot resources[\s\S]*disconnecting[\s\S]*deleting/),
+        nativeReset: 'client',
+      });
+      expect(FakeSdkCopilotClient.instances[0]?.forceStopped).toBe(1);
+    });
   });
 
   it.each([false, true])('only deletes unpublished sessions after setup failure (resume=%s)',

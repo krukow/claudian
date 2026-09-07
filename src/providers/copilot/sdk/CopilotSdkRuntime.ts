@@ -273,10 +273,13 @@ class SdkBackedClient implements CopilotSdkClient {
     }
     if (outcome.kind === 'timed-out' || failures.length > 1) {
       await stopQuietly(this.client);
+      throw new CopilotRuntimeError(
+        'transport',
+        `${failures.map(describeError).join('; ')}. The Copilot CLI was terminated.`,
+        { cause: new AggregateError(failures, 'Copilot resource preparation failed.') },
+      );
     }
-    throw failures.length === 1
-      ? error
-      : new AggregateError(failures, 'Copilot resource preparation and cleanup failed.');
+    throw error;
   }
 
   /**
