@@ -1,5 +1,8 @@
+import { createHash } from 'node:crypto';
+
 import type {
   ProviderExecutionRequest,
+  ProviderSessionLifecycle,
   ProviderToolPolicy,
 } from '../../../core/execution';
 import { buildSystemPrompt } from '../../../core/prompt/mainAgent';
@@ -8,7 +11,10 @@ import { appendCanvasContext } from '../../../utils/canvas';
 import { appendLinkedContent, appendLinkedContentBody } from '../../../utils/context';
 import { appendEditorContext } from '../../../utils/editor';
 import type { CopilotReasoningEffort } from '../models';
-import type { CopilotSdkSystemMessage } from '../sdk/CopilotSdkPort';
+import type {
+  CopilotSdkSessionResources,
+  CopilotSdkSystemMessage,
+} from '../sdk/CopilotSdkPort';
 import {
   COPILOT_ALLOWABLE_BUILTIN_TOOLS,
   COPILOT_READ_ONLY_TOOL_FILTERS,
@@ -215,9 +221,14 @@ export function encodeReasoningEffort(
 /**
  * The inputs that a live SDK session is bound to. A change requires a new session,
  * because the CLI fixes them when the session is created.
+ *
+ * The resources are named by a digest rather than by their definitions: an MCP server is
+ * defined with the environment entries and headers it is reached with, and this key is
+ * held in memory beside a session for as long as it lives.
  */
 export function encodeSessionIdentity(input: {
   readonly additionalDirectories: readonly string[];
+  readonly resources?: CopilotSdkSessionResources;
   readonly toolSelection: CopilotToolSelection;
   readonly systemMessage: CopilotSdkSystemMessage;
   readonly workingDirectory: string;
@@ -228,9 +239,62 @@ export function encodeSessionIdentity(input: {
     excludedTools: input.toolSelection.excludedTools
       ? [...input.toolSelection.excludedTools].sort()
       : null,
+    resources: encodeCopilotResourceDigest(input.resources),
     systemMessage: input.systemMessage,
     workingDirectory: input.workingDirectory,
   });
+}
+
+/**
+ * Names a set of resources without spelling it out. The definitions carry the environment
+ * entries and headers their servers are reached with, and this is held in memory beside a
+ * session and compared for as long as one lives.
+ */
+export function encodeCopilotResourceDigest(
+  resources: CopilotSdkSessionResources | null | undefined,
+): string | null {
+  if (!resources) {
+    return null;
+  }
+  const canonical = JSON.stringify({
+    mcpServers: Object.keys(resources.mcpServers).sort().map(name => [
+      name,
+      resources.mcpServers[name],
+    ]),
+    skillDirectories: [...resources.skillDirectories].sort(),
+  });
+  return createHash('sha256').update(canonical).digest('hex');
+}
+
+/**
+ * Whether a session may run the MCP servers and skills the user selected.
+ *
+ * Only a persistent chat session can: the title, inline edit, and instruction-refinement
+ * runs are ephemeral leases nobody selected a server for, and every narrowed tool policy
+ * exists to hold a turn to a small set of builtins, which a server's tools would widen.
+ */
+export function allowsCopilotResources(
+  lifecycle: ProviderSessionLifecycle,
+  policy: ProviderToolPolicy,
+): boolean {
+  return lifecycle === 'persistent'
+    && (policy.kind === 'provider-default' || policy.kind === 'unrestricted');
+}
+
+/**
+ * The skill command a message asks for, or null when it is ordinary text.
+ *
+ * Only a message whose first line is a single slash-prefixed word can be one, so a note
+ * that happens to start with a path is left alone.
+ */
+export function decodeSkillCommandInput(
+  prompt: string,
+): { readonly input: string; readonly name: string } | null {
+  const match = /^\/([\w-]+)(?:\s+([\s\S]*))?$/.exec(prompt.trim());
+  if (!match) {
+    return null;
+  }
+  return { input: match[2]?.trim() ?? '', name: match[1] };
 }
 
 function uniqueStrings(values: readonly string[]): string[] {

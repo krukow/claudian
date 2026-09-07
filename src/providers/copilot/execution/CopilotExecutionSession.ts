@@ -18,6 +18,8 @@ import {
   encodeCopilotModelId,
   isCopilotReasoningEffort,
 } from '../models';
+import { getCopilotHostResources } from '../resources/CopilotHostResources';
+import { resolveCopilotSelectedResources } from '../resources/CopilotResourceResolver';
 import {
   type CopilotClientFactory,
   type CopilotClientIdentity,
@@ -37,14 +39,18 @@ import type {
   CopilotSdkClient,
   CopilotSdkSession,
   CopilotSdkSessionConfig,
+  CopilotSdkSessionResources,
 } from '../sdk/CopilotSdkPort';
 import { getCopilotProviderSettings, getEnabledCopilotModels } from '../settings';
 import { CopilotEventNormalizer } from './CopilotEventNormalizer';
 import type { CopilotExecutionEventDraft } from './CopilotExecutionEventDraft';
 import { CopilotInteractionHandler } from './CopilotInteractionHandler';
 import {
+  allowsCopilotResources,
+  decodeSkillCommandInput,
   describeUnsupportedInput,
   encodeAdditionalDirectories,
+  encodeCopilotResourceDigest,
   encodePrompt,
   encodeReasoningEffort,
   encodeSessionIdentity,
@@ -133,8 +139,12 @@ interface ActiveExecution {
   cancelled: boolean;
   readonly normalizer: CopilotEventNormalizer;
   readonly request: ProviderExecutionRequest;
+  /** What the turn's selected resources could not resolve to, reported on the turn. */
+  resourceProblems: readonly string[];
   readonly run: CopilotExecutionRunState;
   sequence: number;
+  /** Whether this turn's session loaded skills, and so can answer a slash command. */
+  skillsEnabled: boolean;
 }
 
 type CopilotSessionInvalidation = Extract<
@@ -155,6 +165,14 @@ interface LiveSdkSession {
 /** Deletion attempts an ephemeral session id gets before its failure is reported. */
 const EPHEMERAL_DELETION_ATTEMPTS = 3;
 
+/**
+ * What a turn does with the message it was given: send a prompt, or report what the
+ * runtime already answered with and run no turn.
+ */
+type CopilotTurnSubmission =
+  | { readonly kind: 'send'; readonly notice?: string; readonly prompt: string }
+  | { readonly kind: 'answered'; readonly notice: string };
+
 export interface CopilotExecutionSessionOptions {
   readonly clientFactory: CopilotClientFactory;
 }
@@ -168,6 +186,8 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
   private readonly acquisitionFlights = new Set<Promise<void>>();
   private client: CopilotSdkClient | null = null;
   private clientIdentity: CopilotClientIdentity | null = null;
+  /** The resources the live client was started under, which only a fresh one can change. */
+  private clientResourceDigest: string | null = null;
   private disposalFlight: Promise<void> | null = null;
   private disposed = false;
   private readonly interactionHandler: CopilotInteractionHandler;
@@ -235,8 +255,10 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
         nextScope: () => this.nextScope(active),
       }),
       request,
+      resourceProblems: [],
       run,
       sequence: 0,
+      skillsEnabled: false,
     };
     this.active = active;
     this.updateSnapshot('executing');
@@ -326,8 +348,28 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
           type: 'notice',
         }));
       }
+      for (const problem of [...active.resourceProblems, ...session.resourceDiagnostics]) {
+        active.run.emit(this.event(active, {
+          level: 'warning',
+          message: problem,
+          type: 'notice',
+        }));
+      }
 
-      await session.send(prompt);
+      const submission = await this.resolveSubmission(active, session, prompt);
+      if (active.cancelled) {
+        return;
+      }
+      if (submission.notice) {
+        active.run.emit(this.event(active, {
+          level: 'info',
+          message: submission.notice,
+          type: 'notice',
+        }));
+      }
+      if (submission.kind === 'send') {
+        await session.send(submission.prompt);
+      }
       if (active.cancelled) {
         return;
       }
@@ -442,7 +484,22 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
     );
     this.assertRunOwnsNative(active);
 
-    if (!isSameCopilotClientIdentity(this.clientIdentity, identity)) {
+    const resources = await this.resolveTurnResources(active);
+    this.assertRunOwnsNative(active);
+    const resourceDigest = encodeCopilotResourceDigest(resources);
+
+    /**
+     * A selection that changed needs a CLI that has not started anything yet. The
+     * exclusion list a session states only applies where the runtime is starting servers
+     * — a create or a cold resume — so resuming on the process that is already running
+     * the previous selection's servers would leave them running. Ending that process and
+     * resuming the same native session on a fresh one is what makes the change take
+     * effect, and the conversation keeps its native id.
+     */
+    if (
+      !isSameCopilotClientIdentity(this.clientIdentity, identity)
+      || (this.client !== null && this.clientResourceDigest !== resourceDigest)
+    ) {
       await this.teardownNative({ final: false });
       this.assertRunOwnsNative(active);
       const started = await this.options.clientFactory.createClient(identity);
@@ -452,6 +509,7 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
       }
       this.client = started;
       this.clientIdentity = identity;
+      this.clientResourceDigest = resourceDigest;
       await this.retryPendingEphemeralDeletions(started);
       this.assertRunOwnsNative(active);
     }
@@ -470,6 +528,7 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
     });
     const identityKey = encodeSessionIdentity({
       additionalDirectories,
+      ...(resources ? { resources } : {}),
       systemMessage,
       toolSelection,
       workingDirectory: this.config.vaultWorkingDirectory,
@@ -498,6 +557,7 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
       },
       onPermissionRequest: interactions.handlePermissionRequest,
       onUserInputRequest: interactions.handleUserInputRequest,
+      ...(resources ? { resources } : {}),
       systemMessage,
       workingDirectory: this.config.vaultWorkingDirectory,
     };
@@ -527,6 +587,70 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
     this.live = { identity: identityKey, session, token: liveToken };
     this.updateSnapshot('executing');
     return session;
+  }
+
+  /**
+   * Turns a message into what is actually sent.
+   *
+   * A skill command is invoked through the runtime rather than sent as text: the runtime
+   * answers with a prompt to submit, and text that merely starts with a slash is not an
+   * invocation. A message that names no selected skill command stays exactly as the user
+   * wrote it.
+   */
+  private async resolveSubmission(
+    active: ActiveExecution,
+    session: CopilotSdkSession,
+    prompt: string,
+  ): Promise<CopilotTurnSubmission> {
+    const candidate = active.skillsEnabled ? decodeSkillCommandInput(prompt) : null;
+    if (!candidate) {
+      return { kind: 'send', prompt };
+    }
+    const commands = await session.listSkillCommands();
+    const match = commands.find(command => (
+      command.name.toLowerCase() === candidate.name.toLowerCase()
+    ));
+    if (!match) {
+      return { kind: 'send', prompt };
+    }
+    const invocation = await session.invokeSkillCommand(match.name, candidate.input);
+    if (invocation.kind === 'text') {
+      return { kind: 'answered', notice: invocation.text };
+    }
+    return {
+      kind: 'send',
+      ...(invocation.notice ? { notice: invocation.notice } : {}),
+      prompt: invocation.prompt,
+    };
+  }
+
+  /**
+   * Reads the definitions behind this computer's selection, for the turns that may use
+   * them.
+   *
+   * The read happens per turn rather than once per session, because the files it reads
+   * are the user's own and change outside Claudian, and because nothing about them is
+   * persisted: a definition lives only as long as the session it is handed to. What no
+   * longer resolves is carried on the turn and reported there.
+   */
+  private async resolveTurnResources(
+    active: ActiveExecution,
+  ): Promise<CopilotSdkSessionResources | null> {
+    if (!allowsCopilotResources(this.config.lifecycle, active.request.toolPolicy)) {
+      return null;
+    }
+    const resolution = await resolveCopilotSelectedResources(
+      getCopilotHostResources(this.host.settings),
+    );
+    active.resourceProblems = resolution.problems;
+    active.skillsEnabled = (resolution.resources?.skillDirectories.length ?? 0) > 0;
+    if (!resolution.resources) {
+      return null;
+    }
+    return {
+      mcpServers: resolution.resources.mcpServers,
+      skillDirectories: resolution.resources.skillDirectories,
+    };
   }
 
   /**
@@ -806,6 +930,7 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
     this.live = null;
     this.client = null;
     this.clientIdentity = null;
+    this.clientResourceDigest = null;
     this.ephemeralSessionIds.clear();
     this.pendingEphemeralDeletions.clear();
 

@@ -1,3 +1,7 @@
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
 import { AuxiliarySessionController } from '@/core/auxiliary/AuxiliarySessionController';
 import type {
   ProviderApprovalInteractionRequest,
@@ -21,6 +25,7 @@ import type {
   CopilotSdkUserInputRequest,
 } from '@/providers/copilot/sdk/CopilotSdkPort';
 import { updateCopilotProviderSettings } from '@/providers/copilot/settings';
+import { getHostnameKey } from '@/utils/env';
 
 import {
   createDeferred,
@@ -2282,5 +2287,323 @@ describe('CopilotExecutionSession bounded ephemeral deletion', () => {
       expect(client.stopped).toBe(1);
       expect(session.getStatus()).toBe('disposed');
     });
+  });
+});
+
+/**
+ * Selected MCP servers and skills belong to the chat this vault runs on this computer,
+ * and to nothing else.
+ *
+ * A title, an inline edit, and an instruction refinement all run as ephemeral sessions,
+ * and every restricted tool policy exists to keep a turn inside a narrow set of builtins.
+ * Neither is a place a user asked a server to start in, so resources reach only a
+ * persistent session under a policy that already allows the CLI's own tools.
+ */
+describe('Copilot session resources', () => {
+  let resourceRoot = '';
+
+  beforeEach(async () => {
+    resourceRoot = await mkdtemp(path.join(os.tmpdir(), 'copilot-session-resources-'));
+  });
+
+  afterEach(async () => {
+    await rm(resourceRoot, { force: true, recursive: true });
+  });
+
+  async function writeSelection(host: ProviderHost, overrides: {
+    selectedMcpServers?: Array<{ configPath: string; name: string }>;
+    selectedSkillPaths?: string[];
+  }): Promise<void> {
+    updateCopilotProviderSettings(host.settings as unknown as Record<string, unknown>, {
+      resourcesByHost: {
+        [getHostnameKey()]: {
+          additionalMcpConfigPaths: [],
+          additionalSkillRoots: [],
+          selectedMcpServers: overrides.selectedMcpServers ?? [],
+          selectedSkillPaths: overrides.selectedSkillPaths ?? [],
+        },
+      },
+    });
+  }
+
+  async function writeMcpConfig(name: string, command: string): Promise<string> {
+    const configPath = path.join(resourceRoot, `${name}.json`);
+    await writeFile(
+      configPath,
+      JSON.stringify({ mcpServers: { [name]: { command } } }),
+      'utf8',
+    );
+    return configPath;
+  }
+
+  async function writeSkill(name: string): Promise<string> {
+    const skillPath = path.join(resourceRoot, name, 'SKILL.md');
+    await mkdir(path.dirname(skillPath), { recursive: true });
+    await writeFile(skillPath, `---\nname: ${name}\n---\nbody\n`, 'utf8');
+    return skillPath;
+  }
+
+  it('gives a persistent chat turn the servers and skills it selected', async () => {
+    const configPath = await writeMcpConfig('notes', '/usr/bin/notes-mcp');
+    const skillPath = await writeSkill('review');
+    const host = createHost();
+    await writeSelection(host, {
+      selectedMcpServers: [{ configPath, name: 'notes' }],
+      selectedSkillPaths: [skillPath],
+    });
+    const runtime = createRuntime();
+    const session = new CopilotExecutionBackend(host, { runtime }).createSession(
+      createSessionConfig(),
+    );
+
+    await collect(session.execute(createRequest()).events);
+
+    expect(runtime.lastClient?.lastSession?.config.resources).toEqual({
+      mcpServers: { notes: { command: '/usr/bin/notes-mcp', type: 'stdio' } },
+      skillDirectories: [path.dirname(skillPath)],
+    });
+    await session.dispose();
+  });
+
+  it.each([
+    ['an ephemeral session', { lifecycle: 'ephemeral' as const }, {}],
+    ['a read-only turn', {}, { toolPolicy: { kind: 'read-only' as const } }],
+    ['a passive turn', {}, { toolPolicy: { kind: 'passive' as const } }],
+    [
+      'an allow-list turn',
+      {},
+      { toolPolicy: { kind: 'allow-list' as const, names: ['view'] } },
+    ],
+  ])('leaves %s resource-free', async (_name, sessionOverrides, requestOverrides) => {
+    const configPath = await writeMcpConfig('notes', '/usr/bin/notes-mcp');
+    const host = createHost();
+    await writeSelection(host, { selectedMcpServers: [{ configPath, name: 'notes' }] });
+    const runtime = createRuntime();
+    const session = new CopilotExecutionBackend(host, { runtime }).createSession(
+      createSessionConfig(sessionOverrides),
+    );
+
+    await collect(session.execute(createRequest(requestOverrides)).events);
+
+    expect(runtime.lastClient?.lastSession?.config.resources).toBeUndefined();
+    await session.dispose();
+  });
+
+  it('reports a selection that no longer resolves instead of running without it', async () => {
+    const host = createHost();
+    await writeSelection(host, {
+      selectedMcpServers: [{ configPath: path.join(resourceRoot, 'gone.json'), name: 'notes' }],
+    });
+    const runtime = createRuntime();
+    const session = new CopilotExecutionBackend(host, { runtime }).createSession(
+      createSessionConfig(),
+    );
+
+    const published = await collect(session.execute(createRequest()).events);
+
+    expect(published).toContainEqual(expect.objectContaining({
+      level: 'warning',
+      message: expect.stringContaining('gone.json'),
+      type: 'notice',
+    }));
+    expect(runtime.lastClient?.lastSession?.config.resources).toBeUndefined();
+    await session.dispose();
+  });
+
+  it('reports what a session could not set up for its selected servers', async () => {
+    const configPath = await writeMcpConfig('notes', '/usr/bin/notes-mcp');
+    const host = createHost();
+    await writeSelection(host, { selectedMcpServers: [{ configPath, name: 'notes' }] });
+    const runtime = createRuntime((created) => {
+      created.resourceDiagnostics = ['The MCP server notes did not answer with its tools.'];
+    });
+    const session = new CopilotExecutionBackend(host, { runtime }).createSession(
+      createSessionConfig(),
+    );
+
+    const published = await collect(session.execute(createRequest()).events);
+
+    expect(published).toContainEqual(expect.objectContaining({
+      level: 'warning',
+      message: 'The MCP server notes did not answer with its tools.',
+      type: 'notice',
+    }));
+    await session.dispose();
+  });
+
+  /**
+   * A skill command is not text the runtime happens to parse: invoking it returns a
+   * prompt the caller submits. The turn therefore shows what the user typed and sends
+   * what the skill produced.
+   */
+  it('submits the prompt a selected skill command produced', async () => {
+    const skillPath = await writeSkill('review');
+    const host = createHost();
+    await writeSelection(host, { selectedSkillPaths: [skillPath] });
+    const runtime = createRuntime((created) => {
+      created.skillCommands = [{ name: 'review' }];
+      created.skillInvocation = (name, input) => ({
+        displayPrompt: `/${name} ${input}`,
+        kind: 'prompt',
+        prompt: `Run the ${name} skill on ${input}.`,
+      });
+    });
+    const session = new CopilotExecutionBackend(host, { runtime }).createSession(
+      createSessionConfig(),
+    );
+
+    const published = await collect(session.execute(createRequest({
+      input: [{ text: '/review todays note', type: 'text' }],
+    })).events);
+
+    expect(runtime.lastClient?.lastSession?.skillInvocations).toEqual([
+      { input: 'todays note', name: 'review' },
+    ]);
+    expect(runtime.lastClient?.lastSession?.prompts).toEqual([
+      'Run the review skill on todays note.',
+    ]);
+    expect(published).toContainEqual(expect.objectContaining({
+      content: '/review todays note',
+      type: 'user_message_started',
+    }));
+    await session.dispose();
+  });
+
+  it('invokes a no-argument skill when the prompt includes linked note context', async () => {
+    const skillPath = await writeSkill('review');
+    const host = createHost();
+    await writeSelection(host, { selectedSkillPaths: [skillPath] });
+    const runtime = createRuntime(created => {
+      created.skillCommands = [{ name: 'review' }];
+      created.skillInvocation = (_name, input) => ({
+        displayPrompt: '/review',
+        kind: 'prompt',
+        prompt: `Expanded review:\n${input}`,
+      });
+    });
+    const session = new CopilotExecutionBackend(host, { runtime }).createSession(
+      createSessionConfig(),
+    );
+    try {
+      await collect(session.execute(createRequest({
+        context: { linkedContent: { content: 'A synthetic linked note.', path: 'note.md' } },
+        input: [{ text: '/review', type: 'text' }],
+      })).events);
+
+      expect(runtime.lastClient?.lastSession?.skillInvocations).toEqual([
+        { input: expect.stringContaining('A synthetic linked note.'), name: 'review' },
+      ]);
+      expect(runtime.lastClient?.lastSession?.prompts).toEqual([
+        expect.stringMatching(/^Expanded review:\n[\s\S]*A synthetic linked note\./),
+      ]);
+    } finally {
+      await session.dispose();
+    }
+  });
+
+  it('sends an unknown slash message as the text it is', async () => {
+    const skillPath = await writeSkill('review');
+    const host = createHost();
+    await writeSelection(host, { selectedSkillPaths: [skillPath] });
+    const runtime = createRuntime((created) => {
+      created.skillCommands = [{ name: 'review' }];
+    });
+    const session = new CopilotExecutionBackend(host, { runtime }).createSession(
+      createSessionConfig(),
+    );
+
+    await collect(session.execute(createRequest({
+      input: [{ text: '/unknown ask something', type: 'text' }],
+    })).events);
+
+    expect(runtime.lastClient?.lastSession?.skillInvocations).toEqual([]);
+    expect(runtime.lastClient?.lastSession?.prompts).toEqual(['/unknown ask something']);
+    await session.dispose();
+  });
+});
+
+/**
+ * Changing what a conversation may reach has to reach the CLI before it starts anything.
+ *
+ * A server the runtime is already running cannot be stopped by resuming on the same
+ * process — the exclusion list only applies to a create or a cold resume — so a selection
+ * that changed while a client is alive ends that client and resumes the same native
+ * session on a fresh one. The conversation keeps its native id; only the process the
+ * servers would have outlived is replaced.
+ */
+describe('Copilot resource changes on a live conversation', () => {
+  let resourceRoot = '';
+
+  beforeEach(async () => {
+    resourceRoot = await mkdtemp(path.join(os.tmpdir(), 'copilot-resource-change-'));
+  });
+
+  afterEach(async () => {
+    await rm(resourceRoot, { force: true, recursive: true });
+  });
+
+  async function writeServer(name: string): Promise<string> {
+    const configPath = path.join(resourceRoot, `${name}.json`);
+    await writeFile(
+      configPath,
+      JSON.stringify({ mcpServers: { [name]: { command: `/usr/bin/${name}` } } }),
+      'utf8',
+    );
+    return configPath;
+  }
+
+  function select(host: ProviderHost, servers: Array<{ configPath: string; name: string }>): void {
+    updateCopilotProviderSettings(host.settings as unknown as Record<string, unknown>, {
+      resourcesByHost: {
+        [getHostnameKey()]: {
+          additionalMcpConfigPaths: [],
+          additionalSkillRoots: [],
+          selectedMcpServers: servers,
+          selectedSkillPaths: [],
+        },
+      },
+    });
+  }
+
+  it('restarts the CLI and cold-resumes the same native session', async () => {
+    const first = await writeServer('first');
+    const replacement = await writeServer('replacement');
+    const host = createHost();
+    select(host, [{ configPath: first, name: 'first' }]);
+    const runtime = createRuntime();
+    const session = new CopilotExecutionBackend(host, { runtime }).createSession(
+      createSessionConfig(),
+    );
+
+    await collect(session.execute(createRequest()).events);
+    const nativeSessionId = runtime.clients[0]?.lastSession?.sessionId;
+    select(host, [{ configPath: replacement, name: 'replacement' }]);
+    await collect(session.execute(createRequest()).events);
+
+    expect(runtime.clients).toHaveLength(2);
+    expect(runtime.clients[0]?.stopped).toBe(1);
+    expect(runtime.clients[1]?.resumedSessionIds).toEqual([nativeSessionId]);
+    expect(runtime.clients[1]?.lastSession?.config.resources).toEqual({
+      mcpServers: { replacement: { command: '/usr/bin/replacement', type: 'stdio' } },
+      skillDirectories: [],
+    });
+    await session.dispose();
+  });
+
+  it('keeps one CLI while the selection holds still', async () => {
+    const first = await writeServer('first');
+    const host = createHost();
+    select(host, [{ configPath: first, name: 'first' }]);
+    const runtime = createRuntime();
+    const session = new CopilotExecutionBackend(host, { runtime }).createSession(
+      createSessionConfig(),
+    );
+
+    await collect(session.execute(createRequest()).events);
+    await collect(session.execute(createRequest()).events);
+
+    expect(runtime.clients).toHaveLength(1);
+    expect(runtime.clients[0]?.createdSessions).toHaveLength(1);
+    await session.dispose();
   });
 });

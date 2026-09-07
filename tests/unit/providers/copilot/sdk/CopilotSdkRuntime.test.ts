@@ -1,3 +1,14 @@
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
 import type { CopilotClientOptions, SessionConfig } from '@github/copilot-sdk';
 
 import type {
@@ -9,10 +20,58 @@ import { copilotSdkRuntime } from '@/providers/copilot/sdk/CopilotSdkRuntime';
 
 /** The SDK session surface the wrapper drives, with only the turn controls under test. */
 class FakeSdkCopilotSession {
+  static readonly instances: FakeSdkCopilotSession[] = [];
   aborted = 0;
   disconnected = 0;
+  readonly disabledSkills: string[] = [];
+  readonly invocations: Array<{ input?: string; name: string }> = [];
+  readonly optionUpdates: Array<Record<string, unknown>> = [];
+  serverListings = 0;
+  readonly toolListings: string[] = [];
 
-  constructor(readonly sessionId: string) {}
+  constructor(readonly sessionId: string) {
+    FakeSdkCopilotSession.instances.push(this);
+  }
+
+  readonly rpc = {
+    commands: {
+      invoke: async (params: { input?: string; name: string }) => {
+        this.invocations.push(params);
+        return FakeSdkCopilotClient.behavior.invokeCommand?.(params)
+          ?? { displayPrompt: `/${params.name}`, kind: 'agent-prompt', prompt: 'expanded' };
+      },
+      list: async () => ({ commands: FakeSdkCopilotClient.behavior.commands ?? [] }),
+    },
+    mcp: {
+      list: async () => {
+        this.serverListings += 1;
+        return FakeSdkCopilotClient.behavior.listServers?.(this.serverListings)
+          ?? { servers: [] };
+      },
+      listTools: async (params: { serverName: string }) => {
+        this.toolListings.push(params.serverName);
+        return FakeSdkCopilotClient.behavior.listTools?.(params.serverName)
+          ?? { tools: [] };
+      },
+    },
+    options: {
+      update: async (params: Record<string, unknown>) => {
+        this.optionUpdates.push(params);
+        await FakeSdkCopilotClient.behavior.updateOptions?.();
+      },
+    },
+    skills: {
+      disable: async (params: { name: string }) => {
+        this.disabledSkills.push(params.name);
+        await FakeSdkCopilotClient.behavior.disableSkill?.();
+      },
+      ensureLoaded: async () => { await FakeSdkCopilotClient.behavior.ensureSkills?.(); },
+      list: async () => {
+        await FakeSdkCopilotClient.behavior.listSkills?.();
+        return { skills: FakeSdkCopilotClient.behavior.skills ?? [] };
+      },
+    },
+  };
 
   async abort(): Promise<void> {
     this.aborted += 1;
@@ -34,22 +93,51 @@ class FakeSdkCopilotClient {
   static readonly instances: FakeSdkCopilotClient[] = [];
   static behavior: {
     abort?: () => Promise<void>;
+    commands?: Array<{ description?: string; kind: string; name: string }>;
     createSession?: () => Promise<FakeSdkCopilotSession>;
     disconnect?: () => Promise<void>;
+    disableSkill?: () => Promise<void>;
+    discoverMcp?: () => Promise<{ servers: Array<{ name: string }> }>;
+    ensureSkills?: () => Promise<void>;
+    invokeCommand?: (params: { input?: string; name: string }) => Promise<unknown>;
+    listServers?: (attempt: number) => Promise<{
+      host?: { failedServers?: Record<string, { message: string }> };
+      servers: Array<{ error?: string; name: string; status: string }>;
+    }>;
+    listTools?: (serverName: string) => Promise<{ tools: Array<{ name: string }> }>;
+    listSkills?: () => Promise<void>;
     resumeSession?: () => Promise<FakeSdkCopilotSession>;
+    skills?: Array<{
+      commandName?: string;
+      name: string;
+      path?: string;
+      userInvocable?: boolean;
+    }>;
     start?: () => Promise<void>;
     stop?: () => Promise<Error[]>;
     forceStop?: () => Promise<void>;
+    updateOptions?: () => Promise<void>;
   } = {};
 
   forceStopped = 0;
   started = 0;
   stopped = 0;
+  readonly discoveryRequests: Array<{ workingDirectory?: string }> = [];
   readonly sessionConfigs: SessionConfig[] = [];
+  readonly deletedSessions: string[] = [];
 
   constructor(readonly options: CopilotClientOptions) {
     FakeSdkCopilotClient.instances.push(this);
   }
+
+  readonly rpc = {
+    mcp: {
+      discover: async (params: { workingDirectory?: string }) => {
+        this.discoveryRequests.push(params);
+        return (await FakeSdkCopilotClient.behavior.discoverMcp?.()) ?? { servers: [] };
+      },
+    },
+  };
 
   async start(): Promise<void> {
     this.started += 1;
@@ -73,6 +161,10 @@ class FakeSdkCopilotClient {
     this.sessionConfigs.push(config);
     return (await FakeSdkCopilotClient.behavior.resumeSession?.())
       ?? new FakeSdkCopilotSession(sessionId);
+  }
+
+  async deleteSession(sessionId: string): Promise<void> {
+    this.deletedSessions.push(sessionId);
   }
 
   async stop(): Promise<Error[]> {
@@ -137,6 +229,7 @@ function sessionConfig(
 
 beforeEach(() => {
   FakeSdkCopilotClient.instances.length = 0;
+  FakeSdkCopilotSession.instances.length = 0;
   FakeSdkCopilotClient.behavior = {};
 });
 
@@ -946,5 +1039,455 @@ describe('copilotSdkRuntime turn aborts', () => {
     const session = await createSession();
 
     await expect(session.abort()).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * MCP servers and skills reach a session only because a caller named them.
+ *
+ * The CLI reads its own home's MCP configuration whether or not a session states a map,
+ * and starts what it finds there, so the exclusion list is what actually keeps an
+ * unselected server from being launched and authenticated. Skills are the same shape:
+ * pointing the runtime at a package directory loads that package, and everything else the
+ * runtime would load is disabled before a turn can reach it.
+ */
+describe('copilotSdkRuntime session resources', () => {
+  const notesServer = { command: '/usr/bin/notes-mcp' } as const;
+
+  function resourceConfig(
+    overrides: Partial<CopilotSdkSessionConfig['resources'] & object> = {},
+  ): CopilotSdkSessionConfig {
+    return sessionConfig({
+      availableTools: ['builtin:read'],
+      resources: {
+        mcpServers: { notes: notesServer },
+        skillDirectories: ['/skills/review'],
+        ...overrides,
+      },
+    });
+  }
+
+  it.each(['ensureSkills', 'listSkills', 'disableSkill', 'updateOptions', 'listTools'] as const)(
+    'bounds a silent %s during resource preparation and stops the CLI',
+    async (step) => {
+      await withFakeTimers(async () => {
+        FakeSdkCopilotClient.behavior.skills = [{ name: 'builtin-unselected' }];
+        FakeSdkCopilotClient.behavior.listTools = async () => ({ tools: [{ name: 'read' }] });
+        FakeSdkCopilotClient.behavior[step] = () => neverAnswers<never>();
+        const client = await createClient();
+        let outcome: CopilotSdkSession | unknown;
+        const opening = client.createSession(resourceConfig()).then(
+          session => { outcome = session; },
+          error => { outcome = error; },
+        );
+        await jest.advanceTimersByTimeAsync(40_000);
+
+        expect(outcome).toBeInstanceOf(Error);
+        expect(FakeSdkCopilotClient.instances[0]?.forceStopped).toBe(1);
+        await opening;
+      });
+    },
+  );
+
+  it('does not silently continue when MCP connection-state discovery fails', async () => {
+    FakeSdkCopilotClient.behavior.listServers = async () => {
+      throw new Error('MCP state unavailable');
+    };
+    const client = await createClient();
+
+    await expect(client.createSession(resourceConfig())).rejects.toThrow('MCP state unavailable');
+    expect(FakeSdkCopilotSession.instances[0]?.toolListings).toEqual([]);
+  });
+
+  it.each([false, true])('only deletes unpublished sessions after setup failure (resume=%s)',
+    async (resuming) => {
+      FakeSdkCopilotClient.behavior.ensureSkills = async () => {
+        throw new Error('Skill metadata unavailable');
+      };
+      const client = await createClient();
+      const opening = resuming
+        ? client.resumeSession('existing-history', resourceConfig())
+        : client.createSession(resourceConfig());
+
+      await expect(opening).rejects.toThrow('Skill metadata unavailable');
+      expect(FakeSdkCopilotClient.instances[0]?.deletedSessions)
+        .toEqual(resuming ? [] : ['copilot-session-1']);
+      expect(FakeSdkCopilotSession.instances[0]?.disconnected).toBe(1);
+    });
+
+  it('does not continue resource setup when a timed-out skill load eventually resolves', async () => {
+    await withFakeTimers(async () => {
+      let deliver!: () => void;
+      FakeSdkCopilotClient.behavior.ensureSkills = () => new Promise<void>(resolve => {
+        deliver = resolve;
+      });
+      FakeSdkCopilotClient.behavior.skills = [{ name: 'unselected' }];
+      const client = await createClient();
+      const opening = client.createSession(resourceConfig()).then(
+        () => undefined, (error: unknown) => error,
+      );
+      await jest.advanceTimersByTimeAsync(40_000);
+      expect(await opening).toBeInstanceOf(Error);
+      deliver();
+      await jest.advanceTimersByTimeAsync(1);
+
+      expect(FakeSdkCopilotSession.instances[0]?.disabledSkills).toEqual([]);
+      expect(FakeSdkCopilotSession.instances[0]?.optionUpdates).toEqual([]);
+    });
+  });
+
+  it('disables every ambient server a resource-free session did not ask for', async () => {
+    FakeSdkCopilotClient.behavior.discoverMcp = async () => ({
+      servers: [{ name: 'home-server' }, { name: 'plugin-server' }],
+    });
+    const client = await createClient();
+    await client.createSession(sessionConfig());
+    const config = FakeSdkCopilotClient.instances[0]?.sessionConfigs[0];
+
+    expect(FakeSdkCopilotClient.instances[0]?.discoveryRequests).toEqual([
+      { workingDirectory: '/vault' },
+    ]);
+    expect(config).toMatchObject({
+      disabledMcpServers: ['home-server', 'plugin-server'],
+      enableSkills: false,
+      mcpServers: {},
+    });
+  });
+
+  it('keeps a selected server out of the exclusion list on create and resume', async () => {
+    FakeSdkCopilotClient.behavior.discoverMcp = async () => ({
+      servers: [{ name: 'notes' }, { name: 'home-server' }],
+    });
+    const client = await createClient();
+    await client.createSession(resourceConfig());
+    await client.resumeSession('copilot-session-1', resourceConfig());
+
+    for (const config of FakeSdkCopilotClient.instances[0]?.sessionConfigs ?? []) {
+      expect(config).toMatchObject({
+        disabledMcpServers: ['home-server'],
+        enableSkills: true,
+        mcpServers: { notes: notesServer },
+        skillDirectories: ['/skills/review'],
+      });
+    }
+  });
+
+  /**
+   * Without the enumeration there is no exclusion list, and the session would start
+   * whatever the CLI's home holds. That is the one thing this layer promises it does not
+   * do, so no session is opened at all.
+   */
+  it('opens no session when the ambient servers cannot be enumerated', async () => {
+    FakeSdkCopilotClient.behavior.discoverMcp = async () => {
+      throw new Error('mcp discovery is unavailable');
+    };
+    const client = await createClient();
+
+    await expect(client.createSession(sessionConfig())).rejects.toThrow(/mcp discovery/);
+    expect(FakeSdkCopilotClient.instances[0]?.sessionConfigs).toEqual([]);
+  });
+
+  it('disables every skill the caller did not select, including builtins', async () => {
+    FakeSdkCopilotClient.behavior.skills = [
+      {
+        commandName: 'review',
+        name: 'review',
+        path: '/skills/review/SKILL.md',
+        userInvocable: true,
+      },
+      { name: 'sibling', path: '/skills/sibling/SKILL.md', userInvocable: true },
+      { name: 'github-pr-media', userInvocable: false },
+    ];
+    const client = await createClient();
+    await client.createSession(resourceConfig());
+
+    expect(FakeSdkCopilotSession.instances[0]?.disabledSkills)
+      .toEqual(['sibling', 'github-pr-media']);
+  });
+
+  it('allows only the tools a selected server actually offers', async () => {
+    FakeSdkCopilotClient.behavior.listTools = async () => ({
+      tools: [{ name: 'search' }, { name: 'delete' }],
+    });
+    const client = await createClient();
+    const session = await client.createSession(sessionConfig({
+      availableTools: ['builtin:read'],
+      resources: {
+        mcpServers: { notes: { ...notesServer, tools: ['search'] } },
+        skillDirectories: [],
+      },
+    }));
+
+    expect(session.resourceDiagnostics).toEqual([]);
+    expect(FakeSdkCopilotSession.instances[0]?.optionUpdates).toEqual([
+      { availableTools: ['builtin:read', 'mcp:notes-search'] },
+    ]);
+  });
+
+  it('reports a selected server that never connected', async () => {
+    FakeSdkCopilotClient.behavior.listTools = async () => {
+      throw new Error('server notes is not connected');
+    };
+    const client = await createClient();
+    const session = await client.createSession(sessionConfig({
+      availableTools: ['builtin:read'],
+      resources: { mcpServers: { notes: notesServer }, skillDirectories: [] },
+    }));
+
+    expect(session.resourceDiagnostics).toEqual([expect.stringContaining('notes')]);
+  });
+
+  it('lists the commands of the selected skills only', async () => {
+    FakeSdkCopilotClient.behavior.skills = [
+      {
+        commandName: 'review',
+        name: 'review',
+        path: '/skills/review/SKILL.md',
+        userInvocable: true,
+      },
+      { name: 'sibling', path: '/skills/sibling/SKILL.md', userInvocable: true },
+    ];
+    FakeSdkCopilotClient.behavior.commands = [
+      { description: 'Review a note', kind: 'skill', name: 'review' },
+      { kind: 'skill', name: 'sibling' },
+      { kind: 'builtin', name: 'clear' },
+    ];
+    const client = await createClient();
+    const session = await client.createSession(resourceConfig());
+
+    expect(await session.listSkillCommands()).toEqual([
+      { description: 'Review a note', name: 'review' },
+    ]);
+  });
+
+  it('returns the prompt a skill command produced instead of sending it', async () => {
+    FakeSdkCopilotClient.behavior.invokeCommand = async () => ({
+      displayPrompt: '/review this note',
+      kind: 'agent-prompt',
+      notice: 'Review skill loaded',
+      prompt: 'Follow the review skill for this note.',
+    });
+    const client = await createClient();
+    const session = await client.createSession(resourceConfig());
+
+    expect(await session.invokeSkillCommand('review', 'this note')).toEqual({
+      displayPrompt: '/review this note',
+      kind: 'prompt',
+      notice: 'Review skill loaded',
+      prompt: 'Follow the review skill for this note.',
+    });
+  });
+});
+
+/**
+ * A selected MCP server is a process the runtime is still starting when the session opens.
+ *
+ * Its tools can only be asked for once it has connected, so the connection state decides
+ * what happens: a server still coming up is waited for on the startup budget, because
+ * connecting one is cold work like starting the CLI, and a server the runtime has already
+ * given up on is reported rather than waited out.
+ */
+describe('copilotSdkRuntime selected server connections', () => {
+  function connectingConfig(): CopilotSdkSessionConfig {
+    return sessionConfig({
+      availableTools: ['builtin:read'],
+      resources: {
+        mcpServers: { notes: { command: '/usr/bin/notes-mcp' } },
+        skillDirectories: [],
+      },
+    });
+  }
+
+  it('waits for a server that is still connecting, then allows its tools', async () => {
+    await withFakeTimers(async () => {
+      FakeSdkCopilotClient.behavior.listServers = async attempt => ({
+        servers: [{ name: 'notes', status: attempt < 3 ? 'pending' : 'connected' }],
+      });
+      FakeSdkCopilotClient.behavior.listTools = async () => ({ tools: [{ name: 'search' }] });
+      const client = await createClient();
+
+      const opening = client.createSession(connectingConfig());
+      await jest.advanceTimersByTimeAsync(2_000);
+      const session = await opening;
+
+      expect(session.resourceDiagnostics).toEqual([]);
+      expect(FakeSdkCopilotSession.instances[0]?.optionUpdates).toEqual([
+        { availableTools: ['builtin:read', 'mcp:notes-search'] },
+      ]);
+    });
+  });
+
+  it('reports a server the runtime could not connect, and asks it for nothing', async () => {
+    FakeSdkCopilotClient.behavior.listServers = async () => ({
+      servers: [{ error: 'spawn ENOENT', name: 'notes', status: 'failed' }],
+    });
+    const client = await createClient();
+
+    const session = await client.createSession(connectingConfig());
+
+    expect(session.resourceDiagnostics).toEqual([
+      expect.stringContaining('spawn ENOENT'),
+    ]);
+    expect(FakeSdkCopilotSession.instances[0]?.toolListings).toEqual([]);
+    expect(FakeSdkCopilotSession.instances[0]?.optionUpdates).toEqual([]);
+  });
+
+  it('reports a server that is waiting for authentication', async () => {
+    FakeSdkCopilotClient.behavior.listServers = async () => ({
+      servers: [{ name: 'notes', status: 'needs-auth' }],
+    });
+    const client = await createClient();
+
+    const session = await client.createSession(connectingConfig());
+
+    expect(session.resourceDiagnostics).toEqual([expect.stringContaining('needs-auth')]);
+    expect(FakeSdkCopilotSession.instances[0]?.toolListings).toEqual([]);
+  });
+
+  it('stops waiting for a server that never finishes connecting', async () => {
+    await withFakeTimers(async () => {
+      FakeSdkCopilotClient.behavior.listServers = async () => ({
+        servers: [{ name: 'notes', status: 'pending' }],
+      });
+      const client = await createClient();
+
+      const opening = client.createSession(connectingConfig()).then(
+        () => new Error('The pending server unexpectedly became ready.'),
+        (error: unknown) => error,
+      );
+      await jest.advanceTimersByTimeAsync(31_000);
+      const failure = await opening;
+
+      expect(failure).toMatchObject({ category: 'transport' });
+      expect(FakeSdkCopilotSession.instances[0]?.toolListings).toEqual([]);
+      expect(FakeSdkCopilotClient.instances[0]?.forceStopped).toBe(1);
+    });
+  });
+});
+
+/**
+ * Connection state is what decides whether to wait, not whether the session may ask. A
+ * runtime that has not reported a server leaves the tool listing as the authority, which answers
+ * for a connected server and fails loudly for one that is not.
+ */
+describe('copilotSdkRuntime unreported server state', () => {
+  it('still asks a selected server for its tools', async () => {
+    FakeSdkCopilotClient.behavior.listServers = async () => ({ servers: [] });
+    FakeSdkCopilotClient.behavior.listTools = async () => ({ tools: [{ name: 'search' }] });
+    const client = await createClient();
+
+    const session = await client.createSession(sessionConfig({
+      availableTools: ['builtin:read'],
+      resources: {
+        mcpServers: { notes: { command: '/usr/bin/notes-mcp' } },
+        skillDirectories: [],
+      },
+    }));
+
+    expect(session.resourceDiagnostics).toEqual([]);
+    expect(FakeSdkCopilotSession.instances[0]?.optionUpdates).toEqual([
+      { availableTools: ['builtin:read', 'mcp:notes-search'] },
+    ]);
+  });
+});
+
+/**
+ * Selecting a server says which servers a session may reach, never that a session has
+ * tools. `availableTools: []` is the port's deny-all, and a resources map does not widen
+ * it: the metadata probe and any other tool-free caller connect their selected servers
+ * and are granted none of their tools.
+ */
+describe('copilotSdkRuntime deny-all sessions with resources', () => {
+  it('grants no MCP tool to a session that allows no tool', async () => {
+    FakeSdkCopilotClient.behavior.listTools = async () => ({ tools: [{ name: 'search' }] });
+    const client = await createClient();
+
+    const session = await client.createSession(sessionConfig({
+      availableTools: [],
+      resources: {
+        mcpServers: { notes: { command: '/usr/bin/notes-mcp' } },
+        skillDirectories: [],
+      },
+    }));
+
+    expect(FakeSdkCopilotClient.instances[0]?.sessionConfigs[0]).toMatchObject({
+      availableTools: [],
+      mcpServers: { notes: { command: '/usr/bin/notes-mcp' } },
+    });
+    expect(FakeSdkCopilotSession.instances[0]?.optionUpdates).toEqual([]);
+    expect(FakeSdkCopilotSession.instances[0]?.toolListings).toEqual([]);
+    expect(session.resourceDiagnostics).toEqual([]);
+  });
+
+  it('still reports a selected server that cannot be reached', async () => {
+    FakeSdkCopilotClient.behavior.listServers = async () => ({
+      servers: [{ error: 'spawn ENOENT', name: 'notes', status: 'failed' }],
+    });
+    const client = await createClient();
+
+    const session = await client.createSession(sessionConfig({
+      availableTools: [],
+      resources: {
+        mcpServers: { notes: { command: '/usr/bin/notes-mcp' } },
+        skillDirectories: [],
+      },
+    }));
+
+    expect(session.resourceDiagnostics).toEqual([expect.stringContaining('spawn ENOENT')]);
+  });
+});
+
+/**
+ * A selected skill directory and the path the runtime reports for it can be two spellings
+ * of one place: macOS reaches every temporary directory through `/var`, a link to
+ * `/private/var`, and a vault on an external disk or a synced folder is commonly a link
+ * itself. Comparing spellings alone would disable the very skill that was selected.
+ */
+describe('copilotSdkRuntime skills reached through a link', () => {
+  let root = '';
+
+  beforeEach(() => {
+    root = mkdtempSync(path.join(os.tmpdir(), 'copilot-skill-link-'));
+    mkdirSync(path.join(root, 'real', 'review'), { recursive: true });
+    mkdirSync(path.join(root, 'real', 'sibling'), { recursive: true });
+    writeFileSync(path.join(root, 'real', 'review', 'SKILL.md'), '---\nname: review\n---\n');
+    writeFileSync(path.join(root, 'real', 'sibling', 'SKILL.md'), '---\nname: sibling\n---\n');
+    symlinkSync(path.join(root, 'real'), path.join(root, 'link'), 'dir');
+  });
+
+  afterEach(() => {
+    rmSync(root, { force: true, recursive: true });
+  });
+
+  it('keeps the selected skill when the runtime reports its resolved path', async () => {
+    const resolvedRoot = realpathSync(path.join(root, 'real'));
+    FakeSdkCopilotClient.behavior.skills = [
+      {
+        commandName: 'review',
+        name: 'review',
+        path: path.join(resolvedRoot, 'review', 'SKILL.md'),
+        userInvocable: true,
+      },
+      {
+        name: 'sibling',
+        path: path.join(resolvedRoot, 'sibling', 'SKILL.md'),
+        userInvocable: true,
+      },
+    ];
+    FakeSdkCopilotClient.behavior.commands = [
+      { kind: 'skill', name: 'review' },
+      { kind: 'skill', name: 'sibling' },
+    ];
+    const client = await createClient();
+
+    const session = await client.createSession(sessionConfig({
+      resources: {
+        mcpServers: {},
+        skillDirectories: [path.join(root, 'link', 'review')],
+      },
+    }));
+
+    expect(FakeSdkCopilotSession.instances[0]?.disabledSkills).toEqual(['sibling']);
+    expect(await session.listSkillCommands()).toEqual([{ name: 'review' }]);
   });
 });

@@ -39,6 +39,7 @@ describe('getCopilotProviderSettings', () => {
       environmentVariables: ['SECRET=leaked'],
       modelAliases: ['nope'],
       preferredReasoningByModel: 42,
+      resourcesByHost: 'not-a-map',
       visibleModels: { nope: true },
     });
 
@@ -49,6 +50,42 @@ describe('getCopilotProviderSettings', () => {
     expect(getCopilotProviderSettings(settingsWithConfig({ enabled: 1 })).enabled).toBe(false);
     expect(getCopilotProviderSettings(settingsWithConfig({ enabled: 'yes' })).enabled).toBe(false);
     expect(getCopilotProviderSettings(settingsWithConfig({ enabled: true })).enabled).toBe(true);
+  });
+
+  it('keeps computer-scoped resource references without copying server configuration', () => {
+    const settings = settingsWithConfig({
+      resourcesByHost: {
+        laptop: {
+          additionalMcpConfigPaths: [' /config/tools.json ', '/config/tools.json'],
+          additionalSkillRoots: ['/skills'],
+          selectedMcpServers: [{
+            configPath: '/config/tools.json',
+            name: 'notes',
+            command: 'not-a-persisted-field',
+            env: { TOKEN: 'not-a-persisted-field' },
+          }],
+          selectedSkillPaths: ['/skills/summary/SKILL.md'],
+        },
+        desktop: {
+          selectedMcpServers: [{ configPath: 'C:\\Tools\\mcp.json', name: 'search' }],
+        },
+      },
+    });
+
+    expect(getCopilotProviderSettings(settings)).toHaveProperty('resourcesByHost', {
+      laptop: {
+        additionalMcpConfigPaths: ['/config/tools.json'],
+        additionalSkillRoots: ['/skills'],
+        selectedMcpServers: [{ configPath: '/config/tools.json', name: 'notes' }],
+        selectedSkillPaths: ['/skills/summary/SKILL.md'],
+      },
+      desktop: {
+        additionalMcpConfigPaths: [],
+        additionalSkillRoots: [],
+        selectedMcpServers: [{ configPath: 'C:\\Tools\\mcp.json', name: 'search' }],
+        selectedSkillPaths: [],
+      },
+    });
   });
 
   it('drops enabled models and aliases that no longer exist in the catalog', () => {
@@ -122,6 +159,42 @@ describe('updateCopilotProviderSettings against configuration it does not own', 
     expect(getProviderConfig(settings, 'copilot')).toMatchObject({
       enabled: true,
       permissionMode: 'ask',
+    });
+  });
+
+  it('preserves other computers resource selections when settings change', () => {
+    const settings = settingsWithConfig({
+      futureOption: { keep: true },
+      resourcesByHost: {
+        desktop: {
+          selectedMcpServers: [{ configPath: 'C:\\Tools\\mcp.json', name: 'search' }],
+        },
+      },
+    });
+    updateCopilotProviderSettings(settings, {
+      resourcesByHost: {
+        ...getCopilotProviderSettings(settings).resourcesByHost,
+        laptop: {
+          additionalMcpConfigPaths: [],
+          additionalSkillRoots: [],
+          selectedMcpServers: [],
+          selectedSkillPaths: ['/skills/summary/SKILL.md'],
+        },
+      },
+    });
+    updateCopilotProviderSettings(settings, { enabled: true });
+
+    expect(getProviderConfig(settings, 'copilot')).toMatchObject({
+      enabled: true,
+      futureOption: { keep: true },
+      resourcesByHost: {
+        desktop: {
+          selectedMcpServers: [{ configPath: 'C:\\Tools\\mcp.json', name: 'search' }],
+        },
+        laptop: {
+          selectedSkillPaths: ['/skills/summary/SKILL.md'],
+        },
+      },
     });
   });
 

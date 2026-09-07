@@ -28,6 +28,7 @@ import {
   normalizeCopilotVisibleModels,
   updateCopilotProviderSettings,
 } from '../settings';
+import { renderCopilotResourceSettings } from './CopilotResourceSettingsSection';
 
 const COPILOT_PROVIDER_ID = 'copilot' as const;
 
@@ -140,6 +141,8 @@ export const copilotSettingsTabRenderer: ProviderSettingsTabRenderer = {
       settingsBag,
       refreshModelCatalog,
     );
+
+    renderCopilotResourceSettings(container, context);
 
     renderEnvironmentSettingsSection({
       container,

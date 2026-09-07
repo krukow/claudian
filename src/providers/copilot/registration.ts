@@ -49,7 +49,7 @@ export const copilotProviderRegistration: ProviderModule = {
   setEnabled: (settings, enabled) => updateCopilotProviderSettings(settings, { enabled }),
   settingsReconciler: copilotSettingsReconciler,
   settingsStorage: {
-    hostScopedFields: ['cliPathsByHost'],
+    hostScopedFields: ['cliPathsByHost', 'resourcesByHost'],
     normalizeStored(target, stored) {
       const storedConfig = getProviderConfig(stored, 'copilot');
       updateCopilotProviderSettings(target, getCopilotProviderSettings(stored));

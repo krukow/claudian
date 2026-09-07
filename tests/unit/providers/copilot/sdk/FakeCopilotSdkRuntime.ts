@@ -9,6 +9,8 @@ import type {
   CopilotSdkSession,
   CopilotSdkSessionConfig,
   CopilotSdkSessionDeletion,
+  CopilotSdkSkillCommand,
+  CopilotSdkSkillInvocation,
   CopilotSdkUserInputRequest,
   CopilotSdkUserInputResponse,
 } from '@/providers/copilot/sdk/CopilotSdkPort';
@@ -22,6 +24,14 @@ export class FakeCopilotSdkSession implements CopilotSdkSession {
   disconnected = 0;
   readonly prompts: string[] = [];
   readonly modelChanges: Array<{ model: string; reasoningEffort?: string }> = [];
+  readonly skillInvocations: Array<{ input: string; name: string }> = [];
+  resourceDiagnostics: readonly string[] = [];
+  skillCommands: readonly CopilotSdkSkillCommand[] = [];
+  skillInvocation: (name: string, input: string) => CopilotSdkSkillInvocation = name => ({
+    displayPrompt: `/${name}`,
+    kind: 'prompt',
+    prompt: `expanded ${name}`,
+  });
   sendBehavior: (prompt: string) => Promise<void> = async () => {};
   abortBehavior: () => Promise<void> = async () => {};
   disconnectBehavior: () => Promise<void> = async () => {};
@@ -31,6 +41,15 @@ export class FakeCopilotSdkSession implements CopilotSdkSession {
     readonly sessionId: string,
     readonly config: CopilotSdkSessionConfig,
   ) {}
+
+  async listSkillCommands(): Promise<readonly CopilotSdkSkillCommand[]> {
+    return this.skillCommands;
+  }
+
+  async invokeSkillCommand(name: string, input: string): Promise<CopilotSdkSkillInvocation> {
+    this.skillInvocations.push({ input, name });
+    return this.skillInvocation(name, input);
+  }
 
   emit(event: CopilotSdkEvent): void {
     this.config.onEvent(event);

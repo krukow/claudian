@@ -1,5 +1,6 @@
 import type { CopilotReasoningEffort } from '../models';
 import type {
+  MCPServerConfig,
   ModelInfo,
   PermissionRequest,
   PermissionRequestResult,
@@ -18,6 +19,7 @@ type UserInputHandler = NonNullable<SessionConfig['onUserInputRequest']>;
  */
 
 export type CopilotSdkEvent = SessionEvent;
+export type CopilotSdkMcpServerConfig = MCPServerConfig;
 export type CopilotSdkModel = ModelInfo;
 export type CopilotSdkPermissionRequest = PermissionRequest;
 export type CopilotSdkPermissionResult = PermissionRequestResult;
@@ -53,16 +55,20 @@ export interface CopilotSdkClientOptions {
  * What a caller decides about a session.
  *
  * Everything a session could use to read the user's global Copilot configuration or act
- * outside the vault is deliberately absent: skills, plugin and instruction directories,
- * MCP servers, file hooks, host git operations, the cross-session store, memory, remote
- * export, telemetry, persistent embedding and OAuth storage, and runtime configuration
- * discovery are stated by `CopilotSdkRuntime` on every create and resume, and cannot be
- * reached — or weakened — from here.
+ * outside the vault is deliberately absent: plugin and instruction directories, file
+ * hooks, host git operations, the cross-session store, memory, remote export, telemetry,
+ * persistent embedding and OAuth storage, and runtime configuration discovery are stated
+ * by `CopilotSdkRuntime` on every create and resume, and cannot be reached — or weakened —
+ * from here. MCP servers and skills reach a session only through {@link resources}, which
+ * names each one; a session without it starts none, including the ones the CLI's own home
+ * would otherwise supply.
  */
 export interface CopilotSdkSessionConfig {
   readonly additionalDirectories?: readonly string[];
   /**
-   * Tool allow-list. An empty array denies every tool.
+   * Tool allow-list. An empty array denies every tool, including the tools of a server
+   * named in {@link resources}: a selection says which servers a session may reach, never
+   * that it has tools. This list alone is the grant.
    *
    * Required rather than optional: omitting it reads as "keep the CLI's own defaults",
    * which is the ambient coding-agent behaviour every other field here exists to keep out,
@@ -83,8 +89,30 @@ export interface CopilotSdkSessionConfig {
     request: CopilotSdkUserInputRequest,
   ) => Promise<CopilotSdkUserInputResponse>;
   readonly reasoningEffort?: CopilotReasoningEffort;
+  /** The named MCP servers and skills this session may use. Absent means none of them. */
+  readonly resources?: CopilotSdkSessionResources;
   readonly systemMessage: CopilotSdkSystemMessage;
   readonly workingDirectory: string;
+}
+
+/**
+ * The resources one session runs with, resolved by the caller and never persisted.
+ *
+ * Each server is named and defined here rather than referred to, because the runtime
+ * reads a definition from the caller or from its own configuration, and only the first of
+ * those is something Claudian chose. Skill directories are package directories: the CLI
+ * loads every skill under a directory it is pointed at, so a parent root would enable the
+ * siblings of the skill that was selected.
+ *
+ * This is a narrowing, not a grant. A session whose {@link CopilotSdkSessionConfig.availableTools}
+ * is empty connects the servers named here and is given none of their tools, so a caller
+ * that opened a session only to ask the runtime something does not become one that can
+ * call an MCP server. Only a session that already allows tools has its allow-list widened,
+ * and only with the exact tools its selected servers offer.
+ */
+export interface CopilotSdkSessionResources {
+  readonly mcpServers: Readonly<Record<string, CopilotSdkMcpServerConfig>>;
+  readonly skillDirectories: readonly string[];
 }
 
 /**
@@ -100,8 +128,25 @@ export type CopilotSdkSystemMessage =
 
 export interface CopilotSdkSession {
   readonly sessionId: string;
+  /**
+   * What the session could not fully set up: a selected MCP server that never connected,
+   * or a tool list its server refused. The resources themselves are still absent rather
+   * than substituted, so a caller reports these instead of a turn behaving as though a
+   * server had answered.
+   */
+  readonly resourceDiagnostics: readonly string[];
   /** Sends a prompt and resolves when the turn reaches idle. */
   send(prompt: string): Promise<void>;
+  /**
+   * The user-invocable slash commands the selected skills registered, and nothing else:
+   * no builtin skill, and no command the runtime or a client owns.
+   */
+  listSkillCommands(): Promise<readonly CopilotSdkSkillCommand[]>;
+  /**
+   * Runs one of those commands and returns what the runtime produced for it. A skill
+   * answers with a prompt the caller has to submit; nothing is sent by invoking it.
+   */
+  invokeSkillCommand(name: string, input: string): Promise<CopilotSdkSkillInvocation>;
   /**
    * Stops the running turn. Resolves once the runtime acknowledges the abort, and rejects
    * when it could not: the caller may only reuse the session in the first case.
@@ -111,6 +156,25 @@ export interface CopilotSdkSession {
   /** Releases in-memory resources. Native session data is left untouched. */
   disconnect(): Promise<void>;
 }
+
+export interface CopilotSdkSkillCommand {
+  readonly argumentHint?: string;
+  readonly description?: string;
+  readonly name: string;
+}
+
+/**
+ * What invoking a skill command produced: the prompt the caller submits as the turn, or
+ * text the runtime answered with directly and no turn to run.
+ */
+export type CopilotSdkSkillInvocation =
+  | {
+      readonly kind: 'prompt';
+      readonly prompt: string;
+      readonly displayPrompt: string;
+      readonly notice?: string;
+    }
+  | { readonly kind: 'text'; readonly text: string };
 
 /**
  * Outcome of deleting native session data. A session the runtime already dropped is
@@ -122,7 +186,8 @@ export interface CopilotSdkClient {
   getAuthStatus(): Promise<CopilotSdkAuthStatus>;
   listModels(): Promise<readonly CopilotSdkModel[]>;
   /**
-   * Opens a session, always settling within the shared native release budget.
+   * Opens a session with bounded native acquisition and resource preparation. Individual
+   * acquisitions use the release budget; selected resources share one startup budget.
    *
    * The deadline belongs here rather than to a caller: the CLI a silent request was made
    * of is stopped and killed before this rejects, which only the owner of that client can
@@ -144,8 +209,7 @@ export interface CopilotSdkClient {
    * fully succeed. Rejects with what that stop could not do, so a caller that has to
    * account for the runtime it released learns the CLI was killed rather than shut down.
    *
-   * Always settles within the shared native release budget, as
-   * {@link createSession} and {@link resumeSession} do, and unlike
+   * Always settles within the shared native release budget, unlike
    * {@link CopilotSdkSession}'s abort and disconnect, which their caller bounds. A caller
    * bounds those two because it has to decide what a silent runtime means for a session it
    * might still reuse; a client being stopped is discarded either way, so bounding it here

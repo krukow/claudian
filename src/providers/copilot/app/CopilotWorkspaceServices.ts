@@ -1,25 +1,48 @@
+import type { ProviderCommandCatalog } from '../../../core/providers/commands/ProviderCommandCatalog';
 import type { ProviderHost } from '../../../core/providers/ProviderHost';
 import { ProviderWorkspaceRegistry } from '../../../core/providers/ProviderWorkspaceRegistry';
 import type {
   ProviderModelCatalogRefreshResult,
+  ProviderTabWarmupPolicy,
   ProviderWorkspaceRegistration,
   ProviderWorkspaceServices,
 } from '../../../core/providers/types';
+import { CopilotCommandCatalog } from '../commands/CopilotCommandCatalog';
 import { computeCopilotEnvironmentHash } from '../env/CopilotSettingsReconciler';
 import { sameCopilotDiscoveredModels } from '../models';
+import { getCopilotHostResources } from '../resources/CopilotHostResources';
 import { CopilotCliResolver } from '../runtime/CopilotCliResolver';
 import { CopilotModelDiscoveryService } from '../runtime/CopilotModelDiscoveryService';
 import { getCopilotProviderSettings, updateCopilotProviderSettings } from '../settings';
 import { copilotSettingsTabRenderer } from '../ui/CopilotSettingsTab';
+import { CopilotCommandLoader } from './CopilotCommandLoader';
+import { CopilotCommandMetadataProbe } from './CopilotCommandMetadataProbe';
 
 const COPILOT_PROVIDER_ID = 'copilot' as const;
 
+/**
+ * Listing skill commands costs a CLI start, so a tab only warms one when there is
+ * something to list: the provider is on and this computer selected at least one skill.
+ */
+const copilotTabWarmupPolicy: ProviderTabWarmupPolicy = {
+  resolveMode(context) {
+    const settings = context.plugin.settings as unknown as Record<string, unknown>;
+    return getCopilotProviderSettings(settings).enabled
+      && getCopilotHostResources(settings).selectedSkillPaths.length > 0
+      ? 'commands'
+      : 'none';
+  },
+};
+
 export interface CopilotWorkspaceServices extends ProviderWorkspaceServices {
   cliResolver: CopilotCliResolver;
+  commandCatalog: ProviderCommandCatalog;
+  commandLoader: CopilotCommandLoader;
   refreshModelCatalog(): Promise<ProviderModelCatalogRefreshResult>;
 }
 
 export interface CopilotWorkspaceServicesOptions {
+  readonly commandMetadataProbe?: CopilotCommandMetadataProbe;
   readonly modelDiscoveryService?: Pick<CopilotModelDiscoveryService, 'discoverModels'>;
 }
 
@@ -30,11 +53,17 @@ export function createCopilotWorkspaceServices(
   const cliResolver = new CopilotCliResolver();
   const modelDiscoveryService = options.modelDiscoveryService
     ?? new CopilotModelDiscoveryService(plugin);
+  const commandMetadataProbe = options.commandMetadataProbe
+    ?? new CopilotCommandMetadataProbe(plugin);
   let latestRefresh = 0;
 
   return {
     cliResolver,
+    commandCatalog: new CopilotCommandCatalog(),
+    commandLoader: new CopilotCommandLoader(commandMetadataProbe),
+    dispose: () => commandMetadataProbe.dispose(),
     settingsTabRenderer: copilotSettingsTabRenderer,
+    tabWarmupPolicy: copilotTabWarmupPolicy,
 
     /**
      * Discovery runs against the CLI, environment, and account the settings named when it
