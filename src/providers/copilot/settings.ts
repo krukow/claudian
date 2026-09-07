@@ -11,6 +11,10 @@ import {
   isCopilotReasoningEffort,
   normalizeCopilotDiscoveredModels,
 } from './models';
+import {
+  type CopilotResourcesByHost,
+  normalizeCopilotResourcesByHost,
+} from './resources/CopilotResourceSettings';
 
 export interface CopilotProviderSettings {
   cliPath: string;
@@ -21,6 +25,7 @@ export interface CopilotProviderSettings {
   environmentVariables: string;
   modelAliases: Record<string, string>;
   preferredReasoningByModel: Record<string, CopilotReasoningEffort>;
+  resourcesByHost: CopilotResourcesByHost;
   visibleModels: string[];
 }
 
@@ -34,6 +39,7 @@ export const DEFAULT_COPILOT_PROVIDER_SETTINGS: Readonly<CopilotProviderSettings
     environmentVariables: '',
     modelAliases: {},
     preferredReasoningByModel: {},
+    resourcesByHost: {},
     visibleModels: [],
   });
 
@@ -69,6 +75,7 @@ export function getCopilotProviderSettings(
       config.preferredReasoningByModel,
       discoveredModels,
     ),
+    resourcesByHost: normalizeCopilotResourcesByHost(config.resourcesByHost),
     visibleModels,
   };
 }
@@ -126,6 +133,9 @@ export function updateCopilotProviderSettings(
     preferredReasoningByModel: normalizeCopilotPreferredReasoning(
       updates.preferredReasoningByModel ?? current.preferredReasoningByModel,
       discoveredModels,
+    ),
+    resourcesByHost: normalizeCopilotResourcesByHost(
+      updates.resourcesByHost ?? current.resourcesByHost,
     ),
     visibleModels: normalizeCopilotVisibleModels(
       updates.visibleModels ?? current.visibleModels,

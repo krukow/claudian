@@ -5,9 +5,10 @@ a stdio JSON-RPC subprocess.
 
 The provider is reachable from `src/main.ts` and ships switched off. It streams text,
 reasoning, tools, approvals, and questions for chat and for the ephemeral title, inline
-edit, and instruction-refinement runs. Native history browsing, replay, rewind, fork, plan
-mode, images, subagents, provider commands, skills, plugins, and MCP are absent, and
-`capabilities.ts` says so; do not describe them as pending here.
+edit, and instruction-refinement runs, and runs the MCP servers and skills this computer
+selected in persistent chat. Native history browsing, replay, rewind, fork, plan mode,
+images, subagents, and plugins are absent, and `capabilities.ts` says so; do not describe
+them as pending here.
 
 ## Dependency Boundary
 
@@ -46,6 +47,14 @@ mode, images, subagents, provider commands, skills, plugins, and MCP are absent,
 | `history/CopilotConversationHistoryService` | Which native session a conversation refers to, and what a runtime that lost it changes |
 | `capabilities.ts` | What the provider advertises, and therefore what the UI offers |
 | `registration.ts` | The provider's place in the built-in catalog, its environment key claim, and explicit title-model overrides |
+| `resources/CopilotResourceSettings` | The persisted shape of a selection, and its fail-closed normalization |
+| `resources/CopilotHostResources` | Which computer a selection belongs to, and the by-host write that leaves other computers alone |
+| `resources/CopilotResourceInventory` | What this computer offers, where it is looked for, and which non-secret metadata a selection may be made from |
+| `resources/CopilotResourceResolver` | Turning references into the definitions one session runs with, and refusing what the SDK cannot carry |
+| `commands/CopilotCommandCatalog` | How a selected skill appears in the command dropdown |
+| `app/CopilotCommandMetadataProbe` | The runtime a command listing owns, and the lease it deletes afterwards |
+| `app/CopilotCommandLoader` | The non-secret cache identity of a command listing, and when it is stale |
+| `ui/CopilotResourceSettingsSection` | The resource surface: discovery, filtering, selection, and what a failed discovery leaves alone |
 | `ui/CopilotChatUIConfig` | The models, reasoning options, and context windows the chat surface reads |
 | `ui/CopilotSettingsTab` | The Copilot settings surface, composed from shared settings helpers |
 
@@ -129,11 +138,12 @@ mode, images, subagents, provider commands, skills, plugins, and MCP are absent,
 - Leaving empty mode gives up every default it supplied, so `sdk/CopilotSdkRuntime` states
   each of them on every session it creates or resumes, and never at a call site: session
   telemetry, the shared on-disk embedding cache and embedding retrieval, keychain-backed
-  MCP OAuth storage, MCP servers and MCP apps, remote sessions and remote export, the
-  built-in session store, host git operations, memory, infinite sessions, scheduling,
-  skills, file hooks, plugin directories, custom instructions and their on-demand
-  discovery, runtime configuration discovery, experimental features, the commit co-author
-  trailer, and the runtime's own `environment_context` description of the host. Several of
+  MCP OAuth storage, MCP apps, remote sessions and remote export, the built-in session
+  store, host git operations, memory, infinite sessions, scheduling, file hooks, plugin
+  directories, custom instructions and their on-demand discovery, runtime configuration
+  discovery, experimental features, the commit co-author trailer, and the runtime's own
+  `environment_context` description of the host. MCP servers and skills are stated there
+  too, from the caller's resources alone. Several of
   those default the other way outside empty mode, so an omission is not a smaller session
   but a coding-agent one. The port exposes none of them: a caller chooses tools, a model,
   directories, and handlers, and cannot weaken the floor.
@@ -277,6 +287,72 @@ mode, images, subagents, provider commands, skills, plugins, and MCP are absent,
   `resolveCopilotHomeDirectory` throws rather than answering. There is no directory left
   that keeps agent state out of the notes, and returning one inside them is the single
   thing this resolution exists to prevent; the failure says to open the vault on a folder.
+
+## Resource Rules
+
+- MCP servers and skills reach a session only through `CopilotSdkSessionConfig.resources`,
+  which names each one. An empty map is not a replacement: the CLI still starts what its
+  own `COPILOT_HOME` configuration and its plugins declare, and neither
+  `enableConfigDiscovery: false` nor an empty tool list stops a server from being launched
+  and authenticated. `sdk/CopilotSdkRuntime` therefore enumerates the ambient servers
+  through `client.rpc.mcp.discover` before every create and resume and disables every one
+  the caller did not name. An enumeration that fails opens no session, because a session
+  without that list runs whatever the home holds.
+- Skills are the same shape one level down. `skillDirectories` points at the selected
+  package directory rather than its parent root, which would load the siblings, and the
+  runtime still loads its own builtin skills whenever skills are enabled at all, so every
+  loaded skill outside the selection is disabled before the session is handed back. Which
+  skill a reported path belongs to is decided by spelling first and by the name the
+  filesystem gives both sides second, through `runtime/CopilotCanonicalPath`: the runtime
+  reports the path it reached a skill through, and on macOS every temporary directory is
+  reached through `/var`, so comparing spellings alone would disable the selected skill.
+- A selected server's tools are only knowable once it has connected, so the session's
+  allow-list is widened after opening with the exact `mcp:<server>-<tool>` names
+  `session.rpc.mcp.listTools` reports, intersected with the source config's own `tools`
+  restriction. Never `mcp:*`. A server that did not connect contributes nothing and is
+  reported through `resourceDiagnostics`, so a turn never runs as though it had answered.
+- `resources` narrows; `availableTools` grants. An empty allow-list stays empty however
+  many servers are selected, so the command-metadata probe and any other tool-free session
+  connect their selected servers and receive none of their tools. Only a caller that
+  already allows tools has its list widened. Do not infer a grant from the presence of a
+  selection.
+- Connecting a server is a process spawn and a handshake that happens while the session is
+  opening, so `session.rpc.mcp.list` decides whether to wait: a `pending` server is waited
+  for on the startup budget, for the same reason starting the CLI runs on it, and a
+  `failed`, `needs-auth`, `disabled`, or `stopped` one is reported straight away rather
+  than waited out. That state decides only whether to wait, never whether the session may
+  ask — a runtime that reports no state leaves the tool listing as the authority, which
+  answers for a connected server and fails with the runtime's own reason for one that is
+  not. Do not turn this into a retry around `listTools`.
+- Resource preparation has one startup-sized deadline covering all skills and MCP metadata operations. A failed state request is surfaced; silence cancels subsequent setup steps, cleans up the unpublished session, and terminates the client. Cleanup may delete a newly created session that never reached a caller, but never an existing session whose resume preparation failed.
+- A skill command is invoked through `session.rpc.commands.invoke`, which answers with a
+  prompt the caller submits. Sending `/name args` as ordinary text is not an invocation
+  and must not be treated as one; the user's own message is what the turn displays.
+- Only a persistent session under `provider-default` or `unrestricted` may carry
+  resources. Ephemeral title, inline-edit, and instruction-refinement runs, and every
+  narrowed tool policy, are resource-free by construction in
+  `allowsCopilotResources`.
+- Only references are persisted — a configuration file plus a server name, or a
+  `SKILL.md` path — and they are host-scoped, so a synced vault selects nothing on another
+  computer. Definitions are read again per turn and stay in memory. Nothing derived from
+  them may reach settings, a command fingerprint, or an error message: the session
+  identity names them by digest for that reason.
+- Resources are deliberately outside `computeCopilotEnvironmentHash`. Including them would
+  clear the discovered model catalog and the conversation's native session on every
+  toggle, neither of which a selection invalidates.
+- A selection that changes while a client is alive ends that client and resumes the same
+  native session on a fresh one. An exclusion list applies where the runtime starts
+  servers — a create or a cold resume — and cannot stop what the resident process is
+  already running, so a resident resume would leave the previous selection's servers up. A
+  cold resume replaces the explicit map outright: servers named only by the previous
+  session are gone rather than inherited, and ambient sources stay suppressed because the
+  list is regenerated. `execution/CopilotExecutionSession` tracks the resources its client
+  was started under for exactly this; the conversation keeps its native id across the
+  restart. This is proven natively, not inferred — do not weaken it to a resident resume.
+- Discovery and resolution never edit what the user chose. A configuration that is
+  unreadable, a server that was renamed, and a skill that was deleted are reported —
+  in settings as a row that is still selected, and on a turn as a warning — rather than
+  silently unselected.
 
 ## Failure and Budget Rules
 

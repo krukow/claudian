@@ -1,7 +1,7 @@
 import { COPILOT_PROVIDER_CAPABILITIES } from '@/providers/copilot/capabilities';
 
 describe('COPILOT_PROVIDER_CAPABILITIES', () => {
-  it('advertises only the behavior the foundation layer implements', () => {
+  it('advertises only the behavior the provider implements', () => {
     expect(COPILOT_PROVIDER_CAPABILITIES).toEqual({
       providerId: 'copilot',
       reasoningControl: 'effort',
@@ -10,7 +10,7 @@ describe('COPILOT_PROVIDER_CAPABILITIES', () => {
       supportsInstructionMode: true,
       supportsNativeHistory: false,
       supportsPlanMode: false,
-      supportsProviderCommands: false,
+      supportsProviderCommands: true,
       supportsRewind: false,
       supportsTurnSteer: false,
     });

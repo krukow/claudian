@@ -471,3 +471,44 @@ describe('createCopilotWorkspaceServices.refreshModelCatalog under a runtime tha
     expect(getCopilotProviderSettings(settings).discoveredModels).toEqual([GPT_5]);
   });
 });
+
+/**
+ * Listing a skill's slash command starts a CLI of its own, so a tab warms one only when
+ * this computer has selected a skill for it to list.
+ */
+describe('Copilot tab warmup', () => {
+  function resolveWarmupMode(settings: Record<string, unknown>): string {
+    const host = createHost(settings);
+    const services = createCopilotWorkspaceServices(host, {
+      modelDiscoveryService: { discoverModels: async () => ({ kind: 'failed', message: 'unused' }) },
+    });
+    return services.tabWarmupPolicy?.resolveMode({ plugin: host } as never) ?? 'none';
+  }
+
+  it('warms no command runtime without an enabled provider or a selected skill', () => {
+    const disabled: Record<string, unknown> = {};
+    updateCopilotProviderSettings(disabled, { enabled: false });
+    const noSkills: Record<string, unknown> = {};
+    updateCopilotProviderSettings(noSkills, { enabled: true });
+
+    expect(resolveWarmupMode(disabled)).toBe('none');
+    expect(resolveWarmupMode(noSkills)).toBe('none');
+  });
+
+  it('warms the command runtime once a skill is selected on this computer', () => {
+    const settings: Record<string, unknown> = {};
+    updateCopilotProviderSettings(settings, {
+      enabled: true,
+      resourcesByHost: {
+        [getHostnameKey()]: {
+          additionalMcpConfigPaths: [],
+          additionalSkillRoots: [],
+          selectedMcpServers: [],
+          selectedSkillPaths: ['/skills/review/SKILL.md'],
+        },
+      },
+    });
+
+    expect(resolveWarmupMode(settings)).toBe('commands');
+  });
+});

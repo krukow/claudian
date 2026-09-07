@@ -1,5 +1,8 @@
+import * as path from 'node:path';
+
 import type { CopilotReasoningEffort } from '../models';
 import { isAbsoluteCopilotPath } from '../runtime/CopilotAbsolutePath';
+import { canonicalizeCopilotHostPath } from '../runtime/CopilotCanonicalPath';
 import {
   acquireNativeWithin,
   copilotNativeSilenceError,
@@ -30,6 +33,9 @@ import type {
   CopilotSdkSession,
   CopilotSdkSessionConfig,
   CopilotSdkSessionDeletion,
+  CopilotSdkSessionResources,
+  CopilotSdkSkillCommand,
+  CopilotSdkSkillInvocation,
   CopilotSdkSystemMessage,
 } from './CopilotSdkPort';
 
@@ -153,10 +159,12 @@ class SdkBackedClient implements CopilotSdkClient {
 
   async createSession(config: CopilotSdkSessionConfig): Promise<CopilotSdkSession> {
     try {
-      return new SdkBackedSession(await this.openSession(
-        this.client.createSession(toSessionConfig(config)),
+      const disabledMcpServers = await this.excludeAmbientMcpServers(config);
+      const session = await this.openSession(
+        this.client.createSession(toSessionConfig(config, disabledMcpServers)),
         'open a session',
-      ));
+      );
+      return await this.prepareSession(session, config, true);
     } catch (error) {
       throw toCopilotRuntimeError(error, 'provider');
     }
@@ -167,16 +175,111 @@ class SdkBackedClient implements CopilotSdkClient {
     config: CopilotSdkSessionConfig,
   ): Promise<CopilotSdkSession> {
     try {
-      return new SdkBackedSession(await this.openSession(
-        this.client.resumeSession(providerSessionId, toSessionConfig(config)),
+      const disabledMcpServers = await this.excludeAmbientMcpServers(config);
+      const session = await this.openSession(
+        this.client.resumeSession(
+          providerSessionId,
+          toSessionConfig(config, disabledMcpServers),
+        ),
         'resume the session',
-      ));
+      );
+      return await this.prepareSession(session, config, false);
     } catch (error) {
       const runtimeError = toCopilotRuntimeError(error, 'provider');
       throw runtimeError.category === 'provider-session-missing'
         ? copilotMissingSessionError(runtimeError.message, providerSessionId)
         : runtimeError;
     }
+  }
+
+  /**
+   * Names every MCP server the CLI would otherwise start on its own, so the session can
+   * refuse them by name.
+   *
+   * A session that states no servers still gets the ones its `COPILOT_HOME` configuration
+   * and its plugins declare: an empty map is not a replacement, and neither
+   * `enableConfigDiscovery: false` nor an empty tool list stops the process from being
+   * launched and authenticated. Only `disabledMcpServers` does, and it takes exact names,
+   * which is what this enumeration is for. A caller's own selection is left out of the
+   * list, because those are the servers it asked for.
+   *
+   * An enumeration that fails leaves no list, and a session opened without one would run
+   * whatever the CLI's home holds. That is the single thing this boundary promises it does
+   * not do, so nothing is opened.
+   */
+  private async excludeAmbientMcpServers(
+    config: CopilotSdkSessionConfig,
+  ): Promise<readonly string[]> {
+    const selected = new Set(Object.keys(config.resources?.mcpServers ?? {}));
+    const outcome = await acquireNativeWithin(
+      this.client.rpc.mcp.discover({ workingDirectory: config.workingDirectory }),
+    );
+    switch (outcome.kind) {
+      case 'settled':
+        return outcome.value.servers
+          .map(server => server.name)
+          .filter(name => !selected.has(name));
+      case 'rejected':
+        throw outcome.error;
+      case 'timed-out':
+        await stopQuietly(this.client);
+        throw copilotNativeSilenceError('listing the MCP servers this computer configures');
+    }
+  }
+
+  private async prepareSession(
+    session: CopilotSession,
+    config: CopilotSdkSessionConfig,
+    unpublished: boolean,
+  ): Promise<CopilotSdkSession> {
+    if (!config.resources) {
+      return new SdkBackedSession(session, [], new Set());
+    }
+    const cancellation = new AbortController();
+    const call: ResourceSetupCall = async operation => {
+      cancellation.signal.throwIfAborted();
+      const result = await operation();
+      cancellation.signal.throwIfAborted();
+      return result;
+    };
+    const outcome = await acquireNativeWithin(
+      prepareSessionResources(session, config, call),
+      undefined,
+      NATIVE_STARTUP_TIMEOUT_MS,
+    );
+    if (outcome.kind === 'settled') {
+      return outcome.value;
+    }
+    const error = outcome.kind === 'rejected'
+      ? outcome.error
+      : copilotNativeSilenceError('preparing selected Copilot resources', NATIVE_STARTUP_TIMEOUT_SECONDS);
+    cancellation.abort(error);
+
+    const failures: unknown[] = [error];
+    const disconnected = await settleNativeWithin(session.disconnect());
+    if (disconnected.kind !== 'settled') {
+      failures.push(disconnected.kind === 'rejected'
+        ? disconnected.error
+        : copilotNativeSilenceError('disconnecting an unprepared Copilot session'));
+    }
+    // No caller or turn has ever owned a fresh session whose preparation failed.
+    if (unpublished) {
+      const deleted = await settleNativeWithin(this.client.deleteSession(session.sessionId));
+      if (deleted.kind !== 'settled') {
+        failures.push(deleted.kind === 'rejected'
+          ? deleted.error
+          : copilotNativeSilenceError('deleting an unpublished Copilot session'));
+      }
+    }
+    if (outcome.kind === 'timed-out' || failures.length > 1) {
+      await stopQuietly(this.client);
+      throw new CopilotRuntimeError(
+        'transport',
+        `${failures.map(describeError).join('; ')}. The Copilot CLI was terminated.`,
+        { cause: new AggregateError(failures, 'Copilot resource preparation failed.') },
+      );
+    }
+    throw error;
   }
 
   /**
@@ -282,7 +385,12 @@ class SdkBackedClient implements CopilotSdkClient {
 }
 
 class SdkBackedSession implements CopilotSdkSession {
-  constructor(private readonly session: CopilotSession) {}
+  constructor(
+    private readonly session: CopilotSession,
+    readonly resourceDiagnostics: readonly string[],
+    /** Command names the selected skills answer to, lowercased for the runtime's match. */
+    private readonly skillCommandNames: ReadonlySet<string>,
+  ) {}
 
   get sessionId(): string {
     return this.session.sessionId;
@@ -294,6 +402,61 @@ class SdkBackedSession implements CopilotSdkSession {
     } catch (error) {
       throw toCopilotSendError(error, TURN_TIMEOUT_MS);
     }
+  }
+
+  /**
+   * The commands the selected skills registered.
+   *
+   * The runtime also lists its own builtin skills, which no selection covers, so the
+   * listing is narrowed to the commands the selected packages answer to. Builtin and
+   * client commands are excluded at the request itself.
+   */
+  async listSkillCommands(): Promise<readonly CopilotSdkSkillCommand[]> {
+    if (this.skillCommandNames.size === 0) {
+      return [];
+    }
+    const listing = await this.acquire(
+      this.session.rpc.commands.list({
+        includeBuiltins: false,
+        includeClientCommands: false,
+        includeSkills: true,
+      }),
+      'listing the Copilot skill commands',
+    );
+    return listing.commands
+      .filter(command => (
+        command.kind === 'skill' && this.skillCommandNames.has(command.name.toLowerCase())
+      ))
+      .map(command => ({
+        ...(command.description ? { description: command.description } : {}),
+        ...(command.input?.hint ? { argumentHint: command.input.hint } : {}),
+        name: command.name,
+      }));
+  }
+
+  async invokeSkillCommand(
+    name: string,
+    input: string,
+  ): Promise<CopilotSdkSkillInvocation> {
+    const result = await this.acquire(
+      this.session.rpc.commands.invoke({ ...(input ? { input } : {}), name }),
+      `invoking the Copilot skill command ${name}`,
+    );
+    if (result.kind === 'agent-prompt') {
+      return {
+        displayPrompt: result.displayPrompt,
+        kind: 'prompt',
+        ...(result.notice ? { notice: result.notice } : {}),
+        prompt: result.prompt,
+      };
+    }
+    if (result.kind === 'text') {
+      return { kind: 'text', text: result.text };
+    }
+    throw copilotConfigurationError(
+      `The Copilot skill command ${name} answered with something Claudian cannot run `
+      + `(${result.kind}). Send the request as an ordinary message instead.`,
+    );
   }
 
   /**
@@ -328,6 +491,232 @@ class SdkBackedSession implements CopilotSdkSession {
       throw toCopilotRuntimeError(error, 'transport');
     }
   }
+
+  /** One bounded metadata call against a runtime that is already up. */
+  private async acquire<T>(work: Promise<T>, context: string): Promise<T> {
+    const outcome = await acquireNativeWithin(work);
+    switch (outcome.kind) {
+      case 'settled':
+        return outcome.value;
+      case 'rejected':
+        throw toCopilotRuntimeError(outcome.error, 'provider');
+      case 'timed-out':
+        throw copilotNativeSilenceError(context);
+    }
+  }
+}
+
+/**
+ * Brings a freshly opened session down to exactly the resources it was given, before its
+ * caller can run a turn on it.
+ *
+ * Two things survive the session configuration and have to be answered here. The runtime
+ * loads its own builtin skills whenever skills are enabled at all, so every skill that is
+ * not one of the selected packages is disabled by name. And a selected MCP server's tools
+ * are only knowable once it has connected, so the session's allow-list is widened to the
+ * exact `mcp:<server>-<tool>` names it offers — never `mcp:*`, which would carry every
+ * tool of every server the runtime ever loads.
+ *
+ * A server that has not connected contributes no tools and is reported instead, because a
+ * turn that ran as though it had would be answering without the resource the user asked
+ * for. Anything that leaves the session unable to reach that state releases it: a session
+ * whose unselected skills are still loaded is not the session the caller asked for.
+ */
+async function prepareSessionResources(
+  session: CopilotSession,
+  config: CopilotSdkSessionConfig,
+  call: ResourceSetupCall,
+): Promise<CopilotSdkSession> {
+  const resources = config.resources;
+  if (!resources) {
+    return new SdkBackedSession(session, [], new Set());
+  }
+  const skillCommandNames = await selectNativeSkills(session, resources, call);
+  const mcp = await collectSelectedMcpTools(session, config, resources, call);
+  if (mcp.tools.length > 0) {
+    await call(() => session.rpc.options.update({
+        availableTools: [...config.availableTools, ...mcp.tools],
+    }));
+  }
+  return new SdkBackedSession(session, mcp.diagnostics, skillCommandNames);
+}
+
+type ResourceSetupCall = <T>(operation: () => Promise<T>) => Promise<T>;
+
+/** Disables every loaded skill outside the selection, and names those that stay. */
+async function selectNativeSkills(
+  session: CopilotSession,
+  resources: CopilotSdkSessionResources,
+  call: ResourceSetupCall,
+): Promise<ReadonlySet<string>> {
+  if (resources.skillDirectories.length === 0) {
+    return new Set();
+  }
+  const selectedDirectories = new Set(resources.skillDirectories.flatMap(directory => [
+    path.normalize(directory),
+    canonicalizeCopilotHostPath(directory, process.platform),
+  ].filter((value): value is string => Boolean(value))));
+  await call(() => session.rpc.skills.ensureLoaded());
+  const listed = await call(() => session.rpc.skills.list());
+  const commandNames = new Set<string>();
+  for (const skill of listed.skills) {
+    if (isSelectedSkill(skill.path, selectedDirectories)) {
+      if (skill.userInvocable) {
+        commandNames.add((skill.commandName ?? skill.name).toLowerCase());
+      }
+      continue;
+    }
+    await call(() => session.rpc.skills.disable({ name: skill.name }));
+  }
+  return commandNames;
+}
+
+/**
+ * Whether a loaded skill is one of the selected packages.
+ *
+ * The runtime reports the path it reached a skill through, which need not be the spelling
+ * the directory was selected under: macOS reaches every temporary directory through
+ * `/var`, a link to `/private/var`, and a vault kept on an external disk or in a synced
+ * folder is commonly a link itself. So the spelling is asked first and the name the
+ * filesystem gives both sides second — two spellings that resolve to one directory are
+ * one skill package, and a skill with no path at all is one the runtime supplied rather
+ * than one that was selected.
+ */
+function isSelectedSkill(
+  skillPath: string | undefined,
+  selectedDirectories: ReadonlySet<string>,
+): boolean {
+  if (!skillPath) {
+    return false;
+  }
+  const directory = path.dirname(skillPath);
+  if (selectedDirectories.has(path.normalize(directory))) {
+    return true;
+  }
+  const canonical = canonicalizeCopilotHostPath(directory, process.platform);
+  return canonical !== null && selectedDirectories.has(canonical);
+}
+
+/** The exact MCP tool names the session may use, and what could not be asked. */
+async function collectSelectedMcpTools(
+  session: CopilotSession,
+  config: CopilotSdkSessionConfig,
+  resources: CopilotSdkSessionResources,
+  call: ResourceSetupCall,
+): Promise<{ diagnostics: string[]; tools: string[] }> {
+  const serverNames = Object.keys(resources.mcpServers);
+  if (serverNames.length === 0) {
+    return { diagnostics: [], tools: [] };
+  }
+  const diagnostics: string[] = [];
+  const tools: string[] = [];
+  const states = await settleMcpConnections(session, serverNames, call);
+  /**
+   * Selecting a server says which servers this session may reach, not that it has tools.
+   * An empty allow-list is the port's deny-all, and widening it here would turn a
+   * tool-free caller — the command-metadata probe, or any other session opened only to
+   * ask the runtime something — into one that can call an MCP server because a selection
+   * happened to exist. The base list is the grant; the selection only narrows what a
+   * granted session may reach.
+   */
+  const grantsTools = config.availableTools.length > 0;
+
+  for (const serverName of serverNames) {
+    const unavailable = describeUnavailableServer(serverName, states.get(serverName));
+    if (unavailable) {
+      diagnostics.push(unavailable);
+      continue;
+    }
+    if (!grantsTools) {
+      continue;
+    }
+    const server = resources.mcpServers[serverName];
+    const allowed = server.tools && !server.tools.includes('*')
+      ? new Set(server.tools)
+      : null;
+    try {
+      const listing = await call(() => session.rpc.mcp.listTools({ serverName }));
+      for (const tool of listing.tools) {
+        if (!allowed || allowed.has(tool.name)) {
+          tools.push(`mcp:${serverName}-${tool.name}`);
+        }
+      }
+    } catch (error) {
+      diagnostics.push(
+        `The MCP server ${serverName} did not answer with its tools, so none of them are `
+        + `available in this session: ${describeError(error)}`,
+      );
+    }
+  }
+  return { diagnostics, tools };
+}
+
+/** How often the runtime is asked again about a server it is still connecting. */
+const MCP_CONNECTION_POLL_MS = 250;
+
+/**
+ * Waits until no selected server is still connecting, and reports where each one ended up.
+ *
+ * A server is a process the runtime spawns and handshakes with while the session is
+ * opening, so asking for its tools immediately would ask a server that has not answered
+ * yet. That wait runs on the startup budget rather than the release one for the same
+ * reason starting the CLI does: it is cold work a first launch, a package download, or a
+ * slow disk stretches well past what a running runtime takes to answer.
+ *
+ * A server missing from a successful state listing is resolved through its tool listing.
+ * A failed state request is a setup error, not evidence that the server is available.
+ */
+async function settleMcpConnections(
+  session: CopilotSession,
+  serverNames: readonly string[],
+  call: ResourceSetupCall,
+): Promise<Map<string, McpServerState>> {
+  for (;;) {
+    const states = await call(() => readMcpServerStates(session, serverNames));
+    const pending = serverNames.filter(name => states.get(name)?.status === 'pending');
+    if (pending.length === 0) {
+      return states;
+    }
+    await call(() => new Promise(resolve => window.setTimeout(resolve, MCP_CONNECTION_POLL_MS)));
+  }
+}
+
+interface McpServerState {
+  readonly failure?: string;
+  readonly status: string;
+}
+
+/** Selected server states reported by the pinned runtime. */
+async function readMcpServerStates(
+  session: CopilotSession,
+  serverNames: readonly string[],
+): Promise<Map<string, McpServerState>> {
+  const states = new Map<string, McpServerState>();
+  const listing = await session.rpc.mcp.list();
+  for (const server of listing.servers) {
+    if (!serverNames.includes(server.name)) {
+      continue;
+    }
+    const failure = server.error ?? listing.host?.failedServers?.[server.name]?.message;
+    states.set(server.name, {
+      ...(failure ? { failure } : {}),
+      status: server.status,
+    });
+  }
+  return states;
+}
+
+/** Why a selected server offers nothing, or null when it is one the session may ask. */
+function describeUnavailableServer(
+  serverName: string,
+  state: McpServerState | undefined,
+): string | null {
+  if (!state || state.status === 'connected') {
+    return null;
+  }
+  const detail = state.failure ? `: ${state.failure}` : '';
+  return `The MCP server ${serverName} is ${state.status}, so none of its tools are `
+    + `available in this session${detail}.`;
 }
 
 /** Ten minutes, matching the longest turn the Copilot CLI will run unattended. */
@@ -347,17 +736,25 @@ const TURN_TIMEOUT_MS = 600_000;
  * this, because a session that could would be a session that could read the user's global
  * Copilot configuration or act outside the vault.
  */
-function toSessionConfig(config: CopilotSdkSessionConfig): SessionConfig {
+function toSessionConfig(
+  config: CopilotSdkSessionConfig,
+  disabledMcpServers: readonly string[],
+): SessionConfig {
+  const resources = config.resources;
   return {
     ...(config.additionalDirectories?.length
       ? { additionalDirectories: [...config.additionalDirectories] }
       : {}),
     ...(config.excludedTools?.length ? { excludedTools: [...config.excludedTools] } : {}),
     ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
+    ...(resources?.skillDirectories.length
+      ? { skillDirectories: [...resources.skillDirectories] }
+      : {}),
     availableTools: [...config.availableTools],
     clientName: 'Claudian',
     coauthorEnabled: false,
     customAgentsLocalOnly: true,
+    disabledMcpServers: [...disabledMcpServers],
     embeddingCacheStorage: 'in-memory',
     enableConfigDiscovery: false,
     enableExperimentalMode: false,
@@ -367,12 +764,12 @@ function toSessionConfig(config: CopilotSdkSessionConfig): SessionConfig {
     enableOnDemandInstructionDiscovery: false,
     enableSessionStore: false,
     enableSessionTelemetry: false,
-    enableSkills: false,
+    enableSkills: (resources?.skillDirectories.length ?? 0) > 0,
     includeSubAgentStreamingEvents: false,
     infiniteSessions: { enabled: false },
     manageScheduleEnabled: false,
     mcpOAuthTokenStorage: 'in-memory',
-    mcpServers: {},
+    mcpServers: { ...resources?.mcpServers },
     memory: { enabled: false },
     model: config.model,
     onEvent: config.onEvent,

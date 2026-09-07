@@ -106,9 +106,9 @@ describe('copilotProviderRegistration', () => {
     expect(claims('COPILOT_SKILLS_DIRS')).toBe(true);
   });
 
-  it('scopes the CLI path per host so a synced vault does not share it', () => {
+  it('scopes the CLI path and resource selections to each computer', () => {
     expect(copilotProviderRegistration.settingsStorage.hostScopedFields)
-      .toEqual(['cliPathsByHost']);
+      .toEqual(['cliPathsByHost', 'resourcesByHost']);
   });
 
   it('reports normalization only when the stored bag actually changed', () => {
