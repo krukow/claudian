@@ -179,6 +179,39 @@ button.claudian-input-nav-btn[aria-disabled='true'] {
   padding: 4px 6px 6px 6px;
 }
 
+.claudian-stop-response,
+.claudian-stop-response:hover,
+.claudian-stop-response:focus-visible,
+.claudian-stop-response:active,
+.claudian-stop-response:disabled {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 4px 6px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+}
+
+.claudian-stop-response:hover,
+.claudian-stop-response:focus-visible {
+  color: var(--text-normal);
+}
+
+.claudian-stop-response:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+
+.claudian-stop-response:disabled,
+.claudian-stop-response:disabled:hover,
+.claudian-stop-response:disabled:focus-visible,
+.claudian-stop-response:disabled:active {
+  color: var(--text-faint);
+  cursor: default;
+  outline: none;
+}
+
 /* Hide secondary text when the full toolbar would wrap. */
 .claudian-input-toolbar--compact .claudian-thinking-effort > .claudian-thinking-label-text,
 .claudian-input-toolbar--compact .claudian-context-meter-percent {

@@ -59,6 +59,7 @@ export interface ChatTurnMessageBinding {
 }
 
 export interface ChatTurnSubmission {
+  readonly isCancellationRequested?: () => boolean;
   readonly inputRecordId: string;
   readonly localMessageId?: string;
   readonly userTurnOrdinal: number;
@@ -401,7 +402,7 @@ export class ChatExecutionCoordinator {
 
     const requestController = new AbortController();
     let binding: SessionBinding;
-    let run: ProviderExecutionRun;
+    let run: ProviderExecutionRun | null;
     try {
       if (!sameConversationBinding(conversation, this.conversation)) {
         throw new Error('Chat execution binding changed before provider handoff');
@@ -417,9 +418,11 @@ export class ChatExecutionCoordinator {
         throw new Error('Chat execution binding changed before provider handoff');
       }
       binding = this.requireCurrentSessionBinding();
-      run = binding.session.execute(
-        createExecutionRequest(submission, requestController.signal),
-      );
+      run = submission.isCancellationRequested?.()
+        ? null
+        : binding.session.execute(
+            createExecutionRequest(submission, requestController.signal),
+          );
     } catch (error) {
       try {
         await this.discardPreSendRecord(conversation.conversationId, record.id);
@@ -427,6 +430,11 @@ export class ChatExecutionCoordinator {
         throw new ChatExecutionPreHandoffError(discardError);
       }
       throw new ChatExecutionPreHandoffError(error);
+    }
+
+    if (!run) {
+      await this.discardPreSendRecord(conversation.conversationId, record.id);
+      return { status: 'cancelled', accepted: false, planCompleted: false };
     }
 
     const active: ActiveExecution = {

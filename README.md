@@ -35,6 +35,8 @@ Open the chat sidebar from the ribbon icon or command palette. Select text and u
 
 **Tabs & Session Management** — Use multiple tabs in single-panel mode or a persistent session manager beside the chat in dual-pane mode.
 
+**Stop a Response** — Select **Stop** in the running chat's composer or press **Esc**. Only that tab's response is cancelled; the conversation and queued or draft input are preserved. **Stopping...** stays disabled until cancellation settles. Rewind is not interrupted by this control.
+
 **Collab Mode** (Experimental) — Collaborate on shared projects with other Claudian users. [Learn more](https://claudian.md/docs/collab-mode/).
 
 ## Requirements
