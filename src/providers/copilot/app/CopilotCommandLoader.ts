@@ -27,18 +27,21 @@ export class CopilotCommandLoader implements ProviderCommandLoaderContract {
 
   getCacheFingerprint(settings: Record<string, unknown>): string {
     const providerSettings = getCopilotProviderSettings(settings);
-    const selectedSkills = [...getCopilotHostResources(settings).selectedSkillPaths].sort();
+    const resources = getCopilotHostResources(settings);
+    const skillPreferences = {
+      selected: [...resources.selectedSkillPaths].sort(),
+      disabledRepository: [...(resources.disabledRepositorySkillPaths ?? [])].sort(),
+    };
     return [
-      'copilot:commands:v1',
+      'copilot:commands:v2',
       providerSettings.enabled ? 'enabled' : 'disabled',
-      createHash('sha256').update(JSON.stringify(selectedSkills)).digest('hex'),
+      createHash('sha256').update(JSON.stringify(skillPreferences)).digest('hex'),
       String(this.refreshRevision),
     ].join(':');
   }
 
   isAvailable(settings: Record<string, unknown>): boolean {
-    return getCopilotProviderSettings(settings).enabled
-      && getCopilotHostResources(settings).selectedSkillPaths.length > 0;
+    return getCopilotProviderSettings(settings).enabled;
   }
 
   /** Invalidates the cached listing without changing what is selected. */

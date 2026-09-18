@@ -5,8 +5,7 @@ a stdio JSON-RPC subprocess.
 
 The provider is reachable from `src/main.ts` and ships switched off. It streams text,
 reasoning, tools, approvals, and questions for chat and for the ephemeral title, inline
-edit, and instruction-refinement runs, and runs the MCP servers and skills this computer
-selected in persistent chat. Native history browsing, replay, rewind, fork, plan mode,
+edit, and instruction-refinement runs, and runs selected MCP servers and enabled skills in persistent chat. Native history browsing, replay, rewind, fork, plan mode,
 images, subagents, and plugins are absent, and `capabilities.ts` says so; do not describe
 them as pending here.
 
@@ -326,11 +325,11 @@ them as pending here.
   resources. Ephemeral title, inline-edit, and instruction-refinement runs, and every
   narrowed tool policy, are resource-free by construction in
   `allowsCopilotResources`.
-- Only references are persisted — a configuration file plus a server name, or a
-  `SKILL.md` path — and they are host-scoped, so a synced vault selects nothing on another
-  computer. Definitions are read again per turn and stay in memory. Nothing derived from
+- Explicit selections and repository-skill opt-outs are host-scoped references, never definitions. Repository defaults are discovered independently from each computer's filesystem. Definitions are read again per turn and stay in memory. Nothing derived from
   them may reach settings, a command fingerprint, or an error message: the session
   identity names them by digest for that reason.
+- Effective skills are explicit selections plus standard skill packages at the nearest containing Git root and vault-local packages inside that repository, minus per-skill opt-outs. `getEnabledCopilotSkillPaths` owns that merge. Both chat resolution and the isolated command probe must pass the vault directory to the resolver; auth and auxiliary sessions must not inherit defaults. Command availability and warmup must not use `selectedSkillPaths.length` as a gate, because repository defaults are not persisted selections.
+- Settings auto-discovery is filesystem-only and must not mutate settings or start a runtime. Keep saved references unverified until discovery finishes. Type and text filters jointly scope bulk actions; preserve hidden choices and skip ambiguous sources when enabling. Keep resource rows keyed and update their labels and descriptions only when text changes.
 - Resources are deliberately outside `computeCopilotEnvironmentHash`. Including them would
   clear the discovered model catalog and the conversation's native session on every
   toggle, neither of which a selection invalidates.

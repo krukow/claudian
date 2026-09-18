@@ -661,6 +661,7 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
     }
     const resolution = await resolveCopilotSelectedResources(
       getCopilotHostResources(this.host.settings),
+      this.config.vaultWorkingDirectory,
     );
     active.resourceProblems = resolution.problems;
     active.skillsEnabled = (resolution.resources?.skillDirectories.length ?? 0) > 0;

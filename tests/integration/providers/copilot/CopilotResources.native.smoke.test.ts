@@ -6,6 +6,8 @@ import type * as CopilotSdk from '@github/copilot-sdk';
 
 import type { ProviderApprovalInteractionRequest, ProviderInteractionPort } from '@/core/execution';
 import { CopilotInteractionHandler } from '@/providers/copilot/execution/CopilotInteractionHandler';
+import { resolveCopilotSelectedResources } from '@/providers/copilot/resources/CopilotResourceResolver';
+import { normalizeCopilotResourceSettings } from '@/providers/copilot/resources/CopilotResourceSettings';
 import { CopilotCliResolver } from '@/providers/copilot/runtime/CopilotCliResolver';
 import { buildCopilotRuntimeEnvironment } from '@/providers/copilot/runtime/CopilotRuntimeEnvironment';
 import type {
@@ -318,6 +320,30 @@ describeWithCli('Copilot native resource isolation', () => {
     expect(localModel.completionRequests).toHaveLength(1);
     expect(localModel.completionRequests[0]).toContain('answer with the single word FIXTURE');
     expect(localModel.completionRequests[0]).toContain('synthetic argument');
+  });
+
+  it('loads a parent repository skill automatically while excluding its opted-out and personal siblings', async () => {
+    mkdirSync(path.join(root, '.git'));
+    const repositorySkill = writeSkillPackage(path.join(root, '.github', 'skills'), 'repo-review');
+    const disabledSkill = writeSkillPackage(path.join(root, '.github', 'skills'), 'repo-disabled');
+    writeSkillPackage(path.join(home, '.copilot', 'skills'), 'personal-unselected');
+    const resolution = await resolveCopilotSelectedResources(normalizeCopilotResourceSettings({
+      disabledRepositorySkillPaths: [disabledSkill],
+    }), vault);
+    expect(resolution.problems).toEqual([]);
+    expect(resolution.resources?.skillPaths).toEqual([repositorySkill]);
+    if (!resolution.resources) throw new Error('The repository skill was not resolved.');
+    const started = await startClient();
+    const session = await started.createSession({
+      ...sessionConfig(vault),
+      resources: resolution.resources,
+    });
+
+    expect((await session.listSkillCommands()).map(command => command.name)).toEqual(['repo-review']);
+    expect(await session.invokeSkillCommand('repo-review', 'synthetic note')).toMatchObject({
+      kind: 'prompt',
+      prompt: expect.stringContaining('answer with the single word FIXTURE'),
+    });
   });
 
   it('allows a selected tool without a prompt only when native allow-all was explicitly chosen', async () => {

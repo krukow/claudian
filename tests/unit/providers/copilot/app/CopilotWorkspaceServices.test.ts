@@ -473,8 +473,7 @@ describe('createCopilotWorkspaceServices.refreshModelCatalog under a runtime tha
 });
 
 /**
- * Listing a skill's slash command starts a CLI of its own, so a tab warms one only when
- * this computer has selected a skill for it to list.
+ * Command warmup checks repository skills before deciding whether a CLI is needed.
  */
 describe('Copilot tab warmup', () => {
   function resolveWarmupMode(settings: Record<string, unknown>): string {
@@ -485,14 +484,14 @@ describe('Copilot tab warmup', () => {
     return services.tabWarmupPolicy?.resolveMode({ plugin: host } as never) ?? 'none';
   }
 
-  it('warms no command runtime without an enabled provider or a selected skill', () => {
+  it('checks for repository commands when enabled without requiring explicit selections', () => {
     const disabled: Record<string, unknown> = {};
     updateCopilotProviderSettings(disabled, { enabled: false });
     const noSkills: Record<string, unknown> = {};
     updateCopilotProviderSettings(noSkills, { enabled: true });
 
     expect(resolveWarmupMode(disabled)).toBe('none');
-    expect(resolveWarmupMode(noSkills)).toBe('none');
+    expect(resolveWarmupMode(noSkills)).toBe('commands');
   });
 
   it('warms the command runtime once a skill is selected on this computer', () => {

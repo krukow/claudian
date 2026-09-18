@@ -7,7 +7,9 @@ export interface CopilotResourceSettings {
   additionalMcpConfigPaths: string[];
   additionalSkillRoots: string[];
   selectedMcpServers: CopilotMcpServerReference[];
+  /** Explicit choices; repository defaults are merged when resources are resolved. */
   selectedSkillPaths: string[];
+  readonly disabledRepositorySkillPaths?: string[];
 }
 
 export type CopilotResourcesByHost = Record<string, CopilotResourceSettings>;
@@ -28,12 +30,27 @@ export function normalizeCopilotResourcesByHost(value: unknown): CopilotResource
 
 export function normalizeCopilotResourceSettings(value: unknown): CopilotResourceSettings {
   const record = isRecord(value) ? value : {};
+  const disabledRepositorySkillPaths = normalizeStringList(record.disabledRepositorySkillPaths);
   return {
+    ...(disabledRepositorySkillPaths.length > 0 ? { disabledRepositorySkillPaths } : {}),
     additionalMcpConfigPaths: normalizeStringList(record.additionalMcpConfigPaths),
     additionalSkillRoots: normalizeStringList(record.additionalSkillRoots),
     selectedMcpServers: normalizeMcpReferences(record.selectedMcpServers),
     selectedSkillPaths: normalizeStringList(record.selectedSkillPaths),
   };
+}
+
+export function getEnabledCopilotSkillPaths(
+  selection: CopilotResourceSettings,
+  repositorySkillPaths: readonly string[],
+): string[] {
+  const selected = new Set(selection.selectedSkillPaths);
+  const disabled = new Set(selection.disabledRepositorySkillPaths);
+  for (const skillPath of repositorySkillPaths) {
+    if (disabled.has(skillPath)) selected.delete(skillPath);
+    else selected.add(skillPath);
+  }
+  return [...selected];
 }
 
 function normalizeMcpReferences(value: unknown): CopilotMcpServerReference[] {

@@ -10,7 +10,6 @@ import type {
 import { CopilotCommandCatalog } from '../commands/CopilotCommandCatalog';
 import { computeCopilotEnvironmentHash } from '../env/CopilotSettingsReconciler';
 import { sameCopilotDiscoveredModels } from '../models';
-import { getCopilotHostResources } from '../resources/CopilotHostResources';
 import { CopilotBrowserLogin } from '../runtime/CopilotBrowserLogin';
 import { CopilotCliResolver } from '../runtime/CopilotCliResolver';
 import { CopilotModelDiscoveryService } from '../runtime/CopilotModelDiscoveryService';
@@ -23,14 +22,13 @@ import { CopilotConnectionCoordinator } from './CopilotConnectionCoordinator';
 const COPILOT_PROVIDER_ID = 'copilot' as const;
 
 /**
- * Listing skill commands costs a CLI start, so a tab only warms one when there is
- * something to list: the provider is on and this computer selected at least one skill.
+ * Repository skills are discovered before the metadata probe starts a CLI, so an
+ * enabled provider checks for commands even without an explicit personal selection.
  */
 const copilotTabWarmupPolicy: ProviderTabWarmupPolicy = {
   resolveMode(context) {
     const settings = context.plugin.settings as unknown as Record<string, unknown>;
     return getCopilotProviderSettings(settings).enabled
-      && getCopilotHostResources(settings).selectedSkillPaths.length > 0
       ? 'commands'
       : 'none';
   },

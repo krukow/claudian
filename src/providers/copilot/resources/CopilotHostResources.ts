@@ -7,11 +7,11 @@ import {
 } from './CopilotResourceSettings';
 
 /**
- * What this computer selected for this vault.
+ * This computer's explicit selections and repository-skill opt-outs for this vault.
  *
  * A selection names files and directories that exist on one machine, so it is stored per
- * host and never becomes another computer's selection by syncing the vault. A host that
- * has selected nothing selects nothing: there is no inherited default.
+ * host and never becomes another computer's explicit selection by syncing the vault.
+ * Repository defaults are resolved from the vault's filesystem, not persisted here.
  */
 export function getCopilotHostResources(
   settings: Record<string, unknown>,
