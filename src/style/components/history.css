@@ -936,6 +936,16 @@ body.theme-dark .claudian-session-metadata-popover {
   color: var(--text-normal);
 }
 
+.claudian-history-item-actions .claudian-delete-btn:disabled,
+.claudian-session-sidebar .claudian-history-item-actions .claudian-delete-btn:disabled,
+.claudian-history-menu .claudian-history-item-actions .claudian-delete-btn:disabled {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  color: var(--text-faint);
+  cursor: default;
+}
+
 .claudian-rename-input {
   width: 100%;
   padding: 2px 4px;

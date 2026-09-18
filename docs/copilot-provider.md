@@ -50,6 +50,7 @@ Running a bare `copilot` signs in to the shared `~/.copilot` install instead and
 ## Using it
 
 - **Chat**: pick a Copilot model in the chat model selector and send a message. Text and reasoning stream as they arrive, tool calls appear as they start and finish, and usage is reported against the model's context window.
+- **Deleting a chat**: choose the trash button on a session row, or right-click the row and choose **Delete**. Confirm the named chat to remove it from Claudian; archiving first is not required. Stop a running chat before deleting it. Your notes and provider-native history remain untouched, and deletion cannot be undone in Claudian.
 - **Tools**: Copilot runs its own built-in tools inside your vault. Claudian narrows them to the ones it can render, and the background-agent and factory families are never available.
 - **Approvals**: every action the CLI asks permission for is routed to the Claudian approval prompt. There is no blanket allow and no permission-mode switch: approving once and approving for the session are both your choice, and a request that arrives with no live turn is refused.
 - **Questions**: when the CLI asks a question, Claudian shows it with the choices the CLI offered.

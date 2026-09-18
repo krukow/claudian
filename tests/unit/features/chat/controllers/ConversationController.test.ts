@@ -768,8 +768,9 @@ describe('ConversationController', () => {
         expect(listeners!.length).toBe(1);
       });
 
-      it('should not delete while streaming', async () => {
+      it('does not delete the current conversation while it is streaming', async () => {
         deps.state.isStreaming = true;
+        deps.state.currentConversationId = 'conv-1';
 
         (deps.plugin.getConversationList as jest.Mock).mockReturnValue([
           { id: 'conv-1', title: 'Test', createdAt: 1000, lastActivityAt: 1000 },
@@ -1347,7 +1348,7 @@ describe('ConversationController', () => {
           .toEqual(['Active']);
         expect(container.querySelector('.claudian-pin-btn')).not.toBeNull();
         expect(container.querySelector('.claudian-archive-btn')).not.toBeNull();
-        expect(container.querySelector('.claudian-delete-btn')).toBeNull();
+        expect(container.querySelector('.claudian-delete-btn')).not.toBeNull();
         expect(container.querySelectorAll('.claudian-action-btn').some(
           (button: { getAttribute(name: string): string | null | undefined }) => (
             button.getAttribute('aria-label') === 'Rename'
@@ -2711,7 +2712,7 @@ describe('ConversationController', () => {
         expect(menu.items.map(item => item.title)).toEqual(['Rename', 'Delete']);
       });
 
-      it('shows inline device assignment beside pin and archive only for legacy sessions', async () => {
+      it('shows inline device assignment beside session actions only for legacy sessions', async () => {
         const container = createMockEl();
         const onAssignConversationToDevice = jest.fn().mockResolvedValue(undefined);
         (deps.plugin.getConversationList as jest.Mock).mockReturnValue([
@@ -2752,7 +2753,7 @@ describe('ConversationController', () => {
         expect(
           legacyItem.querySelector('.claudian-history-item-actions')!.children
             .map((button: HTMLElement) => button.getAttribute('aria-label')),
-        ).toEqual(['Assign to this device', 'Pin', 'Archive']);
+        ).toEqual(['Assign to this device', 'Pin', 'Archive', 'Delete']);
 
         assignButton.dispatchEvent({
           type: 'click',
@@ -2773,6 +2774,7 @@ describe('ConversationController', () => {
           'Pin',
           'Rename',
           'Archive',
+          'Delete',
         ]);
       });
 
@@ -2853,10 +2855,11 @@ describe('ConversationController', () => {
           'Pin',
           'Rename',
           'Archive',
+          'Delete',
         ]);
       });
 
-      it('keeps rename in the active context menu and delete in Archived only', () => {
+      it('offers deletion in both active and archived session context menus', () => {
         const activeContainer = createMockEl();
         (deps.plugin.getConversationList as jest.Mock).mockReturnValue([
           { id: 'active', title: 'Active', createdAt: 2 },
@@ -2882,7 +2885,7 @@ describe('ConversationController', () => {
           }>;
         }).instances.at(-1)!;
         expect(menu.useNativeMenu).toBe(false);
-        expect(menu.items.map(item => item.title)).toEqual(['Pin', 'Rename', 'Archive']);
+        expect(menu.items.map(item => item.title)).toEqual(['Pin', 'Rename', 'Archive', 'Delete']);
 
         const archivedContainer = createMockEl();
         (deps.plugin.getConversationList as jest.Mock).mockReturnValue([
