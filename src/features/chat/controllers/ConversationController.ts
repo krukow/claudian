@@ -102,6 +102,8 @@ type SaveOptions = {
 
 export type HistoryConversationOpenState = 'closed' | 'open' | 'current';
 
+type HistoryConversationDeletionBlocker = 'running' | 'rewinding' | null;
+
 export type HistoryConversationStatus = {
   openState: HistoryConversationOpenState;
   isRunning: boolean;
@@ -117,6 +119,8 @@ type HistoryRenderOptions = {
   onOpenConversationInNewTab?: (id: string, activate?: boolean) => Promise<void>;
   getConversationOpenState?: (id: string) => HistoryConversationOpenState;
   getConversationStatus?: (id: string) => HistoryConversationStatus;
+  /** Conversation-wide eligibility, independent of the tab chosen for presentation. */
+  getConversationDeletionBlocker?: (id: string) => HistoryConversationDeletionBlocker;
   getProviderIcon?: (conversation: ConversationMeta) => ProviderIconSvg | null | undefined;
   getModelLabel?: (conversation: ConversationMeta) => string;
   onRerender: () => void;
@@ -1485,16 +1489,20 @@ export class ConversationController {
     }
 
     const createDeleteButton = (): void => {
+      const disabledReason = this.getHistoryDeletionDisabledReason(conversation.id, options);
       const deleteBtn = actions.createEl('button', {
         cls: 'claudian-action-btn claudian-delete-btn',
+        attr: { type: 'button' },
       });
       setIcon(deleteBtn, 'trash-2');
       deleteBtn.setAttribute('aria-label', 'Delete');
+      deleteBtn.disabled = disabledReason !== null;
+      if (disabledReason) deleteBtn.setAttribute('title', disabledReason);
       deleteBtn.addEventListener('click', (event) => {
         event.stopPropagation();
         runConversationAction(
           () => this.runHistoryAction(
-            () => this.deleteHistoryConversation(conversation.id, options),
+            () => this.deleteHistoryConversation(conversation, options),
             'Failed to delete conversation',
           ),
           'Failed to delete conversation',
@@ -1564,6 +1572,7 @@ export class ConversationController {
           });
         }
       }
+      createDeleteButton();
     } else if (options.sessionActionMode === 'archived') {
       const restoreBtn = actions.createEl('button', {
         cls: 'claudian-action-btn claudian-restore-btn',
@@ -1950,8 +1959,30 @@ export class ConversationController {
 
     return {
       openState: options.getConversationOpenState?.(conversationId) ?? fallbackOpenState,
-      isRunning: false,
+      isRunning: conversationId === this.deps.state.currentConversationId
+        && this.deps.state.isStreaming,
     };
+  }
+
+  private getHistoryDeletionDisabledReason(
+    conversationId: string,
+    options: HistoryRenderOptions,
+  ): string | null {
+    let blocker: HistoryConversationDeletionBlocker;
+    if (options.getConversationDeletionBlocker) {
+      blocker = options.getConversationDeletionBlocker(conversationId);
+    } else if (
+      conversationId === this.deps.state.currentConversationId
+      && this.deps.state.isRewinding
+    ) {
+      blocker = 'rewinding';
+    } else {
+      blocker = this.getHistoryConversationStatus(conversationId, 'closed', options).isRunning
+        ? 'running'
+        : null;
+    }
+    if (blocker === 'rewinding') return t('chat.rewind.inProgress');
+    return blocker === 'running' ? 'Stop this session before deleting it.' : null;
   }
 
   private getHistoryItemStatusText(
@@ -2038,6 +2069,20 @@ export class ConversationController {
       fallbackOpenState,
       options,
     );
+    const addDeleteItem = (): void => {
+      const disabledReason = this.getHistoryDeletionDisabledReason(conversationId, options);
+      menu.addItem(menuItem => {
+        menuItem.setTitle('Delete').setDisabled(disabledReason !== null);
+        if (!disabledReason) {
+          menuItem.onClick(() => {
+            void this.runHistoryAction(
+              () => this.deleteHistoryConversation(conversation, options),
+              'Failed to delete conversation',
+            );
+          });
+        }
+      });
+    };
 
     if (options.showOpenStateActions !== false && openState !== 'current') {
       if (openState === 'closed' && options.onOpenConversationInNewTab) {
@@ -2078,14 +2123,7 @@ export class ConversationController {
             'Failed to restore session',
           );
         }));
-      menu.addItem((menuItem) => menuItem
-        .setTitle('Delete')
-        .onClick(() => {
-          void this.runHistoryAction(
-            () => this.deleteHistoryConversation(conversationId, options),
-            'Failed to delete conversation',
-          );
-        }));
+      addDeleteItem();
       menu.showAtMouseEvent(event);
       return;
     }
@@ -2121,6 +2159,7 @@ export class ConversationController {
           });
         }
       });
+      addDeleteItem();
       menu.showAtMouseEvent(event);
       return;
     }
@@ -2130,26 +2169,32 @@ export class ConversationController {
       .onClick(() => {
         this.showRenameEditor(item, conversationId, title, options);
       }));
-    menu.addItem((menuItem) => menuItem
-      .setTitle('Delete')
-      .onClick(() => {
-        void this.runHistoryAction(
-          () => this.deleteHistoryConversation(conversationId, options),
-          'Failed to delete conversation',
-        );
-      }));
+    addDeleteItem();
 
     menu.showAtMouseEvent(event);
   }
 
   private async deleteHistoryConversation(
-    conversationId: string,
+    conversation: ConversationMeta,
     options: HistoryRenderOptions,
   ): Promise<void> {
     const { plugin, state } = this.deps;
-    if (state.isStreaming && options.sessionActionMode !== 'archived') return;
+    const confirmed = await confirm(
+      plugin.app,
+      `Delete "${conversation.title}" from Claudian? This cannot be undone. Your notes and provider history will not be deleted.`,
+      t('common.delete'),
+    );
+    if (!confirmed || this.deps.isDisposed?.()) return;
+
+    const conversationId = conversation.id;
+    const disabledReason = this.getHistoryDeletionDisabledReason(conversationId, options);
+    if (disabledReason) {
+      new Notice(disabledReason);
+      return;
+    }
 
     await plugin.deleteConversation(conversationId);
+    if (this.deps.isDisposed?.()) return;
     options.onRerender();
 
     if (conversationId === state.currentConversationId) {

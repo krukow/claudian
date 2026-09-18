@@ -34,12 +34,14 @@ class ConfirmModal extends Modal {
     this.contentEl.createEl('p', { text: this.message });
 
     new Setting(this.contentEl)
-      .addButton(btn =>
+      .addButton(btn => {
+        btn.buttonEl.type = 'button';
         btn
           .setButtonText(t('common.cancel'))
-          .onClick(() => this.close())
-      )
+          .onClick(() => this.close());
+      })
       .addButton(btn => {
+        btn.buttonEl.type = 'button';
         btn
           .setButtonText(this.confirmText)
           .setDestructive()
