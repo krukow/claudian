@@ -421,7 +421,10 @@ export class ClaudianView extends ItemView {
           }
         },
         onTabRewindingChanged: () => {
-          if (isTabWorkspaceInitialized()) this.updateTabBar();
+          if (isTabWorkspaceInitialized()) {
+            this.updateTabBar();
+            this.notifyConversationNavigationChanged();
+          }
         },
         onTabTitleChanged: () => {
           if (isTabWorkspaceInitialized()) this.updateTabBar();
@@ -1183,6 +1186,13 @@ export class ClaudianView extends ItemView {
           }
         : {}),
       getConversationStatus: (id) => this.getHistoryConversationStatus(id),
+      getConversationDeletionBlocker: (id) => {
+        const openTabs = this.getOpenConversationTabs(id);
+        if (openTabs.some(({ tab }) => tab.state.isRewinding)) return 'rewinding';
+        return openTabs.some(({ manager, tab }) => manager.isTabWorking(tab.id))
+          ? 'running'
+          : null;
+      },
       onRerender: () => this.updateHistoryDropdown(),
       showOpenStateLabels: navigationMode === 'history',
       showOpenStateActions: navigationMode === 'history' && !isArchiveView,

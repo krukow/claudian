@@ -75,6 +75,9 @@ async function createHarness(archived = false) {
   const files = new Map<string, string>();
   const folders = new Set<string>();
   let failWrites = false;
+  let disposed = false;
+  let deletion: Promise<void> | null = null;
+  let writeBarrier: { started: () => void; wait: Promise<void> } | null = null;
   const app = {
     vault: {
       adapter: {
@@ -86,6 +89,10 @@ async function createHarness(archived = false) {
         },
         write: async (path: string, content: string) => {
           if (failWrites) throw new Error('Storage unavailable.');
+          if (writeBarrier) {
+            writeBarrier.started();
+            await writeBarrier.wait;
+          }
           files.set(path, content);
         },
         mkdir: async (path: string) => { folders.add(path); },
@@ -119,7 +126,10 @@ async function createHarness(archived = false) {
     app,
     settings: {},
     getConversationList: () => repository.list(),
-    deleteConversation: (id: string) => repository.delete(id),
+    deleteConversation: (id: string) => {
+      deletion = repository.delete(id);
+      return deletion;
+    },
     getConversationSync: (id: string) => repository.getSync(id),
   } as unknown as FeatureHost;
   const messagesEl = document.createElement('div');
@@ -146,6 +156,7 @@ async function createHarness(archived = false) {
     getTitleGenerationService: () => null,
     getStatusPanel: () => null,
     getExecutionCoordinator: () => null,
+    isDisposed: () => disposed,
   });
   let running = false;
   const render = () => controller.renderHistoryDropdown(container, {
@@ -161,7 +172,25 @@ async function createHarness(archived = false) {
     container, repository, persistence, state, render,
     setRunning: (value: boolean) => { running = value; },
     failWrites: () => { failWrites = true; },
-    dispose: () => { renderer.dispose(); linkedContent.destroy(); component.unload(); },
+    deferDeletionWrite: () => {
+      let markStarted!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>(resolve => { markStarted = resolve; });
+      const wait = new Promise<void>(resolve => { release = resolve; });
+      writeBarrier = { started: markStarted, wait };
+      return { started, release: () => { writeBarrier = null; release(); } };
+    },
+    waitForDeletion: async () => {
+      if (!deletion) throw new Error('No deletion was requested.');
+      await deletion;
+    },
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      renderer.dispose();
+      linkedContent.destroy();
+      component.unload();
+    },
   };
 }
 
@@ -244,6 +273,30 @@ it('reports storage failure and leaves the conversation available', async () => 
     expect(harness.repository.list().map(item => item.id)).toEqual(['chat-to-delete']);
     expect(await harness.persistence.isDeleted('chat-to-delete')).toBe(false);
   } finally {
+    harness.dispose();
+  }
+});
+
+it('finishes durable deletion without publishing into a disposed history surface', async () => {
+  const harness = await createHarness();
+  const deletionWrite = harness.deferDeletionWrite();
+  try {
+    within(harness.container).getByRole('button', { name: 'Delete' }).click();
+    const dialog = await screen.findByRole('dialog');
+    within(dialog).getByRole('button', { name: 'Delete' }).click();
+    await deletionWrite.started;
+    harness.dispose();
+    harness.container.remove();
+    const disposedMarkup = harness.container.innerHTML;
+
+    deletionWrite.release();
+    await harness.waitForDeletion();
+
+    expect(harness.repository.list()).toEqual([]);
+    expect(await harness.persistence.isDeleted('chat-to-delete')).toBe(true);
+    expect(harness.container.innerHTML).toBe(disposedMarkup);
+  } finally {
+    deletionWrite.release();
     harness.dispose();
   }
 });

@@ -102,6 +102,8 @@ type SaveOptions = {
 
 export type HistoryConversationOpenState = 'closed' | 'open' | 'current';
 
+type HistoryConversationDeletionBlocker = 'running' | 'rewinding' | null;
+
 export type HistoryConversationStatus = {
   openState: HistoryConversationOpenState;
   isRunning: boolean;
@@ -117,6 +119,8 @@ type HistoryRenderOptions = {
   onOpenConversationInNewTab?: (id: string, activate?: boolean) => Promise<void>;
   getConversationOpenState?: (id: string) => HistoryConversationOpenState;
   getConversationStatus?: (id: string) => HistoryConversationStatus;
+  /** Conversation-wide eligibility, independent of the tab chosen for presentation. */
+  getConversationDeletionBlocker?: (id: string) => HistoryConversationDeletionBlocker;
   getProviderIcon?: (conversation: ConversationMeta) => ProviderIconSvg | null | undefined;
   getModelLabel?: (conversation: ConversationMeta) => string;
   onRerender: () => void;
@@ -1485,14 +1489,15 @@ export class ConversationController {
     }
 
     const createDeleteButton = (): void => {
+      const disabledReason = this.getHistoryDeletionDisabledReason(conversation.id, options);
       const deleteBtn = actions.createEl('button', {
         cls: 'claudian-action-btn claudian-delete-btn',
         attr: { type: 'button' },
       });
       setIcon(deleteBtn, 'trash-2');
       deleteBtn.setAttribute('aria-label', 'Delete');
-      deleteBtn.disabled = isRunning;
-      if (isRunning) deleteBtn.setAttribute('title', 'Stop this session before deleting it.');
+      deleteBtn.disabled = disabledReason !== null;
+      if (disabledReason) deleteBtn.setAttribute('title', disabledReason);
       deleteBtn.addEventListener('click', (event) => {
         event.stopPropagation();
         runConversationAction(
@@ -1959,6 +1964,27 @@ export class ConversationController {
     };
   }
 
+  private getHistoryDeletionDisabledReason(
+    conversationId: string,
+    options: HistoryRenderOptions,
+  ): string | null {
+    let blocker: HistoryConversationDeletionBlocker;
+    if (options.getConversationDeletionBlocker) {
+      blocker = options.getConversationDeletionBlocker(conversationId);
+    } else if (
+      conversationId === this.deps.state.currentConversationId
+      && this.deps.state.isRewinding
+    ) {
+      blocker = 'rewinding';
+    } else {
+      blocker = this.getHistoryConversationStatus(conversationId, 'closed', options).isRunning
+        ? 'running'
+        : null;
+    }
+    if (blocker === 'rewinding') return t('chat.rewind.inProgress');
+    return blocker === 'running' ? 'Stop this session before deleting it.' : null;
+  }
+
   private getHistoryItemStatusText(
     status: HistoryConversationStatus,
     timestamp: number,
@@ -2044,9 +2070,10 @@ export class ConversationController {
       options,
     );
     const addDeleteItem = (): void => {
+      const disabledReason = this.getHistoryDeletionDisabledReason(conversationId, options);
       menu.addItem(menuItem => {
-        menuItem.setTitle('Delete').setDisabled(isRunning);
-        if (!isRunning) {
+        menuItem.setTitle('Delete').setDisabled(disabledReason !== null);
+        if (!disabledReason) {
           menuItem.onClick(() => {
             void this.runHistoryAction(
               () => this.deleteHistoryConversation(conversation, options),
@@ -2160,17 +2187,14 @@ export class ConversationController {
     if (!confirmed || this.deps.isDisposed?.()) return;
 
     const conversationId = conversation.id;
-    const status = this.getHistoryConversationStatus(
-      conversationId,
-      conversationId === state.currentConversationId ? 'current' : 'closed',
-      options,
-    );
-    if (status.isRunning) {
-      new Notice('Stop this session before deleting it.');
+    const disabledReason = this.getHistoryDeletionDisabledReason(conversationId, options);
+    if (disabledReason) {
+      new Notice(disabledReason);
       return;
     }
 
     await plugin.deleteConversation(conversationId);
+    if (this.deps.isDisposed?.()) return;
     options.onRerender();
 
     if (conversationId === state.currentConversationId) {
