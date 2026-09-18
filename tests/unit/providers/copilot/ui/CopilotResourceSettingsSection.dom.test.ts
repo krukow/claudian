@@ -74,12 +74,15 @@ import * as path from 'node:path';
 import { waitFor, within } from '@testing-library/dom';
 import { configureAxe } from 'jest-axe';
 
+import { ProviderExecutionLifecycleRegistry } from '@/core/execution/ProviderExecutionLifecycleRegistry';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
 import { ProviderWorkspaceRegistry } from '@/core/providers/ProviderWorkspaceRegistry';
 import type { ProviderSettingsTabRendererContext } from '@/core/providers/types';
 import type { ClaudianSettings } from '@/core/types';
 import { CopilotCommandLoader } from '@/providers/copilot/app/CopilotCommandLoader';
 import { CopilotCommandMetadataProbe } from '@/providers/copilot/app/CopilotCommandMetadataProbe';
+import { CopilotMcpReadinessCoordinator } from '@/providers/copilot/app/CopilotMcpReadinessCoordinator';
+import { CopilotMcpSignInCoordinator } from '@/providers/copilot/app/CopilotMcpSignInCoordinator';
 import type { CopilotWorkspaceServices } from '@/providers/copilot/app/CopilotWorkspaceServices';
 import {
   getCopilotHostResources,
@@ -89,9 +92,12 @@ import type { CopilotResourceSettings } from '@/providers/copilot/resources/Copi
 import { updateCopilotProviderSettings } from '@/providers/copilot/settings';
 import { renderCopilotResourceSettings } from '@/providers/copilot/ui/CopilotResourceSettingsSection';
 
+import { createDeferred, FakeCopilotSdkClient, FakeCopilotSdkRuntime } from '../sdk/FakeCopilotSdkRuntime';
+
 const checkAccessibility = configureAxe({ rules: { region: { enabled: false } } });
 
 let workspace = '';
+const cleanups: Array<() => Promise<void>> = [];
 
 jest.mock('node:os', () => ({
   ...jest.requireActual<typeof os>('node:os'),
@@ -122,20 +128,35 @@ function renderSection(options: {
   resources?: Partial<CopilotResourceSettings>;
   settings?: Record<string, unknown>;
   vaultDirectory?: string;
+  runtime?: FakeCopilotSdkRuntime;
 } = {}): {
   container: HTMLElement;
   commandLoader: CopilotCommandLoader;
   persistedSelections: CopilotResourceSettings[];
   settings: Record<string, unknown>;
+  dispose: () => void;
+  mcpSignIn: CopilotMcpSignInCoordinator;
 } {
   const settings = options.settings ?? { providerConfigs: {} };
+  updateCopilotProviderSettings(settings, {
+    enabled: true,
+    discoveredModels: [{
+      rawId: 'gpt-5-mini', displayName: 'GPT-5 mini',
+      reasoningEfforts: [], supportsReasoning: false, supportsVision: false,
+    }],
+    visibleModels: ['gpt-5-mini'],
+  });
   if (options.resources) {
     updateCopilotProviderSettings(settings, {
       resourcesByHost: updateCopilotHostResources(settings, options.resources),
     });
   }
   const persistedSelections: CopilotResourceSettings[] = [];
+  const registry = new ProviderExecutionLifecycleRegistry();
   const host = {
+    executionLifecycleRegistry: registry,
+    runProviderExecutionTransition: (ids: string[], action: () => Promise<void>) => registry.runTransition(ids, action),
+    getResolvedProviderCliPath: async () => '/usr/bin/copilot',
     app: { vault: { adapter: { basePath: options.vaultDirectory ?? path.join(workspace, 'vault') } } },
     applyProviderRuntimeSettings: async (
       _providerIds: readonly string[],
@@ -153,7 +174,10 @@ function renderSection(options: {
   } as unknown as ProviderHost;
 
   const commandLoader = new CopilotCommandLoader(new CopilotCommandMetadataProbe(host));
-  ProviderWorkspaceRegistry.setServices('copilot', { commandLoader } as CopilotWorkspaceServices);
+  const runtime = options.runtime ?? new FakeCopilotSdkRuntime();
+  const mcpReadiness = new CopilotMcpReadinessCoordinator(host, { runtime });
+  const mcpSignIn = new CopilotMcpSignInCoordinator(host, { runtime });
+  ProviderWorkspaceRegistry.setServices('copilot', { commandLoader, mcpReadiness, mcpSignIn } as CopilotWorkspaceServices);
 
   const context = {
     notifyProviderModelOptionsChanged: () => {},
@@ -164,8 +188,14 @@ function renderSection(options: {
   } as unknown as ProviderSettingsTabRendererContext;
 
   const container = document.body.appendChild(document.createElement('div'));
-  renderCopilotResourceSettings(container, context);
-  return { commandLoader, container, persistedSelections, settings };
+  const release = renderCopilotResourceSettings(container, context);
+  const dispose = () => { if (typeof release === 'function') release(); };
+  cleanups.push(async () => {
+    dispose();
+    await mcpReadiness.dispose();
+    await mcpSignIn.dispose();
+  });
+  return { commandLoader, container, persistedSelections, settings, dispose, mcpSignIn };
 }
 
 async function settle(): Promise<void> {
@@ -201,12 +231,145 @@ afterEach(async () => {
       throw new Error('Resource discovery is still running.');
     }
   });
+  for (const cleanup of cleanups.splice(0)) await cleanup();
   document.body.replaceChildren();
   ProviderWorkspaceRegistry.setServices('copilot', undefined);
   rmSync(workspace, { force: true, recursive: true });
 });
 
 describe('Copilot resource settings', () => {
+  it('checks enabled MCPs after rendering, keeps skills status-free, and does not probe on filters', async () => {
+    const configPath = write('home/.copilot/mcp-config.json', JSON.stringify({
+      mcpServers: {
+        notes: { type: 'http', url: 'https://example.test/mcp' },
+        disabled: { command: 'unused' },
+      },
+    }));
+    write('vault/.github/skills/review/SKILL.md', '---\nname: review\n---\n');
+    const listing = createDeferred();
+    const entered = createDeferred();
+    const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
+      onSessionCreated: session => {
+        session.mcpReadinessBehavior = async () => {
+          entered.resolve();
+          await listing.promise;
+          return { phase: 'connected', toolCount: 0 };
+        };
+      },
+    }));
+    const { container, persistedSelections } = renderSection({
+      runtime, resources: { selectedMcpServers: [{ configPath, name: 'notes' }], rememberMcpSignIns: true },
+    });
+    await entered.promise;
+    const notes = within(container).getByRole('checkbox', { name: /MCP server: notes/ }).closest('.claudian-copilot-resources-row')!;
+    expect(within(notes as HTMLElement).getByText('Checking...')).toBeTruthy();
+    expect(within(container).getByText('Disabled')).toBeTruthy();
+    const skills = within(container).getByRole('checkbox', { name: /Skill: review/ }).closest('.claudian-copilot-resources-row')!;
+    expect(within(skills as HTMLElement).queryByRole('button')).toBeNull();
+    expect(skills.querySelector('.claudian-copilot-mcp-readiness')).toBeNull();
+    listing.resolve();
+    await waitFor(() => expect(within(notes as HTMLElement).getByText('Connected (0 tools)')).toBeTruthy());
+    expect(within(notes as HTMLElement).queryByRole('button', { name: 'Sign in to notes' })).toBeNull();
+    expect(within(notes as HTMLElement).getByRole('button', { name: 'Check notes connection' })).toBeTruthy();
+    const input = within(container).getByRole('searchbox') as HTMLInputElement;
+    input.value = 'notes';
+    input.dispatchEvent(new Event('input'));
+    input.value = '';
+    input.dispatchEvent(new Event('input'));
+    await settle();
+    expect(runtime.clients).toHaveLength(1);
+    expect(persistedSelections).toEqual([]);
+    expect((await checkAccessibility(container)).violations).toEqual([]);
+  });
+
+  it('offers sign-in only when appropriate and explicitly rechecks an auth-required server', async () => {
+    const configPath = write('home/.copilot/mcp-config.json', JSON.stringify({
+      mcpServers: { notes: { type: 'http', url: 'https://example.test/mcp' } },
+    }));
+    let ready = false;
+    const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
+      onSessionCreated: session => {
+        session.mcpReadinessBehavior = async () => ready
+          ? { phase: 'connected', toolCount: 2 } : { phase: 'needs-auth' };
+      },
+    }));
+    const { container } = renderSection({
+      runtime, resources: { selectedMcpServers: [{ configPath, name: 'notes' }], rememberMcpSignIns: true },
+    });
+    await waitFor(() => expect(within(container).getByText('Sign-in required')).toBeTruthy());
+    expect(within(container).getAllByRole('button', { name: 'Sign in to notes' })).toHaveLength(1);
+    ready = true;
+    within(container).getByRole('button', { name: 'Check notes connection' }).click();
+    await waitFor(() => expect(within(container).getByText('Connected (2 tools)')).toBeTruthy());
+  });
+
+  it('rechecks after completed OAuth, not after handing off the URL, and waits for tool listing', async () => {
+    const configPath = write('home/.copilot/mcp-config.json', JSON.stringify({
+      mcpServers: { notes: { type: 'http', url: 'https://example.test/mcp' } },
+    }));
+    const reference = { configPath, name: 'notes' };
+    const listing = createDeferred();
+    const entered = createDeferred();
+    let authenticated = false;
+    const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
+      onSessionCreated: session => {
+        session.mcpSignInBehavior = async () => ({ authorizationUrl: 'https://example.test/authorize' });
+        session.mcpReadinessBehavior = async () => {
+          if (!authenticated) return { phase: 'needs-auth' };
+          entered.resolve();
+          await listing.promise;
+          return { phase: 'connected', toolCount: 1 };
+        };
+      },
+    }));
+    const { container, mcpSignIn } = renderSection({
+      runtime, resources: { selectedMcpServers: [reference], rememberMcpSignIns: true },
+    });
+    await waitFor(() => expect(within(container).getByText('Sign-in required')).toBeTruthy());
+    const signingIn = mcpSignIn.signIn(reference);
+    await waitFor(() => expect(mcpSignIn.getState(reference).phase).toBe('waiting'));
+    expect(container.textContent).not.toContain('Connected');
+    authenticated = true;
+    runtime.clients.at(-1)!.lastSession!.emit({
+      id: 'connected', parentId: null, timestamp: new Date().toISOString(),
+      type: 'session.mcp_server_status_changed', ephemeral: true,
+      data: { serverName: 'notes', status: 'connected' },
+    });
+    await signingIn;
+    await entered.promise;
+    expect(within(container).getByText('Checking...')).toBeTruthy();
+    expect(container.textContent).not.toContain('Connected');
+    listing.resolve();
+    await waitFor(() => expect(within(container).getByText('Connected (1 tool)')).toBeTruthy());
+  });
+
+  it('releases the view and fences its late readiness completion', async () => {
+    const configPath = write('home/.copilot/mcp-config.json', JSON.stringify({
+      mcpServers: { notes: { command: 'notes-mcp' } },
+    }));
+    const entered = createDeferred();
+    const listing = createDeferred();
+    const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
+      onSessionCreated: session => {
+        session.mcpReadinessBehavior = async () => {
+          entered.resolve();
+          await listing.promise;
+          return { phase: 'connected', toolCount: 1 };
+        };
+      },
+    }));
+    const { container, dispose } = renderSection({
+      runtime, resources: { selectedMcpServers: [{ configPath, name: 'notes' }] },
+    });
+    await entered.promise;
+    dispose();
+    const text = container.textContent;
+    listing.resolve();
+    await waitFor(() => expect(runtime.clients[0]?.stopped).toBe(1));
+    expect(container.textContent).toBe(text);
+    expect(container.textContent).not.toContain('Connected');
+  });
+
   it('automatically verifies selected resources without false missing labels or settings writes', async () => {
     const configPath = write('home/.copilot/mcp-config.json', JSON.stringify({
       mcpServers: { notes: { command: 'notes-mcp' } },
@@ -778,7 +941,7 @@ describe('Copilot resource settings', () => {
 
     for (const checkbox of [skill, local]) {
       const row = checkbox.closest('.claudian-copilot-resources-row')!;
-      expect(within(row as HTMLElement).queryAllByRole('button', { hidden: true })).toEqual([]);
+      expect(within(row as HTMLElement).queryAllByRole('button', { name: /Sign in/, hidden: true })).toEqual([]);
     }
     expect(within(container).getByRole('button', { name: 'Sign in to remote' })).toBeTruthy();
   });
@@ -806,7 +969,10 @@ describe('Copilot resource settings', () => {
     write('home/.copilot/mcp-config.json', JSON.stringify({
       mcpServers: { notes: { type: 'http', url: 'https://example.test/mcp' } },
     }));
-    const { container, settings } = renderSection();
+    const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
+      onSessionCreated: session => { session.mcpReadinessBehavior = async () => ({ phase: 'needs-auth' }); },
+    }));
+    const { container, settings } = renderSection({ runtime });
     const selected = await discovered(container, /MCP server: notes/);
     const signIn = within(container).getByRole('button', { name: 'Sign in to notes' }) as HTMLButtonElement;
     expect(signIn.type).toBe('button');
@@ -821,7 +987,9 @@ describe('Copilot resource settings', () => {
     await settle();
 
     expect(getCopilotHostResources(settings).rememberMcpSignIns).toBe(true);
-    expect(signIn.disabled).toBe(false);
+    await waitFor(() => {
+      expect((within(container).getByRole('button', { name: 'Sign in to notes' }) as HTMLButtonElement).disabled).toBe(false);
+    });
   });
 
   it('offers accessible native pressed kind filters and restores the unfiltered actions', async () => {

@@ -1,10 +1,11 @@
 import * as os from 'node:os';
 
-import { Setting } from 'obsidian';
+import { Notice, setIcon, Setting } from 'obsidian';
 
 import type { ProviderSettingsTabRendererContext } from '../../../core/providers/types';
 import type { ClaudianSettings } from '../../../core/types';
 import { getVaultPath } from '../../../utils/path';
+import type { CopilotMcpReadinessState } from '../app/CopilotMcpReadinessCoordinator';
 import { getCopilotWorkspaceServices } from '../app/CopilotWorkspaceServices';
 import {
   getCopilotHostResources,
@@ -31,7 +32,8 @@ const RESOURCES_DESCRIPTION = 'MCP servers and skills this computer offers, for 
   + 'Choices stay on this computer: Claudian stores the file a server is declared in and its name, never '
   + 'the definition, so a synced vault carries no commands, environment entries, or '
   + 'headers. Selections apply to chat only — the title, inline edit, and instruction '
-  + 'runs never start a server or load a skill.';
+  + 'runs never start a server or load a skill. Opening these settings checks enabled MCP '
+  + 'servers by connecting and listing tools; checks never invoke tools or open browser sign-in.';
 
 interface ResourceRow {
   readonly detail: string;
@@ -51,6 +53,7 @@ interface RenderedResourceRow {
   readonly name: HTMLElement;
   readonly detail: HTMLElement;
   signIn: HTMLButtonElement | null;
+  readiness: { element: HTMLElement; icon: HTMLElement; text: HTMLElement; check: HTMLButtonElement } | null;
   row: ResourceRow;
 }
 
@@ -69,7 +72,9 @@ type ResourceKindFilter = 'all' | ResourceRow['reference']['kind'];
 export function renderCopilotResourceSettings(
   container: HTMLElement,
   context: ProviderSettingsTabRendererContext,
-): void {
+): () => void {
+  const workspace = getCopilotWorkspaceServices();
+  let disposed = false;
   const settingsBag = context.plugin.settings as unknown as Record<string, unknown>;
   let inventory: CopilotResourceInventory | null = null;
   let discoveryFailure: string | null = null;
@@ -88,6 +93,7 @@ export function renderCopilotResourceSettings(
   });
 
   const persist = async (mutate: ResourceMutation): Promise<void> => {
+    if (disposed) return;
     saving += 1;
     renderStatus();
     try {
@@ -111,6 +117,7 @@ export function renderCopilotResourceSettings(
     }
     renderList();
     renderStatus();
+    if (!disposed && !saveFailure) check();
   };
 
   const rememberSetting = new Setting(container)
@@ -252,6 +259,7 @@ export function renderCopilotResourceSettings(
   };
 
   const discover = async (): Promise<void> => {
+    if (disposed) return;
     const refreshing = inventory !== null;
     discovering = true;
     discoveryFailure = null;
@@ -265,7 +273,7 @@ export function renderCopilotResourceSettings(
         homeDirectory: os.homedir(),
         vaultDirectory: getVaultPath(context.plugin.app) ?? '',
       });
-      if (refreshing) {
+      if (refreshing && !disposed) {
         await persist(() => ({}));
       }
     } catch (error) {
@@ -275,6 +283,7 @@ export function renderCopilotResourceSettings(
       renderList();
       renderStatus();
     }
+    if (!disposed && !discoveryFailure && !refreshing) check();
   };
 
   discoverButton.addEventListener('click', () => {
@@ -282,6 +291,7 @@ export function renderCopilotResourceSettings(
   });
 
   function renderStatus(): void {
+    if (disposed) return;
     remember.checked = getCopilotHostResources(settingsBag).rememberMcpSignIns === true;
     remember.disabled = saving > 0;
     discoverButton.disabled = discovering || saving > 0;
@@ -322,6 +332,7 @@ export function renderCopilotResourceSettings(
   }
 
   function renderList(): void {
+    if (disposed) return;
     problemsEl.empty();
     const selection = getCopilotHostResources(settingsBag);
     const rows = buildRows(selection, inventory, persist)
@@ -355,7 +366,34 @@ export function renderCopilotResourceSettings(
       if (rendered.name.textContent !== row.label) rendered.name.setText(row.label);
       const detail = row.missing ? `${row.detail} — not found on this computer` : row.detail;
       if (rendered.detail.textContent !== detail) rendered.detail.setText(detail);
-      if (row.supportsSignIn && row.reference.kind === 'mcp') {
+      const readiness = row.reference.kind === 'mcp'
+        ? workspace.mcpReadiness.getState(row.reference.server) : null;
+      if (row.reference.kind === 'mcp' && readiness) {
+        if (!rendered.readiness) {
+          const reference = row.reference.server;
+          const element = rendered.element.createDiv({ cls: 'claudian-copilot-mcp-readiness', attr: { 'aria-live': 'polite' } });
+          const icon = element.createSpan({ attr: { 'aria-hidden': 'true' } });
+          const text = element.createSpan();
+          const checkButton = element.createEl('button', {
+            cls: 'claudian-copilot-resources-action', text: 'Check',
+            attr: { type: 'button', 'aria-label': `Check ${reference.name} connection` },
+          });
+          checkButton.addEventListener('click', () => check(reference));
+          rendered.readiness = { element, icon, text, check: checkButton };
+        }
+        const view = rendered.readiness;
+        const phase = row.selected ? readiness.phase : 'disabled';
+        const text = row.selected ? readinessText(readiness) : 'Disabled';
+        if (view.text.textContent !== text) view.text.setText(text);
+        if (view.element.dataset.phase !== phase) {
+          view.element.dataset.phase = phase;
+          setIcon(view.icon, phase === 'connected' ? 'check' : phase === 'needs-auth' || phase === 'error' ? 'triangle-alert' : 'circle');
+        }
+        const disabled = !row.selected || row.missing || saving > 0 || phase === 'checking' || phase === 'queued';
+        if (view.check.disabled !== disabled) view.check.disabled = disabled;
+      }
+      if (row.supportsSignIn && row.reference.kind === 'mcp'
+        && (readiness?.phase === 'unchecked' || readiness?.phase === 'needs-auth')) {
         if (!rendered.signIn) {
           const reference = row.reference.server;
           rendered.signIn = rendered.element.createEl('button', {
@@ -364,7 +402,7 @@ export function renderCopilotResourceSettings(
             attr: { type: 'button', 'aria-label': `Sign in to ${reference.name}` },
           });
           rendered.signIn.addEventListener('click', () => {
-            new CopilotMcpSignInModal(context.plugin.app, getCopilotWorkspaceServices().mcpSignIn, reference).open();
+            if (!disposed) new CopilotMcpSignInModal(context.plugin.app, workspace.mcpSignIn, reference).open();
           });
         }
         const disabled = !row.selected || row.missing || selection.rememberMcpSignIns !== true;
@@ -391,8 +429,48 @@ export function renderCopilotResourceSettings(
     }
   }
 
+  function check(reference?: CopilotMcpServerReference): void {
+    if (disposed) return;
+    void workspace.mcpReadiness.check(reference).catch(error => {
+      new Notice(`MCP readiness check failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
+
+  const unsubscribeReadiness = workspace.mcpReadiness.subscribe(renderList);
+  const signInPhases = new Map(getCopilotHostResources(settingsBag).selectedMcpServers.map(reference => [
+    serverId(reference.configPath, reference.name), workspace.mcpSignIn.getState(reference).phase,
+  ]));
+  const unsubscribeSignIn = workspace.mcpSignIn.subscribe(() => {
+    for (const reference of getCopilotHostResources(settingsBag).selectedMcpServers) {
+      const id = serverId(reference.configPath, reference.name);
+      const phase = workspace.mcpSignIn.getState(reference).phase;
+      const previous = signInPhases.get(id);
+      signInPhases.set(id, phase);
+      if (phase === 'connected' && previous !== phase) check(reference);
+    }
+  });
   renderList();
   void discover();
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    unsubscribeReadiness();
+    unsubscribeSignIn();
+    void workspace.mcpReadiness.cancel().catch(error => {
+      new Notice(`Could not close MCP readiness checks: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  };
+}
+
+function readinessText(state: CopilotMcpReadinessState): string {
+  switch (state.phase) {
+    case 'unchecked': return 'Not checked';
+    case 'queued': return 'Queued';
+    case 'checking': return 'Checking...';
+    case 'connected': return `Connected (${state.toolCount} ${plural(state.toolCount, 'tool')})`;
+    case 'needs-auth': return 'Sign-in required';
+    case 'error': return `Check failed: ${state.message.split('\n')[0].slice(0, 240)} Retry with Check.`;
+  }
 }
 
 function renderRow(
@@ -414,7 +492,7 @@ function renderRow(
     text: row.missing ? `${row.detail} — not found on this computer` : row.detail,
   });
   const rendered: RenderedResourceRow = {
-    element: rowEl, checkbox: checkboxEl, name, detail, signIn: null, row,
+    element: rowEl, checkbox: checkboxEl, name, detail, signIn: null, readiness: null, row,
   };
   checkboxEl.addEventListener('change', () => {
     void rendered.row.toggle(checkboxEl.checked);

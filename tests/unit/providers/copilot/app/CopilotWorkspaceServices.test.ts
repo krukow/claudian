@@ -1,3 +1,4 @@
+import { ProviderExecutionLifecycleRegistry } from '@/core/execution/ProviderExecutionLifecycleRegistry';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
 import { createCopilotWorkspaceServices } from '@/providers/copilot/app/CopilotWorkspaceServices';
 import { computeCopilotEnvironmentHash } from '@/providers/copilot/env/CopilotSettingsReconciler';
@@ -36,7 +37,7 @@ function createHost(settings: Record<string, unknown> = {}): ProviderHost {
 
   return {
     app: { vault: { adapter: { basePath: '/vault' } } },
-    executionLifecycleRegistry: { getProviderGeneration: () => generations.get(settings) ?? 0 },
+    executionLifecycleRegistry: registryFor(settings),
     mutateSettings: (mutate: (settings: Record<string, unknown>) => void | Promise<void>) => (
       enqueue(() => mutate(settings))
     ),
@@ -47,12 +48,20 @@ function createHost(settings: Record<string, unknown> = {}): ProviderHost {
   } as unknown as ProviderHost;
 }
 
-/** Provider generations per settings bag, standing in for the lifecycle registry's. */
-const generations = new WeakMap<Record<string, unknown>, number>();
+const registries = new WeakMap<Record<string, unknown>, ProviderExecutionLifecycleRegistry>();
+
+function registryFor(settings: Record<string, unknown>): ProviderExecutionLifecycleRegistry {
+  let registry = registries.get(settings);
+  if (!registry) {
+    registry = new ProviderExecutionLifecycleRegistry();
+    registries.set(settings, registry);
+  }
+  return registry;
+}
 
 /** Records one runtime settings transition against the bag the host reads. */
-function advanceGeneration(settings: Record<string, unknown>): void {
-  generations.set(settings, (generations.get(settings) ?? 0) + 1);
+function advanceGeneration(settings: Record<string, unknown>): Promise<void> {
+  return registryFor(settings).runTransition(['copilot'], async () => {});
 }
 
 function createServices(host: ProviderHost, results: CopilotModelDiscoveryResult[]) {
@@ -414,9 +423,9 @@ describe('createCopilotWorkspaceServices.refreshModelCatalog under a runtime tha
           updateCopilotProviderSettings(settings, {
             cliPathsByHost: { [getHostnameKey()]: '/opt/homebrew/bin/copilot' },
           });
-          advanceGeneration(settings);
+          await advanceGeneration(settings);
           updateCopilotProviderSettings(settings, { cliPathsByHost: {} });
-          advanceGeneration(settings);
+          await advanceGeneration(settings);
           return { kind: 'loaded', models: [stale] };
         },
       },
@@ -443,7 +452,7 @@ describe('createCopilotWorkspaceServices.refreshModelCatalog under a runtime tha
         discoverModels: async () => {
           queued = host.mutateSettings(async () => {
             await applyQueuedChange.promise;
-            advanceGeneration(settings);
+            await advanceGeneration(settings);
           });
           return { kind: 'loaded', models: [stale] };
         },
@@ -462,7 +471,7 @@ describe('createCopilotWorkspaceServices.refreshModelCatalog under a runtime tha
   it('publishes the catalog when the runtime never moved', async () => {
     const settings: Record<string, unknown> = {};
     updateCopilotProviderSettings(settings, { enabled: true });
-    advanceGeneration(settings);
+    await advanceGeneration(settings);
     const host = createHost(settings);
     const services = createServices(host, [{ kind: 'loaded', models: [GPT_5] }]);
 

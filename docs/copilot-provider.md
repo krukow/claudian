@@ -68,7 +68,7 @@ Leave **CLI path** empty for automatic discovery. Set an absolute path only when
 | Plan mode | No |
 | Subagents and background agents | No |
 | Provider slash commands | Yes — the slash commands of enabled skills |
-| MCP servers | Yes — only the servers you selected, in chat |
+| MCP servers | Yes — selected servers in chat, plus isolated connection checks and sign-in |
 | Skills | Yes — repository defaults minus opt-outs, plus selected personal/custom folders, in chat |
 | Plugin selection | No — see the plugin isolation limit below |
 
@@ -97,6 +97,10 @@ Copilot chat can use MCP servers and skills that already exist on this computer.
 
 Bulk buttons name their scope: **Enable all skills / Disable all skills**, **Enable all MCP servers / Disable all MCP servers**, or **Enable all resources / Disable all resources**. While searching, they become **Enable search results / Disable search results**. They apply only to the current list and leave hidden choices unchanged. Bulk enable skips conflicting duplicate names so you can choose the intended source individually. Disabling repository skills records opt-outs; re-enabling removes them. Newly added repository skills follow the default-on policy, while newly discovered MCP servers and personal/custom skills remain off.
 
+The checkbox controls enablement, not connection status. Once the list renders, Claudian automatically checks selected MCP servers one at a time in temporary sessions, connecting and listing tools without invoking tools, loading skills, sending model turns, or opening browser sign-in. This uses your existing **Remember MCP sign-ins** choice without changing it. Filtering the list never starts checks.
+
+Each MCP row separately shows **Not checked**, **Queued**, **Checking...**, **Connected (N tools)**, **Sign-in required**, or an actionable failure. Connected requires both a native connection and a successful tool listing; zero tools is valid. A cached credential or an earlier sign-in is not enough. **Check** retries or refreshes the result without forcing sign-in. Disabled servers are not started, and skills have neither connection status nor sign-in controls. Leaving the Copilot tab cancels its queue and releases temporary sessions within the native operation/cleanup budgets; reopening performs fresh checks. Results are a point-in-time check, not continuous monitoring.
+
 After editing a skill in place, click **Refresh** to reload its native command metadata and rebuild the chat runtime without changing your selections.
 
 Repository detection uses the nearest containing `.git` directory or worktree `.git` file, including when the vault is a subdirectory such as `repo/content`. Claudian does not scan the entire repository or inherit skills from a surrounding outer repository. The automatic defaults apply without visiting settings first. A vault outside a Git repository keeps its local skills opt-in.
@@ -105,7 +109,7 @@ Repository detection uses the nearest containing `.git` directory or worktree `.
 
 A server marked `needs-auth` needs its own sign-in; allowing tool permissions does not authenticate it.
 
-Enable **Remember MCP sign-ins**, select the HTTP/SSE server, then choose **Sign in** beside it. Continue through the browser link and wait for **Signed in** before retrying your chat message. Only the chosen server participates in this sign-in flow; it receives no model tools. Existing Copilot chat runtimes are rebuilt after successful authentication to pick up the native credential cache.
+Enable **Remember MCP sign-ins**, select the HTTP/SSE server, then choose **Sign in** beside it when its state is unknown or sign-in is required. Continue through the browser link and wait for **Signed in**. The resource row automatically checks the connection and tools again after authentication completes, not merely after the browser link is offered. Connected servers offer **Check** instead of another Sign in button. Only the chosen server participates in sign-in; it receives no model tools. Existing Copilot chat runtimes are rebuilt after successful authentication to pick up the native credential cache; retry your chat message to use the server.
 
 Skills and local stdio servers have no Sign in control. Skills are instruction packages, not authenticated services. The native OAuth and cache-reuse flow is covered with a loopback test server; compatibility with an individual remote service still depends on that service's OAuth support.
 
@@ -131,7 +135,7 @@ An MCP configuration file is the format the Copilot CLI uses: a JSON document wi
 **Limits worth knowing**
 
 - Selecting a server permits connecting to it, independently of tool permissions. A session with no tools receives none of the server's tools. The skill-command discovery session uses the same effective skills as chat, with no MCP servers, tools, or model turn. It starts no CLI when no skills are enabled.
-- Resources reach chat only, and only while the turn's tools are not restricted. A read-only or otherwise narrowed turn, and every title, inline edit, and instruction-refinement run, starts no server and loads no skill.
+- Outside isolated MCP connection checks and sign-in, resources reach chat only, and only while the turn's tools are not restricted. A read-only or otherwise narrowed turn, and every title, inline edit, and instruction-refinement run, starts no server and loads no skill.
 - Environment entries and headers are passed to the CLI exactly as your configuration file spells them. There is no variable substitution or credential lookup, so a server that needs a secret needs it written literally in the file it is declared in — keep such a file outside the vault and select it as an additional source.
 - URL-discovered OAuth is supported through **Sign in**. Inline `auth`, `oauth`, `oidc`, `clientId`, `clientSecret`, and `deferTools` configuration fields are not supported; Claudian reports them rather than silently dropping them.
 - Only the tools a selected server actually offers are allowed, and a server's own `tools` restriction is kept. A server that is still starting is waited for while the session opens; one that failed, needs authentication, or is disabled contributes no tools and is reported on the turn rather than waited out.
