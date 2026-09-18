@@ -43,6 +43,7 @@ jest.mock('obsidian', () => {
 
     addButton(cb: (btn: any) => void) {
       const btn: any = {
+        buttonEl: createMockEl('button'),
         _onClick: null as null | (() => void),
         setButtonText: jest.fn().mockReturnThis(),
         setDestructive: jest.fn().mockReturnThis(),

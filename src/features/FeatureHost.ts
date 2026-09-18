@@ -2,6 +2,7 @@ import type { App, WorkspaceLeaf } from 'obsidian';
 
 import type { SharedAppStorage } from '../core/bootstrap/storage';
 import type { CollabComposerReferencePort } from '../core/collab';
+import type { ChatModelSelectionPort } from '../core/providers/ChatModelSelectionPort';
 import type { ProviderHost } from '../core/providers/ProviderHost';
 import type { AppTabManagerState, ProviderId } from '../core/providers/types';
 import type {
@@ -9,7 +10,6 @@ import type {
   Conversation,
   ConversationMeta,
   ConversationMutablePatch,
-  StoredChatModelSelection,
 } from '../core/types';
 import type { ChatExecutionPersistence } from './chat/execution/ChatExecutionCoordinator';
 import type { WarmExecutionPool } from './chat/execution/WarmExecutionPool';
@@ -43,14 +43,7 @@ export interface FeatureViewHost extends TabManagerViewHost {
   invalidateProviderResources(providerIds: ProviderId[], generation: number): void;
 }
 
-export interface ChatModelSelectionPort {
-  beginIntent(): number;
-  commitIntent(
-    intent: number,
-    selection: StoredChatModelSelection,
-    isStillValid: () => boolean,
-  ): Promise<boolean>;
-}
+export type { ChatModelSelectionPort } from '../core/providers/ChatModelSelectionPort';
 
 export interface CollabSidebarSurfaceController {
   /** Starts lazy construction and initialization without making the surface active. */

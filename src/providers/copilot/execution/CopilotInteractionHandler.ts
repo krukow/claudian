@@ -3,11 +3,13 @@ import { randomUUID } from 'node:crypto';
 import type { ProviderInteractionPort } from '../../../core/execution';
 import type { ProviderToolPolicy } from '../../../core/execution';
 import type {
+  CopilotSdkPermissionPrompt,
   CopilotSdkPermissionRequest,
   CopilotSdkPermissionResult,
   CopilotSdkUserInputRequest,
   CopilotSdkUserInputResponse,
 } from '../sdk/CopilotSdkPort';
+import type { CopilotPermissionMode } from '../settings';
 import { COPILOT_READ_ONLY_PERMISSION_KINDS } from './CopilotBuiltinTools';
 
 export interface CopilotInteractionHandlerOptions {
@@ -22,12 +24,14 @@ export interface CopilotInteractionHandlerOptions {
     sessionToken: object,
   ) => { readonly signal: AbortSignal; readonly turnId: string } | null;
   readonly getToolPolicy: () => ProviderToolPolicy | null;
+  readonly getPermissionMode?: () => CopilotPermissionMode;
 }
 
 /** The pair of native callbacks one acquired session is wired with. */
 export interface CopilotSessionInteractionHandlers {
   readonly handlePermissionRequest: (
     request: CopilotSdkPermissionRequest,
+    prompt?: CopilotSdkPermissionPrompt,
   ) => Promise<CopilotSdkPermissionResult>;
   readonly handleUserInputRequest: (
     request: CopilotSdkUserInputRequest,
@@ -39,7 +43,8 @@ export interface CopilotSessionInteractionHandlers {
  *
  * The policy is fail-closed at both ends: a request that arrives with no live turn, or
  * one the active tool policy forbids, is rejected without ever reaching the user, and an
- * approval is only granted because the user granted it. There is no blanket allow.
+ * approval is granted by a human or an explicit native judge recommendation. Native
+ * Allow all handles automatic grants itself; any remaining callback still asks a human.
  *
  * Handlers are bound per acquired session rather than shared, because a CLI session
  * Claudian dropped can still be running. Its late approval must be refused on its own
@@ -51,8 +56,8 @@ export class CopilotInteractionHandler {
   /** Wires the callbacks one native session is created with to that session's identity. */
   bind(sessionToken: object): CopilotSessionInteractionHandlers {
     return {
-      handlePermissionRequest: request => (
-        this.handlePermissionRequest(sessionToken, request)
+      handlePermissionRequest: (request, prompt) => (
+        this.handlePermissionRequest(sessionToken, request, prompt)
       ),
       handleUserInputRequest: request => this.handleUserInputRequest(sessionToken, request),
     };
@@ -61,9 +66,10 @@ export class CopilotInteractionHandler {
   private async handlePermissionRequest(
     sessionToken: object,
     request: CopilotSdkPermissionRequest,
+    prompt?: CopilotSdkPermissionPrompt,
   ): Promise<CopilotSdkPermissionResult> {
     const active = this.options.getActiveTurn(sessionToken);
-    if (!active) {
+    if (!active || active.signal.aborted || prompt?.signal?.aborted) {
       return { kind: 'reject', feedback: 'No Copilot turn is accepting approvals.' };
     }
 
@@ -75,6 +81,19 @@ export class CopilotInteractionHandler {
       };
     }
 
+    if (
+      this.options.getPermissionMode?.() === 'judge'
+      && (policy?.kind === 'provider-default' || policy?.kind === 'unrestricted')
+      && request.managedApprovalRequired !== true
+      && prompt?.managedApprovalRequired !== true
+      && prompt?.autoApproval?.recommendation === 'approve'
+    ) {
+      return { kind: 'approve-once' };
+    }
+
+    const signal = prompt?.signal
+      ? AbortSignal.any([active.signal, prompt.signal])
+      : active.signal;
     const response = await this.options.interactionPort.requestApproval({
       description: describePermission(request),
       input: toRecord(request),
@@ -84,7 +103,12 @@ export class CopilotInteractionHandler {
       sessionInstanceId: this.options.sessionInstanceId,
       toolName: request.kind,
       turnId: active.turnId,
-    }, active.signal);
+    }, signal);
+
+    const current = this.options.getActiveTurn(sessionToken);
+    if (signal.aborted || current?.turnId !== active.turnId || current.signal !== active.signal) {
+      return { kind: 'reject', feedback: 'The Copilot turn is no longer accepting approvals.' };
+    }
 
     switch (response.decision) {
       case 'allow':

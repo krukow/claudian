@@ -11,6 +11,7 @@ import type {
   ProviderInteractionPort,
   ProviderQuestionInteractionRequest,
   ProviderSessionConfig,
+  ProviderToolPolicy,
 } from '@/core/execution';
 import { ProviderExecutionLifecycleRegistry } from '@/core/execution';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
@@ -22,9 +23,14 @@ import {
 import type {
   CopilotSdkEvent,
   CopilotSdkPermissionRequest,
+  CopilotSdkPermissionResult,
   CopilotSdkUserInputRequest,
 } from '@/providers/copilot/sdk/CopilotSdkPort';
-import { updateCopilotProviderSettings } from '@/providers/copilot/settings';
+import {
+  type CopilotPermissionMode,
+  setCopilotPermissionMode,
+  updateCopilotProviderSettings,
+} from '@/providers/copilot/settings';
 import { getHostnameKey } from '@/utils/env';
 
 import {
@@ -133,6 +139,152 @@ function createRuntime(
     ...(onSessionCreated ? { onSessionCreated } : {}),
   }));
 }
+
+describe('CopilotExecutionSession permission profiles', () => {
+  it.each(['persistent', 'ephemeral'] as const)(
+    'only accepts the native judge recommendation for %s when that turn is eligible',
+    async lifecycle => {
+      const host = createHost();
+      setCopilotPermissionMode(host.settings, 'judge');
+      const approvals: ProviderApprovalInteractionRequest[] = [];
+      const results: CopilotSdkPermissionResult[] = [];
+      const config = createSessionConfig({ lifecycle });
+      const runtime = createRuntime(native => {
+        native.sendBehavior = async () => {
+          results.push(await native.requestPermission({
+            kind: 'read', intention: 'Read another note.', path: '/other/note.md',
+          }, { autoApproval: { recommendation: 'approve' } }));
+        };
+      });
+      const session = new CopilotExecutionBackend(host, { runtime }).createSession({
+        ...config,
+        interactionPort: {
+          ...config.interactionPort,
+          requestApproval: async request => {
+            approvals.push(request);
+            return { decision: 'deny', interactionId: request.interactionId };
+          },
+        },
+      });
+      try {
+        await collect(session.execute(createRequest()).events);
+
+        expect(results).toEqual([lifecycle === 'persistent'
+          ? { kind: 'approve-once' }
+          : { kind: 'reject', feedback: 'Denied by the user.' }]);
+        expect(approvals.map(request => request.toolName))
+          .toEqual(lifecycle === 'persistent' ? [] : ['read']);
+      } finally {
+        await session.dispose();
+      }
+    },
+  );
+
+  it.each<CopilotPermissionMode>(['ask', 'allow-all', 'judge'])(
+    'applies the explicit %s chat profile without widening tool selection',
+    async (mode) => {
+      const host = createHost();
+      setCopilotPermissionMode(host.settings, mode);
+      const runtime = createRuntime();
+      const session = new CopilotExecutionBackend(host, { runtime }).createSession(createSessionConfig());
+      try {
+        const events = await collect(session.execute(createRequest()).events);
+
+        expect(events.at(-1)).toMatchObject({ reason: 'completed', type: 'turn_completed' });
+        expect(runtime.lastClient?.lastSession?.config).toMatchObject({
+          availableTools: ['builtin:*'],
+          model: 'gpt-5',
+          permissionMode: mode,
+        });
+        expect([...(runtime.lastClient?.lastSession?.config.excludedTools ?? [])].sort()).toEqual([
+          'factories_manage', 'list_agents', 'read_agent', 'run_factory', 'task', 'write_agent',
+        ]);
+        expect(runtime.clientOptions[0].environment).not.toHaveProperty('COPILOT_ALLOW_ALL');
+      } finally {
+        await session.dispose();
+      }
+    },
+  );
+
+  describe.each<CopilotPermissionMode>(['allow-all', 'judge'])('with %s stored', (mode) => {
+    it.each<{ lifecycle: ProviderSessionConfig['lifecycle']; toolPolicy: ProviderToolPolicy }>([
+      { lifecycle: 'ephemeral', toolPolicy: { kind: 'provider-default' } },
+      { lifecycle: 'ephemeral', toolPolicy: { kind: 'unrestricted' } },
+      { lifecycle: 'ephemeral', toolPolicy: { kind: 'read-only' } },
+      { lifecycle: 'persistent', toolPolicy: { kind: 'passive' } },
+      { lifecycle: 'persistent', toolPolicy: { kind: 'read-only' } },
+      { lifecycle: 'persistent', toolPolicy: { kind: 'allow-list', names: ['view'] } },
+    ])('forces Ask for $lifecycle / $toolPolicy.kind', async ({ lifecycle, toolPolicy }) => {
+      const host = createHost();
+      setCopilotPermissionMode(host.settings, mode);
+      const runtime = createRuntime();
+      const session = new CopilotExecutionBackend(host, { runtime }).createSession(
+        createSessionConfig({ lifecycle }),
+      );
+      try {
+        const events = await collect(session.execute(createRequest({ toolPolicy })).events);
+
+        expect(events.at(-1)).toMatchObject({ reason: 'completed', type: 'turn_completed' });
+        expect(runtime.lastClient?.lastSession?.config.permissionMode).toBe('ask');
+      } finally {
+        await session.dispose();
+      }
+    });
+  });
+
+  it('reopens the same native conversation when the permission mode changes', async () => {
+    const host = createHost();
+    const runtime = createRuntime();
+    const session = new CopilotExecutionBackend(host, { runtime }).createSession(createSessionConfig());
+    const nativeSessions: FakeCopilotSdkSession[] = [];
+    try {
+      for (const mode of ['allow-all', 'ask', 'judge', 'ask'] as const) {
+        setCopilotPermissionMode(host.settings, mode);
+        await collect(session.execute(createRequest()).events);
+        const current = runtime.lastClient?.lastSession;
+        expect(current?.config.permissionMode).toBe(mode);
+        if (current) nativeSessions.push(current);
+      }
+
+      expect(new Set(nativeSessions).size).toBe(4);
+      expect(nativeSessions.map(native => native.sessionId))
+        .toEqual(Array(4).fill('copilot-session-1'));
+      expect(nativeSessions.slice(0, -1).map(native => native.disconnected)).toEqual([1, 1, 1]);
+      expect(runtime.lastClient?.deletedSessions).toEqual([]);
+    } finally {
+      await session.dispose();
+    }
+  });
+
+  it('captures the profile before asynchronous acquisition and uses a new choice next turn', async () => {
+    const entered = createDeferred();
+    const release = createDeferred();
+    const host = createHost();
+    setCopilotPermissionMode(host.settings, 'allow-all');
+    const runtime = new FakeCopilotSdkRuntime(async () => {
+      entered.resolve();
+      await release.promise;
+      return new FakeCopilotSdkClient();
+    });
+    const session = new CopilotExecutionBackend(host, { runtime }).createSession(createSessionConfig());
+    try {
+      const first = collect(session.execute(createRequest()).events);
+      await entered.promise;
+      setCopilotPermissionMode(host.settings, 'judge');
+      release.resolve();
+      await first;
+
+      expect(runtime.lastClient?.lastSession?.config.permissionMode).toBe('allow-all');
+
+      await collect(session.execute(createRequest()).events);
+
+      expect(runtime.lastClient?.lastSession?.config.permissionMode).toBe('judge');
+    } finally {
+      release.resolve();
+      await session.dispose();
+    }
+  });
+});
 
 describe('CopilotExecutionBackend', () => {
   it('creates sessions bound to the vault working directory', () => {
@@ -1667,16 +1819,21 @@ describe('CopilotExecutionSession bounded native shutdown', () => {
 
   it('reports the turn failure when the reset disconnect never answers', async () => {
     await withFakeTimers(async () => {
+      const disconnecting = createDeferred();
       const runtime = createRuntime((created) => {
         created.sendBehavior = async () => {
           throw new Error('Session copilot-session-1 does not exist');
         };
-        created.disconnectBehavior = () => new Promise<void>(() => {});
+        created.disconnectBehavior = () => {
+          disconnecting.resolve();
+          return neverAnswers();
+        };
       });
       const session = new CopilotExecutionBackend(createHost(), { runtime })
         .createSession(createSessionConfig());
 
       const collected = collect(session.execute(createRequest()).events);
+      await disconnecting.promise;
       await jest.advanceTimersByTimeAsync(10_000);
       const events = turnFlow(await collected);
 
@@ -1973,11 +2130,13 @@ describe('CopilotExecutionSession late native answers', () => {
       let collected: ProviderExecutionEvent[] = [];
 
       await withFakeTimers(async () => {
+        const disconnecting = createDeferred();
         const runtime = createRuntime((created) => {
           created.sendBehavior = async () => {
             throw new Error('Session copilot-session-1 does not exist');
           };
           created.disconnectBehavior = () => new Promise<void>((_resolve, reject) => {
+            disconnecting.resolve();
             window.setTimeout(() => reject(new Error('too late')), 60_000);
           });
         });
@@ -1985,6 +2144,7 @@ describe('CopilotExecutionSession late native answers', () => {
           .createSession(createSessionConfig());
 
         const events = collect(session.execute(createRequest()).events);
+        await disconnecting.promise;
         await jest.advanceTimersByTimeAsync(10_000);
         collected = turnFlow(await events);
 
@@ -2015,12 +2175,19 @@ describe('CopilotExecutionSession bounded native acquisition', () => {
   it('fails a turn whose authentication gate never answers, and abandons the client',
     async () => {
       await withFakeTimers(async () => {
-        const client = new FakeCopilotSdkClient({ authStatusBehavior: neverAnswers });
+        const authenticating = createDeferred();
+        const client = new FakeCopilotSdkClient({
+          authStatusBehavior: () => {
+            authenticating.resolve();
+            return neverAnswers();
+          },
+        });
         const runtime = new FakeCopilotSdkRuntime(() => client);
         const session = new CopilotExecutionBackend(createHost(), { runtime })
           .createSession(createSessionConfig());
 
         const collected = collect(session.execute(createRequest()).events);
+        await authenticating.promise;
         await jest.advanceTimersByTimeAsync(30_000);
         const events = turnFlow(await collected);
 
@@ -2217,10 +2384,14 @@ describe('CopilotExecutionSession bounded native acquisition', () => {
    */
   it('drops a live session whose model change never answers', async () => {
     await withFakeTimers(async () => {
+      const changingModel = createDeferred();
       const client = new FakeCopilotSdkClient({
         onSessionCreated: (created) => {
           if (created.sessionId !== 'copilot-session-1') return;
-          created.setModelBehavior = neverAnswers;
+          created.setModelBehavior = () => {
+            changingModel.resolve();
+            return neverAnswers();
+          };
         },
       });
       const runtime = new FakeCopilotSdkRuntime(() => client);
@@ -2229,6 +2400,7 @@ describe('CopilotExecutionSession bounded native acquisition', () => {
 
       await collect(session.execute(createRequest()).events);
       const collected = collect(session.execute(createRequest()).events);
+      await changingModel.promise;
       await jest.advanceTimersByTimeAsync(30_000);
       const events = turnFlow(await collected);
 
@@ -2373,6 +2545,7 @@ describe('Copilot session resources', () => {
   });
 
   async function writeSelection(host: ProviderHost, overrides: {
+    rememberMcpSignIns?: boolean;
     selectedMcpServers?: Array<{ configPath: string; name: string }>;
     selectedSkillPaths?: string[];
   }): Promise<void> {
@@ -2381,6 +2554,7 @@ describe('Copilot session resources', () => {
         [getHostnameKey()]: {
           additionalMcpConfigPaths: [],
           additionalSkillRoots: [],
+          ...(overrides.rememberMcpSignIns ? { rememberMcpSignIns: true } : {}),
           selectedMcpServers: overrides.selectedMcpServers ?? [],
           selectedSkillPaths: overrides.selectedSkillPaths ?? [],
         },
@@ -2427,6 +2601,68 @@ describe('Copilot session resources', () => {
     await session.dispose();
   });
 
+  it('loads repository skills without visiting settings and cold-restarts after a per-skill opt-out', async () => {
+    const vault = path.join(resourceRoot, 'content');
+    const skillPath = path.join(resourceRoot, '.github', 'skills', 'repo-review', 'SKILL.md');
+    await mkdir(vault);
+    await mkdir(path.join(resourceRoot, '.git'));
+    await mkdir(path.dirname(skillPath), { recursive: true });
+    await writeFile(skillPath, '---\nname: repo-review\n---\nReview notes.\n');
+    const host = createHost();
+    const runtime = createRuntime();
+    const session = new CopilotExecutionBackend(host, { runtime }).createSession(
+      createSessionConfig({ vaultWorkingDirectory: vault }),
+    );
+    try {
+      await collect(session.execute(createRequest()).events);
+      expect(runtime.lastClient?.lastSession?.config.resources).toEqual({
+        mcpServers: {}, skillDirectories: [path.dirname(skillPath)],
+      });
+      updateCopilotProviderSettings(host.settings, {
+        resourcesByHost: {
+          [getHostnameKey()]: {
+            additionalMcpConfigPaths: [], additionalSkillRoots: [], selectedMcpServers: [],
+            selectedSkillPaths: [], disabledRepositorySkillPaths: [skillPath],
+          },
+        },
+      });
+
+      await collect(session.execute(createRequest()).events);
+
+      expect(runtime.clients.map(client => client.lastSession?.config.resources)).toEqual([
+        { mcpServers: {}, skillDirectories: [path.dirname(skillPath)] }, undefined,
+      ]);
+      expect(runtime.clients.map(client => client.lastSession?.sessionId))
+        .toEqual(['copilot-session-1', 'copilot-session-1']);
+    } finally {
+      await session.dispose();
+    }
+  });
+
+  it('cold restarts the same conversation when OAuth token storage changes', async () => {
+    const configPath = await writeMcpConfig('notes', '/usr/bin/notes-mcp');
+    const host = createHost();
+    const runtime = createRuntime();
+    const session = new CopilotExecutionBackend(host, { runtime }).createSession(createSessionConfig());
+    try {
+      for (const rememberMcpSignIns of [false, true, false]) {
+        await writeSelection(host, {
+          rememberMcpSignIns,
+          selectedMcpServers: [{ configPath, name: 'notes' }],
+        });
+        await collect(session.execute(createRequest()).events);
+      }
+
+      expect(runtime.clients.map(client => client.lastSession?.config.resources?.mcpOAuthTokenStorage))
+        .toEqual([undefined, 'persistent', undefined]);
+      expect(runtime.clients.map(client => client.lastSession?.sessionId))
+        .toEqual(['copilot-session-1', 'copilot-session-1', 'copilot-session-1']);
+      expect(runtime.clients.map(client => client.stopped)).toEqual([1, 1, 0]);
+    } finally {
+      await session.dispose();
+    }
+  });
+
   it.each([
     ['an ephemeral session', { lifecycle: 'ephemeral' as const }, {}],
     ['a read-only turn', {}, { toolPolicy: { kind: 'read-only' as const } }],
@@ -2438,11 +2674,15 @@ describe('Copilot session resources', () => {
     ],
   ])('leaves %s resource-free', async (_name, sessionOverrides, requestOverrides) => {
     const configPath = await writeMcpConfig('notes', '/usr/bin/notes-mcp');
+    await mkdir(path.join(resourceRoot, '.git'));
+    const repositorySkill = path.join(resourceRoot, '.github', 'skills', 'repo-review', 'SKILL.md');
+    await mkdir(path.dirname(repositorySkill), { recursive: true });
+    await writeFile(repositorySkill, '---\nname: repo-review\n---\n');
     const host = createHost();
     await writeSelection(host, { selectedMcpServers: [{ configPath, name: 'notes' }] });
     const runtime = createRuntime();
     const session = new CopilotExecutionBackend(host, { runtime }).createSession(
-      createSessionConfig(sessionOverrides),
+      createSessionConfig({ ...sessionOverrides, vaultWorkingDirectory: resourceRoot }),
     );
 
     await collect(session.execute(createRequest(requestOverrides)).events);

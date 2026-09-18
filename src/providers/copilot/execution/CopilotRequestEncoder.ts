@@ -15,6 +15,7 @@ import type {
   CopilotSdkSessionResources,
   CopilotSdkSystemMessage,
 } from '../sdk/CopilotSdkPort';
+import type { CopilotPermissionMode } from '../settings';
 import {
   COPILOT_ALLOWABLE_BUILTIN_TOOLS,
   COPILOT_READ_ONLY_TOOL_FILTERS,
@@ -52,8 +53,8 @@ const COPILOT_EVERY_BUILTIN_FILTER = 'builtin:*';
  * permitted — `allow-list` is qualified and validated the same way rather than handing raw
  * names to the CLI, and the policies that restrict nothing say so as the widest pattern
  * the SDK defines for one source rather than by staying silent. No branch ever passes
- * `--allow-all` or an equivalent global bypass, and `unrestricted` still routes through
- * the approval prompt.
+ * `--allow-all` or an equivalent global bypass. Permission modes are separate from tool
+ * availability, so Allow all cannot make an unavailable tool available.
  *
  * The two widest policies are the only ones that need a deny-list, because
  * `builtin:*` matches the task and factory families the narrower policies simply never
@@ -228,6 +229,7 @@ export function encodeReasoningEffort(
  */
 export function encodeSessionIdentity(input: {
   readonly additionalDirectories: readonly string[];
+  readonly permissionMode?: CopilotPermissionMode;
   readonly resources?: CopilotSdkSessionResources;
   readonly toolSelection: CopilotToolSelection;
   readonly systemMessage: CopilotSdkSystemMessage;
@@ -239,10 +241,22 @@ export function encodeSessionIdentity(input: {
     excludedTools: input.toolSelection.excludedTools
       ? [...input.toolSelection.excludedTools].sort()
       : null,
+    permissionMode: input.permissionMode ?? 'ask',
     resources: encodeCopilotResourceDigest(input.resources),
     systemMessage: input.systemMessage,
     workingDirectory: input.workingDirectory,
   });
+}
+
+export function encodeCopilotPermissionMode(
+  lifecycle: ProviderSessionLifecycle,
+  policy: ProviderToolPolicy,
+  mode: CopilotPermissionMode,
+): CopilotPermissionMode {
+  return lifecycle === 'persistent'
+    && (policy.kind === 'provider-default' || policy.kind === 'unrestricted')
+    ? mode
+    : 'ask';
 }
 
 /**
@@ -257,6 +271,7 @@ export function encodeCopilotResourceDigest(
     return null;
   }
   const canonical = JSON.stringify({
+    mcpOAuthTokenStorage: resources.mcpOAuthTokenStorage ?? 'in-memory',
     mcpServers: Object.keys(resources.mcpServers).sort().map(name => [
       name,
       resources.mcpServers[name],

@@ -35,7 +35,7 @@ async function writeSkill(name: string): Promise<string> {
   return skillPath;
 }
 
-function createHost(selectedSkillPaths: string[] = []): ProviderHost {
+function createHost(selectedSkillPaths: string[] = [], vaultDirectory = VAULT_PATH): ProviderHost {
   const settings: Record<string, unknown> = {};
   updateCopilotProviderSettings(settings, {
     discoveredModels: [{
@@ -59,7 +59,7 @@ function createHost(selectedSkillPaths: string[] = []): ProviderHost {
   });
 
   return {
-    app: { vault: { adapter: { basePath: VAULT_PATH } } },
+    app: { vault: { adapter: { basePath: vaultDirectory } } },
     getResolvedProviderCliPath: async () => '/usr/local/bin/copilot',
     settings,
   } as unknown as ProviderHost;
@@ -75,16 +75,47 @@ function loaderContext(): ProviderCommandLoaderContext {
 }
 
 describe('CopilotCommandLoader', () => {
-  it('offers no commands until a skill is selected', async () => {
+  it('can discover repository commands without an explicit skill selection', async () => {
     const skillPath = await writeSkill('review');
     const probe = new CopilotCommandMetadataProbe(createHost());
 
     expect(new CopilotCommandLoader(probe).isAvailable(
       createHost().settings as unknown as Record<string, unknown>,
-    )).toBe(false);
+    )).toBe(true);
     expect(new CopilotCommandLoader(probe).isAvailable(
       createHost([skillPath]).settings as unknown as Record<string, unknown>,
     )).toBe(true);
+  });
+
+  it('lists automatically enabled repository skills on an isolated, tool-free runtime', async () => {
+    const vault = path.join(skillRoot, 'content');
+    const skillPath = path.join(skillRoot, '.github', 'skills', 'repo-review', 'SKILL.md');
+    await mkdir(vault);
+    await mkdir(path.join(skillRoot, '.git'));
+    await mkdir(path.dirname(skillPath), { recursive: true });
+    await writeFile(skillPath, '---\nname: repo-review\n---\nReview notes.\n');
+    const client = new FakeCopilotSdkClient({
+      onSessionCreated: session => { session.skillCommands = [{ name: 'repo-review' }]; },
+    });
+    const host = createHost([], vault);
+    const loader = new CopilotCommandLoader(new CopilotCommandMetadataProbe(host, {
+      runtime: new FakeCopilotSdkRuntime(() => client),
+    }));
+
+    const result = await loader.loadCommands(loaderContext());
+
+    expect(loader.isAvailable(host.settings)).toBe(true);
+    expect(result).toEqual({
+      status: 'ready',
+      items: [{
+        content: '', id: 'copilot-skill-repo-review', kind: 'skill',
+        name: 'repo-review', source: 'sdk', userInvocable: true,
+      }],
+    });
+    expect(client.lastSession?.config.resources).toEqual({
+      mcpServers: {}, skillDirectories: [path.dirname(skillPath)],
+    });
+    expect(client.lastSession?.config.availableTools).toEqual([]);
   });
 
   /**
@@ -104,6 +135,24 @@ describe('CopilotCommandLoader', () => {
     ));
     loader.requestRefresh();
     expect(loader.getCacheFingerprint(settings)).not.toEqual(fingerprint);
+  });
+
+  it('invalidates command metadata when a repository skill is disabled', () => {
+    const host = createHost();
+    const loader = new CopilotCommandLoader(new CopilotCommandMetadataProbe(host));
+    const before = loader.getCacheFingerprint(host.settings);
+    const skillPath = '/repo/.github/skills/review/SKILL.md';
+    updateCopilotProviderSettings(host.settings, {
+      resourcesByHost: {
+        [getHostnameKey()]: {
+          additionalMcpConfigPaths: [], additionalSkillRoots: [], selectedMcpServers: [],
+          selectedSkillPaths: [], disabledRepositorySkillPaths: [skillPath],
+        },
+      },
+    });
+
+    expect(loader.getCacheFingerprint(host.settings)).not.toBe(before);
+    expect(loader.getCacheFingerprint(host.settings)).not.toContain(skillPath);
   });
 
   /**

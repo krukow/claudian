@@ -97,6 +97,16 @@ export class CopilotClientFactory {
     return client;
   }
 
+  /** Onboarding may inspect a signed-out account without weakening the execution gate. */
+  async getAuthStatus(identity: CopilotClientIdentity): Promise<CopilotSdkAuthStatus> {
+    const client = await this.startClient(identity);
+    try {
+      return await this.readAuthStatus(client);
+    } finally {
+      await client.stop();
+    }
+  }
+
   /**
    * Starts a client under the startup budget.
    *

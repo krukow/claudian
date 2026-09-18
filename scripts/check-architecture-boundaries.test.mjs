@@ -572,13 +572,14 @@ test('renderer source does not import AsyncLocalStorage', () => {
 /**
  * The Copilot SDK owns spawning the CLI, including `windowsHide` and the choice between
  * launching a JavaScript entry through the Node executable and running a binary directly.
- * A spawn inside the provider would duplicate that decision and lose those guarantees.
+ * Browser login is the narrow exception: it uses the shared supervised process owner,
+ * because the SDK does not initiate interactive OAuth. It never runs agent turns.
  *
  * Whether a call starts a process is decided on the syntax tree, because the name alone
  * does not say: `pattern.exec(line)` matches a regular expression, and `store.exec(sql)`
  * runs a statement. Only a call that resolves to a process-module binding counts.
  */
-test('the Copilot provider never spawns the CLI itself', () => {
+test('Copilot execution uses the SDK and only browser login uses a supervised process', () => {
   const copilotRoot = path.join(providersRoot, 'copilot');
   const violations = findProcessSpawnFiles(
     listTypeScriptFiles(copilotRoot).map(normalizeRepositoryPath),
@@ -586,6 +587,10 @@ test('the Copilot provider never spawns the CLI itself', () => {
   );
 
   assert.deepEqual(violations, []);
+  assert.deepEqual(
+    findMatches([copilotRoot], /from\s+['"][^'"]*ManagedStdioProcess['"]/),
+    ['src/providers/copilot/runtime/CopilotBrowserLogin.ts'],
+  );
 });
 
 /**

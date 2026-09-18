@@ -2,7 +2,30 @@
  * @jest-environment jsdom
  */
 
+jest.mock('node:os', () => ({
+  ...jest.requireActual('node:os'),
+  homedir: () => mockHomeDirectory,
+}));
+
 jest.mock('obsidian', () => {
+  class MockButtonComponent {
+    buttonEl = document.createElement('button');
+
+    constructor(container: HTMLElement) {
+      container.appendChild(this.buttonEl);
+    }
+
+    setButtonText(text: string): this {
+      this.buttonEl.textContent = text;
+      return this;
+    }
+
+    onClick(callback: () => void): this {
+      this.buttonEl.addEventListener('click', callback);
+      return this;
+    }
+  }
+
   class MockToggleComponent {
     toggleEl = document.createElement('input');
     private callback: ((value: boolean) => Promise<void> | void) | null = null;
@@ -81,6 +104,25 @@ jest.mock('obsidian', () => {
     }
   }
 
+  class MockDropdownComponent {
+    readonly selectEl: HTMLSelectElement;
+    constructor(container: HTMLElement) {
+      this.selectEl = container.appendChild(document.createElement('select'));
+    }
+    addOption(value: string, text: string): this {
+      const option = this.selectEl.appendChild(document.createElement('option'));
+      option.value = value;
+      option.textContent = text;
+      return this;
+    }
+    setValue(value: string): this { this.selectEl.value = value; return this; }
+    setDisabled(disabled: boolean): this { this.selectEl.disabled = disabled; return this; }
+    onChange(callback: (value: string) => void): this {
+      this.selectEl.addEventListener('change', () => callback(this.selectEl.value));
+      return this;
+    }
+  }
+
   class MockSetting {
     controlEl = document.createElement('div');
     descEl = document.createElement('div');
@@ -90,6 +132,16 @@ jest.mock('obsidian', () => {
     constructor(container: HTMLElement) {
       this.settingEl.append(this.nameEl, this.descEl, this.controlEl);
       container.appendChild(this.settingEl);
+    }
+
+    addButton(callback: (button: MockButtonComponent) => void): this {
+      callback(new MockButtonComponent(this.controlEl));
+      return this;
+    }
+
+    addDropdown(callback: (dropdown: MockDropdownComponent) => void): this {
+      callback(new MockDropdownComponent(this.controlEl));
+      return this;
     }
 
     addTextArea(callback: (text: MockTextAreaComponent) => void): this {
@@ -130,8 +182,13 @@ jest.mock('obsidian', () => {
   };
 });
 
-import { screen, within } from '@testing-library/dom';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
+import { screen, waitFor, within } from '@testing-library/dom';
 import { configureAxe } from 'jest-axe';
+import type { App } from 'obsidian';
 
 import type { ProviderHost } from '@/core/providers/ProviderHost';
 import { ProviderWorkspaceRegistry } from '@/core/providers/ProviderWorkspaceRegistry';
@@ -143,6 +200,9 @@ import { getCopilotProviderSettings } from '@/providers/copilot/settings';
 import { copilotSettingsTabRenderer } from '@/providers/copilot/ui/CopilotSettingsTab';
 
 const checkAccessibility = configureAxe({ rules: { region: { enabled: false } } });
+let workspace = '';
+let mockHomeDirectory = '';
+const renderedContainers: HTMLElement[] = [];
 
 interface Harness {
   readonly container: HTMLElement;
@@ -182,12 +242,14 @@ function createHost(settings: Record<string, unknown>): ProviderHost {
 
   const host: Pick<
     ProviderHost,
-    'applyProviderRuntimeSettings'
+    'app'
+    | 'applyProviderRuntimeSettings'
     | 'getEnvironmentVariablesForScope'
     | 'mutateSettings'
     | 'runProviderExecutionTransition'
     | 'settings'
   > = {
+    app: { vault: { adapter: { basePath: path.join(workspace, 'vault') } } } as unknown as App,
     applyProviderRuntimeSettings: async (_providerIds, mutation, onApplied) => {
       await applyMutation(mutation);
       await onApplied?.();
@@ -222,6 +284,7 @@ function renderSettingsTab(
     renderHiddenProviderCommandSetting: () => {},
   };
   const container = document.body.appendChild(document.createElement('div'));
+  renderedContainers.push(container);
   copilotSettingsTabRenderer.render(container, context);
   return { container, settings };
 }
@@ -246,9 +309,22 @@ describe('Copilot settings tab', () => {
     registerBuiltInProviders();
   });
 
-  afterEach(() => {
+  beforeEach(() => {
+    workspace = mkdtempSync(path.join(os.tmpdir(), 'copilot-settings-ui-'));
+    mockHomeDirectory = path.join(workspace, 'home');
+    mkdirSync(mockHomeDirectory);
+    mkdirSync(path.join(workspace, 'vault'));
+  });
+
+  afterEach(async () => {
+    await Promise.all(renderedContainers.map(container => waitFor(() => {
+      const refresh = container.querySelector<HTMLButtonElement>('[aria-label="Refresh resources"]');
+      if (!refresh || refresh.disabled) throw new Error('Resource discovery has not finished.');
+    })));
+    renderedContainers.length = 0;
     document.body.replaceChildren();
     ProviderWorkspaceRegistry.setServices('copilot', undefined);
+    rmSync(workspace, { recursive: true, force: true });
   });
 
   it('offers the provider switched off, and turns it on through the shared coordinator', async () => {

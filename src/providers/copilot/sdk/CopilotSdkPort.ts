@@ -1,4 +1,5 @@
 import type { CopilotReasoningEffort } from '../models';
+import type { CopilotPermissionMode } from '../settings';
 import type {
   MCPServerConfig,
   ModelInfo,
@@ -23,6 +24,15 @@ export type CopilotSdkMcpServerConfig = MCPServerConfig;
 export type CopilotSdkModel = ModelInfo;
 export type CopilotSdkPermissionRequest = PermissionRequest;
 export type CopilotSdkPermissionResult = PermissionRequestResult;
+/** Metadata available on permission events, but omitted from the SDK callback. */
+export type CopilotSdkPermissionPrompt = Pick<
+  NonNullable<Extract<SessionEvent, { type: 'permission.requested' }>['data']['promptRequest']>,
+  'autoApproval'
+> & {
+  readonly managedApprovalRequired?: boolean;
+  /** Ends when the native prompt is resolved, cancelled, or loses its turn. */
+  readonly signal?: AbortSignal;
+};
 export type CopilotSdkUserInputRequest = Parameters<UserInputHandler>[0];
 export type CopilotSdkUserInputResponse = Awaited<ReturnType<UserInputHandler>>;
 
@@ -54,10 +64,9 @@ export interface CopilotSdkClientOptions {
 /**
  * What a caller decides about a session.
  *
- * Everything a session could use to read the user's global Copilot configuration or act
- * outside the vault is deliberately absent: plugin and instruction directories, file
+ * Ambient configuration and integrations are deliberately absent: plugin and instruction directories, file
  * hooks, host git operations, the cross-session store, memory, remote export, telemetry,
- * persistent embedding and OAuth storage, and runtime configuration discovery are stated
+ * persistent embedding storage, and runtime configuration discovery are stated
  * by `CopilotSdkRuntime` on every create and resume, and cannot be reached — or weakened —
  * from here. MCP servers and skills reach a session only through {@link resources}, which
  * names each one; a session without it starts none, including the ones the CLI's own home
@@ -84,10 +93,13 @@ export interface CopilotSdkSessionConfig {
   readonly onEvent: (event: CopilotSdkEvent) => void;
   readonly onPermissionRequest: (
     request: CopilotSdkPermissionRequest,
+    prompt?: CopilotSdkPermissionPrompt,
   ) => Promise<CopilotSdkPermissionResult>;
   readonly onUserInputRequest: (
     request: CopilotSdkUserInputRequest,
   ) => Promise<CopilotSdkUserInputResponse>;
+  /** Defaults to Ask. Only eligible persistent chat uses the explicit host choice. */
+  readonly permissionMode?: CopilotPermissionMode;
   readonly reasoningEffort?: CopilotReasoningEffort;
   /** The named MCP servers and skills this session may use. Absent means none of them. */
   readonly resources?: CopilotSdkSessionResources;
@@ -111,6 +123,8 @@ export interface CopilotSdkSessionConfig {
  * and only with the exact tools its selected servers offer.
  */
 export interface CopilotSdkSessionResources {
+  /** Defaults to memory. Native persistence may fall back to plaintext outside the vault. */
+  readonly mcpOAuthTokenStorage?: 'in-memory' | 'persistent';
   readonly mcpServers: Readonly<Record<string, CopilotSdkMcpServerConfig>>;
   readonly skillDirectories: readonly string[];
 }
@@ -147,6 +161,11 @@ export interface CopilotSdkSession {
    * answers with a prompt the caller has to submit; nothing is sent by invoking it.
    */
   invokeSkillCommand(name: string, input: string): Promise<CopilotSdkSkillInvocation>;
+  /**
+   * Starts native OAuth for a selected server. A URL means user authorization is pending;
+   * an empty result means cached credentials already reconnected the server.
+   */
+  signInMcpServer(serverName: string): Promise<{ authorizationUrl?: string }>;
   /**
    * Stops the running turn. Resolves once the runtime acknowledges the abort, and rejects
    * when it could not: the caller may only reuse the session in the first case.

@@ -10,17 +10,24 @@ import {
   type CopilotSessionInteractionHandlers,
 } from '@/providers/copilot/execution/CopilotInteractionHandler';
 import type {
+  CopilotSdkPermissionPrompt,
   CopilotSdkPermissionRequest,
   CopilotSdkUserInputRequest,
 } from '@/providers/copilot/sdk/CopilotSdkPort';
+import type { CopilotPermissionMode } from '@/providers/copilot/settings';
+
+import { createDeferred } from '../sdk/FakeCopilotSdkRuntime';
 
 interface HandlerHarness {
   readonly approvalRequests: ProviderApprovalInteractionRequest[];
+  readonly approvalSignals: AbortSignal[];
   readonly dismissals: Array<{ interactionId: string; reason: string }>;
   readonly handler: CopilotSessionInteractionHandlers;
   readonly questionRequests: ProviderQuestionInteractionRequest[];
   /** Callbacks for a session the handler no longer recognizes. */
   readonly staleHandler: CopilotSessionInteractionHandlers;
+  cancelTurn(): void;
+  startNextTurn(): void;
 }
 
 /** Stands in for the acquired session the handler currently recognizes. */
@@ -30,11 +37,16 @@ function createHarness(options: {
   readonly answers?: Record<string, string | string[]> | null;
   readonly decision?: ApprovalDecision;
   readonly hasActiveTurn?: boolean;
+  readonly permissionMode?: CopilotPermissionMode;
+  readonly approvalResponse?: Promise<ApprovalDecision>;
   readonly toolPolicy?: ProviderToolPolicy;
 } = {}): HandlerHarness {
   const approvalRequests: ProviderApprovalInteractionRequest[] = [];
+  const approvalSignals: AbortSignal[] = [];
   const questionRequests: ProviderQuestionInteractionRequest[] = [];
   const dismissals: Array<{ interactionId: string; reason: string }> = [];
+  let abortController = new AbortController();
+  let turnId = 'turn-1';
 
   const interactionPort: ProviderInteractionPort = {
     askUserQuestion: async (request) => {
@@ -47,9 +59,13 @@ function createHarness(options: {
     dismissInteraction: (interactionId, reason) => {
       dismissals.push({ interactionId, reason });
     },
-    requestApproval: async (request) => {
+    requestApproval: async (request, signal) => {
       approvalRequests.push(request);
-      return { decision: options.decision ?? 'allow', interactionId: request.interactionId };
+      approvalSignals.push(signal);
+      return {
+        decision: await options.approvalResponse ?? options.decision ?? 'allow',
+        interactionId: request.interactionId,
+      };
     },
     requestPlanDecision: async request => ({
       decision: null,
@@ -61,8 +77,9 @@ function createHarness(options: {
     getActiveTurn: sessionToken => (
       options.hasActiveTurn === false || sessionToken !== LIVE_SESSION_TOKEN
         ? null
-        : { signal: new AbortController().signal, turnId: 'turn-1' }
+        : { signal: abortController.signal, turnId }
     ),
+    getPermissionMode: () => options.permissionMode ?? 'ask',
     getToolPolicy: () => options.toolPolicy ?? { kind: 'provider-default' },
     interactionPort,
     sessionInstanceId: 'session-instance-1',
@@ -70,10 +87,16 @@ function createHarness(options: {
 
   return {
     approvalRequests,
+    approvalSignals,
     dismissals,
     handler: handler.bind(LIVE_SESSION_TOKEN),
     questionRequests,
     staleHandler: handler.bind({}),
+    cancelTurn: () => abortController.abort(),
+    startNextTurn: () => {
+      abortController = new AbortController();
+      turnId = 'turn-2';
+    },
   };
 }
 
@@ -82,6 +105,158 @@ function permissionRequest(kind: string): CopilotSdkPermissionRequest {
 }
 
 describe('CopilotInteractionHandler approvals', () => {
+  it('cancels the human prompt when its native permission request is completed elsewhere', async () => {
+    const nativeRequest = new AbortController();
+    const decision = createDeferred<ApprovalDecision>();
+    const harness = createHarness({ approvalResponse: decision.promise, permissionMode: 'judge' });
+    const response = harness.handler.handlePermissionRequest(permissionRequest('read'), {
+      signal: nativeRequest.signal,
+    });
+
+    nativeRequest.abort();
+    decision.resolve('allow');
+
+    expect(await response).toMatchObject({ kind: 'reject' });
+    expect(harness.approvalSignals[0].aborted).toBe(true);
+  });
+
+  it('refuses a completed native request before considering its judge recommendation', async () => {
+    const nativeRequest = new AbortController();
+    const harness = createHarness({ permissionMode: 'judge' });
+    nativeRequest.abort();
+
+    const response = await harness.handler.handlePermissionRequest(permissionRequest('read'), {
+      autoApproval: { recommendation: 'approve' },
+      signal: nativeRequest.signal,
+    });
+
+    expect(response).toMatchObject({ kind: 'reject' });
+    expect(harness.approvalRequests).toEqual([]);
+  });
+
+  it('accepts an explicit judge approval without attributing it to a human', async () => {
+    const harness = createHarness({ permissionMode: 'judge' });
+
+    const result = await harness.handler.handlePermissionRequest(
+      permissionRequest('shell'),
+      { autoApproval: { recommendation: 'approve' } },
+    );
+
+    expect(result).toEqual({ kind: 'approve-once' });
+    expect(harness.approvalRequests).toEqual([]);
+  });
+
+  it.each<[CopilotSdkPermissionPrompt | undefined]>([
+    [undefined],
+    [{}],
+    [{ autoApproval: { recommendation: 'requireApproval' } }],
+    [{ autoApproval: { recommendation: 'excluded' } }],
+    [{ autoApproval: { recommendation: 'error', failureReason: 'timeout' } }],
+    [{ autoApproval: { recommendation: 'error', failureReason: 'model_error' } }],
+  ])('asks the user when the judge has no usable approval (%j)', async (prompt) => {
+    const harness = createHarness({ decision: 'deny', permissionMode: 'judge' });
+
+    const result = await harness.handler.handlePermissionRequest(permissionRequest('shell'), prompt);
+
+    expect(result).toEqual({ kind: 'reject', feedback: 'Denied by the user.' });
+    expect(harness.approvalRequests[0]).toMatchObject({ toolName: 'shell', turnId: 'turn-1' });
+  });
+
+  it.each(['ask', 'allow-all'] as const)(
+    'keeps the native callback human-driven in %s mode',
+    async (permissionMode) => {
+      const harness = createHarness({ decision: 'deny', permissionMode });
+
+      const result = await harness.handler.handlePermissionRequest(
+        permissionRequest('shell'),
+        { autoApproval: { recommendation: 'approve' } },
+      );
+
+      expect(result).toEqual({ kind: 'reject', feedback: 'Denied by the user.' });
+      expect(harness.approvalRequests[0]).toMatchObject({ toolName: 'shell' });
+    },
+  );
+
+  it.each(['request', 'prompt'] as const)(
+    'requires a human when managed approval is flagged on the %s',
+    async (source) => {
+      const harness = createHarness({ decision: 'deny', permissionMode: 'judge' });
+      const request = {
+        ...permissionRequest('shell'),
+        ...(source === 'request' ? { managedApprovalRequired: true } : {}),
+      };
+
+      const result = await harness.handler.handlePermissionRequest(request, {
+        autoApproval: { recommendation: 'approve' },
+        ...(source === 'prompt' ? { managedApprovalRequired: true } : {}),
+      });
+
+      expect(result).toEqual({ kind: 'reject', feedback: 'Denied by the user.' });
+      expect(harness.approvalRequests[0]).toMatchObject({ toolName: 'shell' });
+    },
+  );
+
+  it.each<ProviderToolPolicy>([
+    { kind: 'passive' },
+    { kind: 'read-only' },
+  ])('applies the %j policy before a judge approval', async (toolPolicy) => {
+    const harness = createHarness({ permissionMode: 'judge', toolPolicy });
+
+    const result = await harness.handler.handlePermissionRequest(
+      permissionRequest('shell'),
+      { autoApproval: { recommendation: 'approve' } },
+    );
+
+    expect(result).toMatchObject({ kind: 'reject', feedback: expect.stringContaining('tool policy') });
+    expect(harness.approvalRequests).toEqual([]);
+  });
+
+  it.each<ProviderToolPolicy>([
+    { kind: 'read-only' },
+    { kind: 'allow-list', names: ['view'] },
+  ])('does not automatically approve an allowed read under %j', async (toolPolicy) => {
+    const harness = createHarness({ decision: 'deny', permissionMode: 'judge', toolPolicy });
+
+    const result = await harness.handler.handlePermissionRequest(
+      permissionRequest('read'),
+      { autoApproval: { recommendation: 'approve' } },
+    );
+
+    expect(result).toEqual({ kind: 'reject', feedback: 'Denied by the user.' });
+    expect(harness.approvalRequests[0]).toMatchObject({ toolName: 'read' });
+  });
+
+  it('does not approve a request after cancellation', async () => {
+    const harness = createHarness({ permissionMode: 'judge' });
+    harness.cancelTurn();
+
+    const result = await harness.handler.handlePermissionRequest(
+      permissionRequest('shell'),
+      { autoApproval: { recommendation: 'approve' } },
+    );
+
+    expect(result).toMatchObject({ kind: 'reject' });
+    expect(harness.approvalRequests).toEqual([]);
+  });
+
+  it.each(['cancel', 'replace'] as const)(
+    'does not apply a delayed human approval when its turn is %s',
+    async (transition) => {
+      const decision = createDeferred<ApprovalDecision>();
+      const harness = createHarness({
+        approvalResponse: decision.promise,
+        permissionMode: 'judge',
+      });
+      const response = harness.handler.handlePermissionRequest(permissionRequest('shell'));
+      if (transition === 'cancel') harness.cancelTurn();
+      else harness.startNextTurn();
+      decision.resolve('allow');
+
+      expect(await response).toMatchObject({ kind: 'reject' });
+      expect(harness.approvalRequests[0]).toMatchObject({ turnId: 'turn-1' });
+    },
+  );
+
   it('routes an approval to the user and maps allow to a single-use approval', async () => {
     const harness = createHarness({ decision: 'allow' });
 
@@ -263,6 +438,18 @@ describe('CopilotInteractionHandler user questions', () => {
  * whichever turn is live now.
  */
 describe('CopilotInteractionHandler session scoping', () => {
+  it('refuses a judge approval from an obsolete session', async () => {
+    const harness = createHarness({ permissionMode: 'judge' });
+
+    const result = await harness.staleHandler.handlePermissionRequest(
+      permissionRequest('shell'),
+      { autoApproval: { recommendation: 'approve' } },
+    );
+
+    expect(result).toMatchObject({ kind: 'reject' });
+    expect(harness.approvalRequests).toEqual([]);
+  });
+
   it('rejects an approval from a session it no longer recognizes', async () => {
     const harness = createHarness({ decision: 'allow' });
 

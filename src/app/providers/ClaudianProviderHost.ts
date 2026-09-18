@@ -12,6 +12,10 @@ export class ClaudianProviderHost implements ProviderHost {
     return this.plugin.app;
   }
 
+  get chatModelSelection() {
+    return this.plugin.chatModelSelection;
+  }
+
   get executionLifecycleRegistry() {
     return this.plugin.executionLifecycleRegistry;
   }

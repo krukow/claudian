@@ -3,9 +3,11 @@ import * as path from 'node:path';
 import type { CopilotReasoningEffort } from '../models';
 import { isAbsoluteCopilotPath } from '../runtime/CopilotAbsolutePath';
 import { canonicalizeCopilotHostPath } from '../runtime/CopilotCanonicalPath';
+import type { CopilotPermissionMode } from '../settings';
 import {
   acquireNativeWithin,
   copilotNativeSilenceError,
+  NATIVE_OPERATION_TIMEOUT_MS,
   NATIVE_OPERATION_TIMEOUT_SECONDS,
   NATIVE_STARTUP_TIMEOUT_MS,
   NATIVE_STARTUP_TIMEOUT_SECONDS,
@@ -29,6 +31,9 @@ import type {
 import type {
   CopilotSdkClient,
   CopilotSdkClientOptions,
+  CopilotSdkEvent,
+  CopilotSdkPermissionPrompt,
+  CopilotSdkPermissionResult,
   CopilotSdkRuntime,
   CopilotSdkSession,
   CopilotSdkSessionConfig,
@@ -66,8 +71,8 @@ function loadCopilotSdk(): Promise<CopilotSdkModule> {
  *
  * What empty mode used to supply is therefore supplied here instead. Every capability
  * Claudian does not support is stated on each session rather than defaulted: session
- * telemetry, the shared embedding cache and its retrieval, keychain-backed MCP OAuth
- * storage, MCP servers and apps, remote sessions and remote export, the built-in session
+ * telemetry, the shared embedding cache and its retrieval, MCP servers and apps,
+ * remote sessions and remote export, the built-in session
  * store, host git operations, long-term memory, infinite sessions, scheduling, skills,
  * file hooks, plugin directories, custom instructions and their on-demand discovery,
  * runtime configuration discovery, experimental features, the commit co-author trailer,
@@ -158,14 +163,18 @@ class SdkBackedClient implements CopilotSdkClient {
   }
 
   async createSession(config: CopilotSdkSessionConfig): Promise<CopilotSdkSession> {
+    const permissions = config.permissionMode === 'judge'
+      ? new SdkPermissionResponder(config.onPermissionRequest)
+      : undefined;
     try {
       const disabledMcpServers = await this.excludeAmbientMcpServers(config);
       const session = await this.openSession(
-        this.client.createSession(toSessionConfig(config, disabledMcpServers)),
+        this.client.createSession(toSessionConfig(config, disabledMcpServers, permissions)),
         'open a session',
       );
-      return await this.prepareSession(session, config, true);
+      return await this.prepareSession(session, config, true, permissions);
     } catch (error) {
+      permissions?.dispose();
       throw toCopilotRuntimeError(error, 'provider');
     }
   }
@@ -174,17 +183,21 @@ class SdkBackedClient implements CopilotSdkClient {
     providerSessionId: string,
     config: CopilotSdkSessionConfig,
   ): Promise<CopilotSdkSession> {
+    const permissions = config.permissionMode === 'judge'
+      ? new SdkPermissionResponder(config.onPermissionRequest)
+      : undefined;
     try {
       const disabledMcpServers = await this.excludeAmbientMcpServers(config);
       const session = await this.openSession(
         this.client.resumeSession(
           providerSessionId,
-          toSessionConfig(config, disabledMcpServers),
+          toSessionConfig(config, disabledMcpServers, permissions),
         ),
         'resume the session',
       );
-      return await this.prepareSession(session, config, false);
+      return await this.prepareSession(session, config, false, permissions);
     } catch (error) {
+      permissions?.dispose();
       const runtimeError = toCopilotRuntimeError(error, 'provider');
       throw runtimeError.category === 'provider-session-missing'
         ? copilotMissingSessionError(runtimeError.message, providerSessionId)
@@ -231,10 +244,9 @@ class SdkBackedClient implements CopilotSdkClient {
     session: CopilotSession,
     config: CopilotSdkSessionConfig,
     unpublished: boolean,
+    permissions?: SdkPermissionResponder,
   ): Promise<CopilotSdkSession> {
-    if (!config.resources) {
-      return new SdkBackedSession(session, [], new Set());
-    }
+    permissions?.attach(session);
     const cancellation = new AbortController();
     const call: ResourceSetupCall = async operation => {
       cancellation.signal.throwIfAborted();
@@ -242,18 +254,30 @@ class SdkBackedClient implements CopilotSdkClient {
       cancellation.signal.throwIfAborted();
       return result;
     };
+    const preparation = applyNativePermissionMode(session, config.permissionMode ?? 'ask', call)
+      .then(() => prepareSessionResources(session, config, call));
     const outcome = await acquireNativeWithin(
-      prepareSessionResources(session, config, call),
+      permissions ? permissions.withFailure(preparation) : preparation,
       undefined,
       NATIVE_STARTUP_TIMEOUT_MS,
     );
     if (outcome.kind === 'settled') {
-      return outcome.value;
+      return new SdkBackedSession(
+        session,
+        config,
+        outcome.value.resourceDiagnostics,
+        outcome.value.skillCommandNames,
+        permissions,
+      );
     }
     const error = outcome.kind === 'rejected'
       ? outcome.error
-      : copilotNativeSilenceError('preparing selected Copilot resources', NATIVE_STARTUP_TIMEOUT_SECONDS);
+      : copilotNativeSilenceError(
+        config.resources ? 'preparing selected Copilot resources' : 'configuring Copilot permissions',
+        NATIVE_STARTUP_TIMEOUT_SECONDS,
+      );
     cancellation.abort(error);
+    permissions?.dispose();
 
     const failures: unknown[] = [error];
     const disconnected = await settleNativeWithin(session.disconnect());
@@ -384,12 +408,202 @@ class SdkBackedClient implements CopilotSdkClient {
   }
 }
 
+async function applyNativePermissionMode(
+  session: CopilotSession,
+  permissionMode: CopilotPermissionMode,
+  call: ResourceSetupCall,
+): Promise<void> {
+  const input = permissionMode === 'judge' ? 'assisted' : permissionMode === 'ask' ? 'default' : 'allow-all';
+  try {
+    const updated = await call(() => session.rpc.options.update({
+      featureFlags: { AUTO_APPROVAL: permissionMode === 'judge' },
+    }));
+    if (!updated.success) {
+      throw copilotConfigurationError('The CLI did not apply the approval feature setting.');
+    }
+    const result = await call(() => session.rpc.commands.invoke({ name: 'permissions', input }));
+    if (result.kind !== 'text') {
+      throw copilotConfigurationError('The CLI did not complete the permission-mode command.');
+    }
+  } catch (error) {
+    const failure = toCopilotRuntimeError(error, 'configuration');
+    throw new CopilotRuntimeError(
+      failure.category,
+      `Could not configure permission mode (${permissionMode}). Check that the Copilot CLI `
+      + `supports the /permissions command: ${failure.message}`,
+      { cause: error },
+    );
+  }
+}
+
+interface PendingPermission {
+  readonly cancellation: AbortController;
+  readonly turn: object | null;
+}
+
+/** Auto mode needs event metadata the SDK discards before calling its permission handler. */
+class SdkPermissionResponder {
+  private session: CopilotSession | null = null;
+  private turn: object | null = null;
+  private readonly pending = new Map<string, PendingPermission>();
+  private readonly seen = new Set<string>();
+  private readonly failure: Promise<CopilotRuntimeError>;
+  private fail!: (error: CopilotRuntimeError) => void;
+
+  constructor(private readonly handler: CopilotSdkSessionConfig['onPermissionRequest']) {
+    this.failure = new Promise(resolve => { this.fail = resolve; });
+  }
+
+  attach(session: CopilotSession): void {
+    this.session = session;
+  }
+
+  sdkCallback(): Promise<CopilotSdkPermissionResult> {
+    return Promise.resolve(this.session ? { kind: 'no-result' } : noActivePermissionTurn());
+  }
+
+  beginTurn(): object {
+    const turn = {};
+    this.turn = turn;
+    return turn;
+  }
+
+  endTurn(turn?: object): void {
+    if (turn && this.turn !== turn) return;
+    this.turn = null;
+    for (const pending of this.pending.values()) pending.cancellation.abort();
+    this.pending.clear();
+  }
+
+  dispose(): void {
+    this.endTurn();
+    this.session = null;
+    this.seen.clear();
+    this.fail(new CopilotRuntimeError('transport', 'The Copilot permission responder was disconnected.'));
+  }
+
+  withFailure<T>(work: Promise<T>): Promise<T> {
+    return Promise.race([work, this.failure.then(error => { throw error; })]);
+  }
+
+  onEvent(event: CopilotSdkEvent): void {
+    const session = this.session;
+    if (!session) return;
+    if (event.type === 'permission.completed') {
+      this.pending.get(event.data.requestId)?.cancellation.abort();
+      this.pending.delete(event.data.requestId);
+      this.seen.add(event.data.requestId);
+      return;
+    }
+    if (event.type !== 'permission.requested' || event.data.resolvedByHook) return;
+    const { requestId } = event.data;
+    if (this.seen.has(requestId)) return;
+    this.seen.add(requestId);
+    const pending = { cancellation: new AbortController(), turn: this.turn };
+    this.pending.set(requestId, pending);
+    void this.respond(session, pending, event.data).catch(error => {
+      if (this.session === session && this.turn === pending.turn) {
+        this.fail(new CopilotRuntimeError(
+          'transport',
+          `Could not deliver the Copilot permission response: ${describeError(error)}`,
+          { cause: error },
+        ));
+      }
+    });
+  }
+
+  private async respond(
+    session: CopilotSession,
+    pending: PendingPermission,
+    data: Extract<CopilotSdkEvent, { type: 'permission.requested' }>['data'],
+  ): Promise<void> {
+    let result: CopilotSdkPermissionResult;
+    try {
+      result = pending.turn
+        ? await this.handler(data.permissionRequest, {
+          ...decodePermissionPrompt(data.promptRequest),
+          signal: pending.cancellation.signal,
+        })
+        : noActivePermissionTurn();
+    } catch (error) {
+      result = { kind: 'reject', feedback: `Copilot approval failed: ${describeError(error)}` };
+    }
+    if (
+      this.session !== session || this.turn !== pending.turn
+      || this.pending.get(data.requestId) !== pending || result.kind === 'no-result'
+    ) return;
+    const outcome = await acquireNativeWithin(session.rpc.permissions.handlePendingPermissionRequest({
+      requestId: data.requestId,
+      result,
+    }));
+    this.pending.delete(data.requestId);
+    pending.cancellation.abort();
+    if (outcome.kind === 'rejected') throw outcome.error;
+    if (outcome.kind === 'timed-out') {
+      throw copilotNativeSilenceError('responding to a Copilot permission request');
+    }
+  }
+}
+
+function noActivePermissionTurn(): CopilotSdkPermissionResult {
+  return { kind: 'reject', feedback: 'No Copilot turn is accepting approvals.' };
+}
+
+function decodePermissionPrompt(value: unknown): CopilotSdkPermissionPrompt {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const prompt = value as Record<string, unknown>;
+  const result: CopilotSdkPermissionPrompt = {
+    ...(prompt.managedApprovalRequired !== undefined && prompt.managedApprovalRequired !== false
+      ? { managedApprovalRequired: true }
+      : {}),
+  };
+  // The CLI uses assistedApproval; the SDK's generated event contract uses autoApproval.
+  const auto = prompt.assistedApproval ?? prompt.autoApproval;
+  if (!auto || typeof auto !== 'object' || Array.isArray(auto)) return result;
+  const recommendation = auto as Record<string, unknown>;
+  const { model, reason, failureReason } = recommendation;
+  if (
+    (model !== undefined && typeof model !== 'string')
+    || (reason !== undefined && typeof reason !== 'string')
+    || (failureReason !== undefined && !isJudgeFailureReason(failureReason))
+    || (recommendation.recommendation === 'approve' && failureReason !== undefined)
+  ) return result;
+  switch (recommendation.recommendation) {
+    case 'approve':
+    case 'requireApproval':
+    case 'excluded':
+    case 'error':
+      return {
+        ...result,
+        autoApproval: {
+          recommendation: recommendation.recommendation,
+          ...(model !== undefined ? { model } : {}),
+          ...(reason !== undefined ? { reason } : {}),
+          ...(failureReason !== undefined ? { failureReason } : {}),
+        },
+      };
+    default:
+      return result;
+  }
+}
+
+function isJudgeFailureReason(
+  value: unknown,
+): value is NonNullable<CopilotSdkPermissionPrompt['autoApproval']>['failureReason'] {
+  return value === 'timeout' || value === 'abort' || value === 'empty_response'
+    || value === 'model_error' || value === 'parse_error';
+}
+
 class SdkBackedSession implements CopilotSdkSession {
+  private disconnected = false;
+
   constructor(
     private readonly session: CopilotSession,
+    private readonly config: CopilotSdkSessionConfig,
     readonly resourceDiagnostics: readonly string[],
     /** Command names the selected skills answer to, lowercased for the runtime's match. */
     private readonly skillCommandNames: ReadonlySet<string>,
+    private readonly permissions?: SdkPermissionResponder,
   ) {}
 
   get sessionId(): string {
@@ -397,10 +611,14 @@ class SdkBackedSession implements CopilotSdkSession {
   }
 
   async send(prompt: string): Promise<void> {
+    const turn = this.permissions?.beginTurn();
     try {
-      await this.session.sendAndWait(prompt, TURN_TIMEOUT_MS);
+      const sending = this.session.sendAndWait(prompt, TURN_TIMEOUT_MS);
+      await (this.permissions ? this.permissions.withFailure(sending) : sending);
     } catch (error) {
       throw toCopilotSendError(error, TURN_TIMEOUT_MS);
+    } finally {
+      this.permissions?.endTurn(turn);
     }
   }
 
@@ -459,6 +677,22 @@ class SdkBackedSession implements CopilotSdkSession {
     );
   }
 
+  async signInMcpServer(serverName: string): Promise<{ authorizationUrl?: string }> {
+    const servers = this.config.resources?.mcpServers;
+    if (!servers || !Object.hasOwn(servers, serverName)) {
+      throw copilotConfigurationError(`The MCP server ${serverName} is not selected for this session.`);
+    }
+    return this.acquire(
+      this.session.rpc.mcp.oauth.login({
+        serverName,
+        clientName: 'Claudian',
+        callbackSuccessMessage: 'Return to Claudian to finish connecting this server.',
+      }),
+      `starting sign-in for the MCP server ${serverName}`,
+      NATIVE_STARTUP_TIMEOUT_MS,
+    );
+  }
+
   /**
    * The SDK resolves once the runtime acknowledges the abort, and rejects when the session
    * is disconnected or the connection failed. Which of the two happened decides whether
@@ -466,6 +700,7 @@ class SdkBackedSession implements CopilotSdkSession {
    * flattened into a resolved promise here.
    */
   async abort(): Promise<void> {
+    this.permissions?.endTurn();
     try {
       await this.session.abort();
     } catch (error) {
@@ -479,12 +714,17 @@ class SdkBackedSession implements CopilotSdkSession {
         model,
         reasoningEffort ? { reasoningEffort } : undefined,
       );
+      if (this.disconnected) {
+        throw new CopilotRuntimeError('transport', 'The Copilot session was disconnected during its model change.');
+      }
     } catch (error) {
       throw toCopilotRuntimeError(error, 'configuration');
     }
   }
 
   async disconnect(): Promise<void> {
+    this.disconnected = true;
+    this.permissions?.dispose();
     try {
       await this.session.disconnect();
     } catch (error) {
@@ -492,18 +732,27 @@ class SdkBackedSession implements CopilotSdkSession {
     }
   }
 
-  /** One bounded metadata call against a runtime that is already up. */
-  private async acquire<T>(work: Promise<T>, context: string): Promise<T> {
-    const outcome = await acquireNativeWithin(work);
+  /** One bounded operation against a runtime that is already up. */
+  private async acquire<T>(
+    work: Promise<T>,
+    context: string,
+    timeoutMs = NATIVE_OPERATION_TIMEOUT_MS,
+  ): Promise<T> {
+    const outcome = await acquireNativeWithin(work, undefined, timeoutMs);
     switch (outcome.kind) {
       case 'settled':
         return outcome.value;
       case 'rejected':
         throw toCopilotRuntimeError(outcome.error, 'provider');
       case 'timed-out':
-        throw copilotNativeSilenceError(context);
+        throw copilotNativeSilenceError(context, timeoutMs / 1_000);
     }
   }
+}
+
+interface PreparedSessionResources {
+  readonly resourceDiagnostics: readonly string[];
+  readonly skillCommandNames: ReadonlySet<string>;
 }
 
 /**
@@ -526,10 +775,10 @@ async function prepareSessionResources(
   session: CopilotSession,
   config: CopilotSdkSessionConfig,
   call: ResourceSetupCall,
-): Promise<CopilotSdkSession> {
+): Promise<PreparedSessionResources> {
   const resources = config.resources;
   if (!resources) {
-    return new SdkBackedSession(session, [], new Set());
+    return { resourceDiagnostics: [], skillCommandNames: new Set() };
   }
   const skillCommandNames = await selectNativeSkills(session, resources, call);
   const mcp = await collectSelectedMcpTools(session, config, resources, call);
@@ -538,7 +787,7 @@ async function prepareSessionResources(
         availableTools: [...config.availableTools, ...mcp.tools],
     }));
   }
-  return new SdkBackedSession(session, mcp.diagnostics, skillCommandNames);
+  return { resourceDiagnostics: mcp.diagnostics, skillCommandNames };
 }
 
 type ResourceSetupCall = <T>(operation: () => Promise<T>) => Promise<T>;
@@ -728,17 +977,18 @@ const TURN_TIMEOUT_MS = 600_000;
  * Nothing here is left to a runtime default. The SDK only fills these in for a client in
  * empty mode, which is the mode that shuts the CLI out of its keychain, so a session that
  * omitted them would inherit the coding agent's own behaviour: telemetry on, an embedding
- * cache shared on disk between sessions, MCP OAuth tokens written to the OS keychain, a
+ * cache shared on disk between sessions, persistent native MCP OAuth tokens, a
  * commit co-author trailer, and whatever instruction, skill, plugin, and MCP sources the
  * runtime discovers around the vault.
  *
- * The caller chooses tools, a model, directories, and the handlers; it cannot reach any of
- * this, because a session that could would be a session that could read the user's global
- * Copilot configuration or act outside the vault.
+ * The caller chooses tools, a model, directories, an approval mode, and the handlers.
+ * MCP credential persistence is an explicit resource choice; other ambient integrations
+ * remain fixed at this boundary.
  */
 function toSessionConfig(
   config: CopilotSdkSessionConfig,
   disabledMcpServers: readonly string[],
+  permissions?: SdkPermissionResponder,
 ): SessionConfig {
   const resources = config.resources;
   return {
@@ -768,12 +1018,19 @@ function toSessionConfig(
     includeSubAgentStreamingEvents: false,
     infiniteSessions: { enabled: false },
     manageScheduleEnabled: false,
-    mcpOAuthTokenStorage: 'in-memory',
+    mcpOAuthTokenStorage: resources?.mcpOAuthTokenStorage ?? 'in-memory',
     mcpServers: { ...resources?.mcpServers },
     memory: { enabled: false },
     model: config.model,
-    onEvent: config.onEvent,
-    onPermissionRequest: request => config.onPermissionRequest(request),
+    onEvent: permissions
+      ? event => {
+        permissions.onEvent(event);
+        config.onEvent(event);
+      }
+      : config.onEvent,
+    onPermissionRequest: request => (
+      permissions ? permissions.sdkCallback() : config.onPermissionRequest(request)
+    ),
     onUserInputRequest: request => config.onUserInputRequest(request),
     pluginDirectories: [],
     remoteSession: 'off',
@@ -866,8 +1123,7 @@ function describeShutdownErrors(errors: readonly Error[]): CopilotRuntimeError |
  * itself is shared — the CLI keeps one per host in the OS keychain — but the record of
  * which account it belongs to lives in the home it was signed in with, and without that
  * record the CLI never opens the keychain. A home nobody has signed in to is therefore the
- * ordinary first failure, and a bare `copilot` would sign in to `~/.copilot` and change
- * nothing here, so the directory is named.
+ * ordinary first failure. The settings connection flow signs in to this same home.
  *
  * What the CLI said is kept rather than replaced: "Not authenticated" adds nothing, but an
  * expiry or a single-sign-on refusal is the whole answer.
@@ -882,10 +1138,8 @@ export function assertAuthenticated(
   throw copilotAuthenticationError(
     `The Copilot CLI is not signed in for this vault${
       status.statusMessage ? ` (it reports: ${status.statusMessage})` : ''
-    }. Claudian runs the CLI with a \`COPILOT_HOME\` of this vault's own, at `
-    + `\`${baseDirectory}\`, so this vault's agent state and plugins stay out of your `
-    + 'shared Copilot install. Sign in to it once by running the Copilot CLI with '
-    + '`COPILOT_HOME` set to that directory and signing in there; signing in without it '
-    + 'signs in to the shared install instead and leaves this vault signed out.',
+    }. Open Settings > Claudian > Copilot and select Connect Copilot to sign in through `
+    + `your browser. This vault's private \`COPILOT_HOME\` is \`${baseDirectory}\`; `
+    + 'your shared Copilot configuration is unchanged.',
   );
 }

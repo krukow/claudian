@@ -3,6 +3,7 @@ import type {
   CopilotSdkClientOptions,
   CopilotSdkEvent,
   CopilotSdkModel,
+  CopilotSdkPermissionPrompt,
   CopilotSdkPermissionRequest,
   CopilotSdkPermissionResult,
   CopilotSdkRuntime,
@@ -25,6 +26,7 @@ export class FakeCopilotSdkSession implements CopilotSdkSession {
   readonly prompts: string[] = [];
   readonly modelChanges: Array<{ model: string; reasoningEffort?: string }> = [];
   readonly skillInvocations: Array<{ input: string; name: string }> = [];
+  readonly mcpSignIns: string[] = [];
   resourceDiagnostics: readonly string[] = [];
   skillCommands: readonly CopilotSdkSkillCommand[] = [];
   skillInvocation: (name: string, input: string) => CopilotSdkSkillInvocation = name => ({
@@ -36,6 +38,7 @@ export class FakeCopilotSdkSession implements CopilotSdkSession {
   abortBehavior: () => Promise<void> = async () => {};
   disconnectBehavior: () => Promise<void> = async () => {};
   setModelBehavior: () => Promise<void> = async () => {};
+  mcpSignInBehavior: (serverName: string) => Promise<{ authorizationUrl?: string }> = async () => ({});
 
   constructor(
     readonly sessionId: string,
@@ -51,14 +54,20 @@ export class FakeCopilotSdkSession implements CopilotSdkSession {
     return this.skillInvocation(name, input);
   }
 
+  async signInMcpServer(serverName: string): Promise<{ authorizationUrl?: string }> {
+    this.mcpSignIns.push(serverName);
+    return this.mcpSignInBehavior(serverName);
+  }
+
   emit(event: CopilotSdkEvent): void {
     this.config.onEvent(event);
   }
 
   requestPermission(
     request: CopilotSdkPermissionRequest,
+    prompt?: CopilotSdkPermissionPrompt,
   ): Promise<CopilotSdkPermissionResult> {
-    return this.config.onPermissionRequest(request);
+    return this.config.onPermissionRequest(request, prompt);
   }
 
   requestUserInput(

@@ -39,6 +39,53 @@ describe('resolveCopilotSelectedResources', () => {
     expect(resolution).toEqual({ problems: [], resources: null });
   });
 
+  it('automatically loads repository skills for a vault nested below the Git root, but no MCP servers', async () => {
+    const vault = path.join(workspace, 'repo', 'content');
+    await fs.mkdir(vault, { recursive: true });
+    await fs.mkdir(path.join(workspace, 'repo', '.git'));
+    const skill = await writeFile('repo/.github/skills/review/SKILL.md', '---\nname: review\n---\n');
+    await writeFile('repo/.mcp.json', JSON.stringify({
+      mcpServers: { notSelected: { command: 'never-start-this' } },
+    }));
+
+    const resolution = await resolveCopilotSelectedResources(selection(), vault);
+
+    expect(resolution).toEqual({
+      problems: [],
+      resources: { mcpServers: {}, skillDirectories: [path.dirname(skill)], skillPaths: [skill] },
+    });
+  });
+
+  it('honors repository skill opt-outs while retaining automatic siblings and explicit personal skills', async () => {
+    const vault = path.join(workspace, 'worktree', 'content');
+    await fs.mkdir(vault, { recursive: true });
+    await writeFile('worktree/.git', 'gitdir: /synthetic/repo/worktrees/notes\n');
+    const disabled = await writeFile('worktree/.github/skills/review/SKILL.md', '---\nname: review\n---\n');
+    const enabled = await writeFile('worktree/.agents/skills/notes/SKILL.md', '---\nname: notes\n---\n');
+    const personal = await writeFile('personal/skills/edit/SKILL.md', '---\nname: edit\n---\n');
+
+    const resolution = await resolveCopilotSelectedResources(selection({
+      disabledRepositorySkillPaths: [disabled],
+      selectedSkillPaths: [disabled, personal],
+    }), vault);
+
+    expect(resolution.resources?.skillPaths).toEqual([personal, enabled]);
+    expect(resolution.problems).toEqual([]);
+  });
+
+  it('uses native persistent authentication only for explicitly opted-in MCP selections', async () => {
+    const configPath = await writeFile('config/mcp.json', JSON.stringify({
+      mcpServers: { notes: { type: 'http', url: 'https://example.test/mcp' } },
+    }));
+    const resolution = await resolveCopilotSelectedResources(selection({
+      rememberMcpSignIns: true,
+      selectedMcpServers: [{ configPath, name: 'notes' }],
+    }));
+
+    expect(resolution.resources).toMatchObject({ mcpOAuthTokenStorage: 'persistent' });
+    expect(resolution.problems).toEqual([]);
+  });
+
   it('resolves a selected stdio server from its own configuration file', async () => {
     const configPath = await writeFile('config/mcp.json', JSON.stringify({
       mcpServers: {

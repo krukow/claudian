@@ -7,6 +7,7 @@ import type {
 } from '../execution';
 import type { ClaudianSettings } from '../types';
 import type { EnvironmentScope } from '../types/settings';
+import type { ChatModelSelectionPort } from './ChatModelSelectionPort';
 import type { ProviderCliResolutionContext, ProviderId } from './types';
 
 /**
@@ -18,6 +19,7 @@ import type { ProviderCliResolutionContext, ProviderId } from './types';
  */
 export interface ProviderHost {
   readonly app: App;
+  readonly chatModelSelection: ChatModelSelectionPort;
   readonly executionLifecycleRegistry: ProviderExecutionLifecycleRegistry;
   readonly settings: ClaudianSettings;
   readonly storage: SharedAppStorage;
