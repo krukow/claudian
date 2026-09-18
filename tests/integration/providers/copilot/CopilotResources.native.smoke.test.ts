@@ -406,6 +406,59 @@ describeWithCli('Copilot native resource isolation', () => {
     expect(readFileSync(marker, 'utf8')).toBe('started\nwrite_note\n');
   });
 
+  it.each(['resident-client', 'cold-client'] as const)(
+    'restores Ask on %s resume after native Allow all',
+    async resumeKind => {
+      const localModel = await useLocalModel('selected-write_note');
+      const marker = path.join(root, 'downgrade.started');
+      const requested: CopilotSdkPermissionRequest[] = [];
+      const config: CopilotSdkSessionConfig = {
+        ...sessionConfig(vault),
+        availableTools: ['builtin:view'],
+        model: 'gpt-4o',
+        onPermissionRequest: async request => {
+          requested.push(request);
+          return { kind: 'reject' };
+        },
+        resources: {
+          mcpServers: { selected: { ...fixtureServer(marker, vault), tools: ['write_note'] } },
+          skillDirectories: [],
+        },
+      };
+      const started = await startClient();
+      const allowed = await started.createSession({ ...config, permissionMode: 'allow-all' });
+
+      await allowed.send('Update the synthetic note with the selected tool.');
+
+      expect(requested).toEqual([]);
+      expect(readFileSync(marker, 'utf8')).toBe('started\nwrite_note\n');
+      await allowed.disconnect();
+      let resuming = started;
+      if (resumeKind === 'cold-client') {
+        await started.stop();
+        client = undefined;
+        resuming = await startClient();
+      }
+      const resumed = await resuming.resumeSession(allowed.sessionId, {
+        ...config,
+        permissionMode: 'ask',
+      });
+      const beforeDeniedAction = readFileSync(marker, 'utf8');
+      localModel.queueToolCall('selected-write_note');
+
+      await resumed.send('Update the synthetic note again with the selected tool.');
+
+      expect(resumed.sessionId).toBe(allowed.sessionId);
+      expect(resumed.resourceDiagnostics).toEqual([]);
+      expect(requested).toEqual([
+        expect.objectContaining({
+          kind: 'mcp', serverName: 'selected', toolName: 'selected-write_note',
+        }),
+      ]);
+      expect(readFileSync(marker, 'utf8')).toBe(beforeDeniedAction);
+    },
+  );
+
   it('keeps a native judge exclusion or failure on the human-approval path', async () => {
     await useLocalModel('selected-write_note');
     const marker = path.join(root, 'judged.started');
