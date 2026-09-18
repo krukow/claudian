@@ -271,6 +271,7 @@ export function encodeCopilotResourceDigest(
     return null;
   }
   const canonical = JSON.stringify({
+    mcpOAuthTokenStorage: resources.mcpOAuthTokenStorage ?? 'in-memory',
     mcpServers: Object.keys(resources.mcpServers).sort().map(name => [
       name,
       resources.mcpServers[name],

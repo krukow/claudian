@@ -2,6 +2,7 @@ import type { ProviderExecutionRequest } from '@/core/execution';
 import {
   describeUnsupportedInput,
   encodeAdditionalDirectories,
+  encodeCopilotResourceDigest,
   encodePrompt,
   encodeReasoningEffort,
   encodeSessionIdentity,
@@ -391,6 +392,25 @@ describe('encodeSessionIdentity', () => {
       ...base,
       additionalDirectories: ['/notes', '/repo'],
     }));
+  });
+
+  describe('encodeCopilotResourceDigest', () => {
+    const resources = {
+      mcpServers: { notes: { type: 'http' as const, url: 'https://mcp.example.test' } },
+      skillDirectories: [],
+    };
+
+    it('gives explicit and default in-memory token storage the same resource identity', () => {
+      expect(encodeCopilotResourceDigest(resources)).toBe(encodeCopilotResourceDigest({
+        ...resources, mcpOAuthTokenStorage: 'in-memory',
+      }));
+    });
+
+    it('changes resource identity when native token persistence is enabled', () => {
+      expect(encodeCopilotResourceDigest({
+        ...resources, mcpOAuthTokenStorage: 'persistent',
+      })).not.toBe(encodeCopilotResourceDigest(resources));
+    });
   });
 
   it('changes when a session-bound input changes', () => {

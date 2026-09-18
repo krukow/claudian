@@ -10,6 +10,7 @@ export interface CopilotResourceSettings {
   /** Explicit choices; repository defaults are merged when resources are resolved. */
   selectedSkillPaths: string[];
   readonly disabledRepositorySkillPaths?: string[];
+  readonly rememberMcpSignIns?: boolean;
 }
 
 export type CopilotResourcesByHost = Record<string, CopilotResourceSettings>;
@@ -33,6 +34,7 @@ export function normalizeCopilotResourceSettings(value: unknown): CopilotResourc
   const disabledRepositorySkillPaths = normalizeStringList(record.disabledRepositorySkillPaths);
   return {
     ...(disabledRepositorySkillPaths.length > 0 ? { disabledRepositorySkillPaths } : {}),
+    ...(record.rememberMcpSignIns === true ? { rememberMcpSignIns: true } : {}),
     additionalMcpConfigPaths: normalizeStringList(record.additionalMcpConfigPaths),
     additionalSkillRoots: normalizeStringList(record.additionalSkillRoots),
     selectedMcpServers: normalizeMcpReferences(record.selectedMcpServers),

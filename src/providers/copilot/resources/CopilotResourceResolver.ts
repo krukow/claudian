@@ -11,6 +11,7 @@ export interface CopilotResolvedResources {
   /** Package directories, because pointing the CLI at a parent root loads its siblings. */
   readonly skillDirectories: readonly string[];
   readonly skillPaths: readonly string[];
+  readonly mcpOAuthTokenStorage?: 'persistent';
 }
 
 export interface CopilotResourceResolution {
@@ -49,6 +50,9 @@ export async function resolveCopilotSelectedResources(
     resources: hasResources
       ? {
         mcpServers,
+        ...(selection.rememberMcpSignIns && Object.keys(mcpServers).length > 0
+          ? { mcpOAuthTokenStorage: 'persistent' as const }
+          : {}),
         skillDirectories: skills.directories,
         skillPaths: skills.paths,
       }

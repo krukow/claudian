@@ -73,6 +73,19 @@ describe('resolveCopilotSelectedResources', () => {
     expect(resolution.problems).toEqual([]);
   });
 
+  it('uses native persistent authentication only for explicitly opted-in MCP selections', async () => {
+    const configPath = await writeFile('config/mcp.json', JSON.stringify({
+      mcpServers: { notes: { type: 'http', url: 'https://example.test/mcp' } },
+    }));
+    const resolution = await resolveCopilotSelectedResources(selection({
+      rememberMcpSignIns: true,
+      selectedMcpServers: [{ configPath, name: 'notes' }],
+    }));
+
+    expect(resolution.resources).toMatchObject({ mcpOAuthTokenStorage: 'persistent' });
+    expect(resolution.problems).toEqual([]);
+  });
+
   it('resolves a selected stdio server from its own configuration file', async () => {
     const configPath = await writeFile('config/mcp.json', JSON.stringify({
       mcpServers: {

@@ -138,16 +138,15 @@ them as pending here.
   and configuration — and a relative one lands inside the notes.
 - Leaving empty mode gives up every default it supplied, so `sdk/CopilotSdkRuntime` states
   each of them on every session it creates or resumes, and never at a call site: session
-  telemetry, the shared on-disk embedding cache and embedding retrieval, keychain-backed
-  MCP OAuth storage, MCP apps, remote sessions and remote export, the built-in session
+  telemetry, the shared on-disk embedding cache and embedding retrieval,
+  MCP apps, remote sessions and remote export, the built-in session
   store, host git operations, memory, infinite sessions, scheduling, file hooks, plugin
   directories, custom instructions and their on-demand discovery, runtime configuration
   discovery, general experimental mode, the commit co-author trailer, and the runtime's own
   `environment_context` description of the host. MCP servers and skills are stated there
   too, from the caller's resources alone. Several of
   those default the other way outside empty mode, so an omission is not a smaller session
-  but a coding-agent one. The port exposes none of them: a caller chooses tools, a model,
-  directories, an approval mode, and handlers, and cannot weaken the floor. LLM judge enables only the native `AUTO_APPROVAL` feature flag, not general experimental mode.
+  but a coding-agent one. The port exposes none of them. MCP OAuth storage defaults to memory; only explicit resource settings may opt in to native persistence. LLM judge enables only the native `AUTO_APPROVAL` feature flag, not general experimental mode.
 - A session's installed plugins are the exception, and the reason `COPILOT_HOME` isolation
   is load-bearing rather than tidy. The SDK clears them only in empty mode, through the
   options patch it sends after create and resume, and exposes no session field for them;
@@ -333,6 +332,8 @@ them as pending here.
 - Resources are deliberately outside `computeCopilotEnvironmentHash`. Including them would
   clear the discovered model catalog and the conversation's native session on every
   toggle, neither of which a selection invalidates.
+- Remembered MCP sign-ins use the native cache only after explicit host-scoped opt-in; it may fall back to plaintext token files outside the vault. This is separate from GitHub login's plaintext-storage policy. Storage mode belongs in the resource digest so changing it cold-restarts the client.
+- `CopilotMcpSignInCoordinator` owns a temporary, tool-free session containing only the selected server. An authorization URL means waiting; success requires the native connected event or the documented cached-login result. Native OAuth owns token handling and reconnection; no token copying, global MCP edits, or model turns belong in this flow.
 - A selection that changes while a client is alive ends that client and resumes the same
   native session on a fresh one. An exclusion list applies where the runtime starts
   servers — a create or a cold resume — and cannot stop what the resident process is

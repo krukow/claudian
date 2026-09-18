@@ -18,6 +18,7 @@ import { copilotSettingsTabRenderer } from '../ui/CopilotSettingsTab';
 import { CopilotCommandLoader } from './CopilotCommandLoader';
 import { CopilotCommandMetadataProbe } from './CopilotCommandMetadataProbe';
 import { CopilotConnectionCoordinator } from './CopilotConnectionCoordinator';
+import { CopilotMcpSignInCoordinator } from './CopilotMcpSignInCoordinator';
 
 const COPILOT_PROVIDER_ID = 'copilot' as const;
 
@@ -39,6 +40,7 @@ export interface CopilotWorkspaceServices extends ProviderWorkspaceServices {
   commandCatalog: ProviderCommandCatalog;
   commandLoader: CopilotCommandLoader;
   connection: CopilotConnectionCoordinator;
+  mcpSignIn: CopilotMcpSignInCoordinator;
   refreshModelCatalog(): Promise<ProviderModelCatalogRefreshResult>;
 }
 
@@ -57,6 +59,7 @@ export function createCopilotWorkspaceServices(
   const commandMetadataProbe = options.commandMetadataProbe
     ?? new CopilotCommandMetadataProbe(plugin);
   const connection = new CopilotConnectionCoordinator(plugin, { login: new CopilotBrowserLogin() });
+  const mcpSignIn = new CopilotMcpSignInCoordinator(plugin);
   let latestRefresh = 0;
 
   return {
@@ -64,9 +67,10 @@ export function createCopilotWorkspaceServices(
     commandCatalog: new CopilotCommandCatalog(),
     commandLoader: new CopilotCommandLoader(commandMetadataProbe),
     connection,
+    mcpSignIn,
     async dispose() {
       const results = await Promise.allSettled([
-        commandMetadataProbe.dispose(), connection.dispose(),
+        commandMetadataProbe.dispose(), connection.dispose(), mcpSignIn.dispose(),
       ]);
       const failures: unknown[] = [];
       for (const result of results) {

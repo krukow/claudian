@@ -2545,6 +2545,7 @@ describe('Copilot session resources', () => {
   });
 
   async function writeSelection(host: ProviderHost, overrides: {
+    rememberMcpSignIns?: boolean;
     selectedMcpServers?: Array<{ configPath: string; name: string }>;
     selectedSkillPaths?: string[];
   }): Promise<void> {
@@ -2553,6 +2554,7 @@ describe('Copilot session resources', () => {
         [getHostnameKey()]: {
           additionalMcpConfigPaths: [],
           additionalSkillRoots: [],
+          ...(overrides.rememberMcpSignIns ? { rememberMcpSignIns: true } : {}),
           selectedMcpServers: overrides.selectedMcpServers ?? [],
           selectedSkillPaths: overrides.selectedSkillPaths ?? [],
         },
@@ -2632,6 +2634,30 @@ describe('Copilot session resources', () => {
       ]);
       expect(runtime.clients.map(client => client.lastSession?.sessionId))
         .toEqual(['copilot-session-1', 'copilot-session-1']);
+    } finally {
+      await session.dispose();
+    }
+  });
+
+  it('cold restarts the same conversation when OAuth token storage changes', async () => {
+    const configPath = await writeMcpConfig('notes', '/usr/bin/notes-mcp');
+    const host = createHost();
+    const runtime = createRuntime();
+    const session = new CopilotExecutionBackend(host, { runtime }).createSession(createSessionConfig());
+    try {
+      for (const rememberMcpSignIns of [false, true, false]) {
+        await writeSelection(host, {
+          rememberMcpSignIns,
+          selectedMcpServers: [{ configPath, name: 'notes' }],
+        });
+        await collect(session.execute(createRequest()).events);
+      }
+
+      expect(runtime.clients.map(client => client.lastSession?.config.resources?.mcpOAuthTokenStorage))
+        .toEqual([undefined, 'persistent', undefined]);
+      expect(runtime.clients.map(client => client.lastSession?.sessionId))
+        .toEqual(['copilot-session-1', 'copilot-session-1', 'copilot-session-1']);
+      expect(runtime.clients.map(client => client.stopped)).toEqual([1, 1, 0]);
     } finally {
       await session.dispose();
     }

@@ -21,6 +21,7 @@ import {
   getEnabledCopilotSkillPaths,
 } from '../resources/CopilotResourceSettings';
 import { updateCopilotProviderSettings } from '../settings';
+import { CopilotMcpSignInModal } from './CopilotMcpSignInModal';
 
 const COPILOT_PROVIDER_ID = 'copilot' as const;
 
@@ -37,6 +38,7 @@ interface ResourceRow {
   readonly label: string;
   readonly missing: boolean;
   readonly selected: boolean;
+  readonly supportsSignIn: boolean;
   readonly reference:
     | { readonly kind: 'mcp'; readonly server: CopilotMcpServerReference }
     | { readonly kind: 'skill'; readonly path: string; readonly repository: boolean };
@@ -48,6 +50,7 @@ interface RenderedResourceRow {
   readonly checkbox: HTMLInputElement;
   readonly name: HTMLElement;
   readonly detail: HTMLElement;
+  signIn: HTMLButtonElement | null;
   row: ResourceRow;
 }
 
@@ -109,6 +112,17 @@ export function renderCopilotResourceSettings(
     renderList();
     renderStatus();
   };
+
+  const rememberSetting = new Setting(container)
+    .setName('Remember MCP sign-ins')
+    .setDesc('Use the Copilot CLI credential cache on this computer. It normally uses the OS keychain; if that fails, it may store tokens in local files outside the vault. Required for sign-in from settings.');
+  const remember = rememberSetting.controlEl.createEl('input');
+  remember.type = 'checkbox';
+  remember.setAttribute('aria-label', 'Remember MCP sign-ins');
+  remember.addEventListener('change', () => {
+    const selected = remember.checked;
+    void persist(() => ({ rememberMcpSignIns: selected }));
+  });
 
   renderPathListSetting({
     container,
@@ -268,6 +282,8 @@ export function renderCopilotResourceSettings(
   });
 
   function renderStatus(): void {
+    remember.checked = getCopilotHostResources(settingsBag).rememberMcpSignIns === true;
+    remember.disabled = saving > 0;
     discoverButton.disabled = discovering || saving > 0;
     enableAllButton.disabled = discovering || saving > 0 || inventory === null;
     disableAllButton.disabled = discovering || saving > 0 || renderedRows.size === 0;
@@ -339,6 +355,28 @@ export function renderCopilotResourceSettings(
       if (rendered.name.textContent !== row.label) rendered.name.setText(row.label);
       const detail = row.missing ? `${row.detail} — not found on this computer` : row.detail;
       if (rendered.detail.textContent !== detail) rendered.detail.setText(detail);
+      if (row.supportsSignIn && row.reference.kind === 'mcp') {
+        if (!rendered.signIn) {
+          const reference = row.reference.server;
+          rendered.signIn = rendered.element.createEl('button', {
+            cls: 'claudian-copilot-resources-action',
+            text: 'Sign in',
+            attr: { type: 'button', 'aria-label': `Sign in to ${reference.name}` },
+          });
+          rendered.signIn.addEventListener('click', () => {
+            new CopilotMcpSignInModal(context.plugin.app, getCopilotWorkspaceServices().mcpSignIn, reference).open();
+          });
+        }
+        const disabled = !row.selected || row.missing || selection.rememberMcpSignIns !== true;
+        if (rendered.signIn.disabled !== disabled) rendered.signIn.disabled = disabled;
+        const title = disabled
+          ? 'Select this server and enable Remember MCP sign-ins first.'
+          : 'Authenticate this server in your browser.';
+        if (rendered.signIn.title !== title) rendered.signIn.title = title;
+      } else if (rendered.signIn) {
+        rendered.signIn.remove();
+        rendered.signIn = null;
+      }
       const next: Element | null = previous ? previous.nextElementSibling : listEl.firstElementChild;
       if (next !== rendered.element) {
         listEl.insertBefore(rendered.element, next);
@@ -376,7 +414,7 @@ function renderRow(
     text: row.missing ? `${row.detail} — not found on this computer` : row.detail,
   });
   const rendered: RenderedResourceRow = {
-    element: rowEl, checkbox: checkboxEl, name, detail, row,
+    element: rowEl, checkbox: checkboxEl, name, detail, signIn: null, row,
   };
   checkboxEl.addEventListener('change', () => {
     void rendered.row.toggle(checkboxEl.checked);
@@ -440,6 +478,7 @@ function buildRows(
       detail: describeServer(server),
       label: `MCP server: ${server.name}`,
       missing: false,
+      supportsSignIn: server.transport === 'http' || server.transport === 'sse',
       reference: { kind: 'mcp', server: { configPath: server.configPath, name: server.name } },
       selected: selection.selectedMcpServers.some(entry => (
         serverId(entry.configPath, entry.name) === id
@@ -456,6 +495,7 @@ function buildRows(
       detail: inventory ? reference.configPath : `${reference.configPath} | not checked yet`,
       label: `MCP server: ${reference.name}`,
       missing: inventory !== null,
+      supportsSignIn: false,
       reference: { kind: 'mcp', server: reference },
       selected: true,
       toggle: next => toggleServer(reference, next),
@@ -473,6 +513,7 @@ function buildRows(
       }`,
       label: `Skill: ${skill.commandName}`,
       missing: false,
+      supportsSignIn: false,
       reference: { kind: 'skill', path: skill.path, repository: skill.scope === 'repository' },
       selected,
       toggle: next => toggleSkill(skill.path, next, skill.scope === 'repository'),
@@ -486,6 +527,7 @@ function buildRows(
       detail: inventory ? skillPath : `${skillPath} | not checked yet`,
       label: `Skill: ${skillPath.split(/[\\/]/).at(-2) ?? skillPath}`,
       missing: inventory !== null,
+      supportsSignIn: false,
       reference: { kind: 'skill', path: skillPath, repository: false },
       selected: true,
       toggle: next => toggleSkill(skillPath, next),

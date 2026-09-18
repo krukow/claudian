@@ -101,6 +101,16 @@ After editing a skill in place, click **Refresh** to reload its native command m
 
 Repository detection uses the nearest containing `.git` directory or worktree `.git` file, including when the vault is a subdirectory such as `repo/content`. Claudian does not scan the entire repository or inherit skills from a surrounding outer repository. The automatic defaults apply without visiting settings first. A vault outside a Git repository keeps its local skills opt-in.
 
+### MCP sign-in
+
+A server marked `needs-auth` needs its own sign-in; allowing tool permissions does not authenticate it.
+
+Enable **Remember MCP sign-ins**, select the HTTP/SSE server, then choose **Sign in** beside it. Continue through the browser link and wait for **Signed in** before retrying your chat message. Only the chosen server participates in this sign-in flow; it receives no model tools. Existing Copilot chat runtimes are rebuilt after successful authentication to pick up the native credential cache.
+
+Skills and local stdio servers have no Sign in control. Skills are instruction packages, not authenticated services. The native OAuth and cache-reuse flow is covered with a loopback test server; compatibility with an individual remote service still depends on that service's OAuth support.
+
+Remembered credentials use the Copilot CLI's cache on this computer. The CLI normally uses the OS keychain, but may fall back to local token files outside the vault if the keychain is unavailable. This is an explicit opt-in, not a keychain-only guarantee. Turning the option off changes future runtime storage; it does not revoke or delete credentials already cached by the CLI.
+
 **Where Claudian looks**
 
 | Kind | Standard locations |
@@ -123,7 +133,7 @@ An MCP configuration file is the format the Copilot CLI uses: a JSON document wi
 - Selecting a server permits connecting to it, independently of tool permissions. A session with no tools receives none of the server's tools. The skill-command discovery session uses the same effective skills as chat, with no MCP servers, tools, or model turn. It starts no CLI when no skills are enabled.
 - Resources reach chat only, and only while the turn's tools are not restricted. A read-only or otherwise narrowed turn, and every title, inline edit, and instruction-refinement run, starts no server and loads no skill.
 - Environment entries and headers are passed to the CLI exactly as your configuration file spells them. There is no variable substitution or credential lookup, so a server that needs a secret needs it written literally in the file it is declared in — keep such a file outside the vault and select it as an additional source.
-- Server definitions that authenticate through OAuth or OIDC, or that use `deferTools`, are refused with a message naming the field: the pinned SDK cannot carry them, and Claudian will not silently drop the mechanism a server is reached with.
+- URL-discovered OAuth is supported through **Sign in**. Inline `auth`, `oauth`, `oidc`, `clientId`, `clientSecret`, and `deferTools` configuration fields are not supported; Claudian reports them rather than silently dropping them.
 - Only the tools a selected server actually offers are allowed, and a server's own `tools` restriction is kept. A server that is still starting is waited for while the session opens; one that failed, needs authentication, or is disabled contributes no tools and is reported on the turn rather than waited out.
 - Skills a selected package did not declare — including the CLI's own built-in skills — are disabled for the session before any turn runs.
 - Selecting resources never changes your permission mode. **Ask**, **Allow all**, or **LLM judge** continues to govern the requests they make.
@@ -131,10 +141,10 @@ An MCP configuration file is the format the Copilot CLI uses: a JSON document wi
 ## Data, storage, and network
 
 - **Sent to GitHub**: your message, the context above, the system instructions Claudian builds, and the results of tools the CLI runs. Requests are made by the Copilot CLI to GitHub's Copilot service under your own subscription.
-- **Session state**: the CLI writes its own session data under the per-vault `COPILOT_HOME` Claudian creates outside your notes — under `Application Support` on macOS, `%LOCALAPPDATA%` on Windows, and `$XDG_STATE_HOME` or `~/.local/state` on Linux, in a directory named after the vault's path. Claudian treats that data as read-only and never deletes it, except for the short-lived sessions it creates for titles and inline edits.
+- **Session state**: the CLI writes its own session data under the per-vault `COPILOT_HOME` Claudian creates outside your notes — under `Application Support` on macOS, `%LOCALAPPDATA%` on Windows, and `$XDG_STATE_HOME` or `~/.local/state` on Linux, in a directory named after the vault's path. Claudian treats conversation history as read-only. It deletes only its own temporary auxiliary, metadata, and authentication sessions.
 - **Settings**: Copilot settings live in `.claudian/claudian-settings.json` inside the vault, in plain text. Never put a token or an API key there.
 - **Environment**: Claudian forwards a small host environment to the CLI and accepts only `LANG` and `LC_ALL` from provider settings. PATH, proxy reachability, and certificate trust come from the environment Obsidian itself runs in, because a vault syncs and can be shared. `COPILOT_HOME` and PATH are set by Claudian and cannot be overridden.
-- **Switched off for every session**: telemetry, the shared on-disk embedding cache, keychain-backed MCP token storage, MCP apps, remote sessions and export, the cross-session store, host git operations, memory, scheduling, file hooks, additional plugin directories, and ambient instruction/configuration discovery. Only explicitly selected MCP servers and the effective skill selection reach chat; every ambient server is named and disabled before the session opens. Repository skills are supplied explicitly after filesystem discovery, not by enabling broad runtime discovery.
+- **Switched off for every session**: telemetry, the shared on-disk embedding cache, MCP apps, remote sessions and export, the cross-session store, host git operations, memory, scheduling, file hooks, additional plugin directories, and ambient instruction/configuration discovery. Only explicitly selected MCP servers and the effective skill selection reach chat; every ambient server is named and disabled before the session opens. Repository skills are supplied explicitly after filesystem discovery, not by enabling broad runtime discovery. MCP credentials stay in memory unless you opt in to the native cache.
 - **Plugin isolation limit**: the SDK mode needed for keychain sign-in does not clear plugins already installed in this vault's `COPILOT_HOME`. Keep that home dedicated to Claudian and do not install CLI plugins into it. Plugins installed there can affect sessions even though Claudian exposes no plugin controls; disabling additional plugin directories does not disable installed plugins.
 
 ## Install footprint
@@ -168,3 +178,9 @@ CLAUDIAN_COPILOT_RESOURCE_SMOKE_CLI_PATH="/absolute/path/to/copilot" npm run che
 ```
 
 This opt-in smoke uses temporary state homes and no real account credentials or model endpoint. It covers resource isolation, automatic parent-repository skills with per-skill opt-outs and personal-skill exclusion, cold resume, MCP approval decisions, native allow-all, affirmative and failed native judge recommendations, and native skill expansion; it does not deploy the plugin or exercise the Obsidian UI.
+
+The separate native OAuth check uses a loopback authorization server, synthetic tokens, and a temporary native credential cache:
+
+```bash
+CLAUDIAN_COPILOT_RESOURCE_SMOKE_CLI_PATH="/absolute/path/to/copilot" node scripts/run-jest.js tests/integration/providers/copilot/CopilotMcpSignIn.native.smoke.test.ts --runInBand
+```

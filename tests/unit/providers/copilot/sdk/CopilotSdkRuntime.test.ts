@@ -27,6 +27,11 @@ import type { CopilotPermissionMode } from '@/providers/copilot/settings';
 import { createDeferred, type Deferred } from './FakeCopilotSdkRuntime';
 
 type NativePermissionMode = 'off' | 'on' | 'auto';
+interface NativeMcpSignInRequest {
+  readonly serverName: string;
+  readonly clientName: string;
+  readonly callbackSuccessMessage: string;
+}
 
 /** The SDK session surface the wrapper drives, with only the turn controls under test. */
 class FakeSdkCopilotSession {
@@ -47,6 +52,7 @@ class FakeSdkCopilotSession {
   permissionMode: NativePermissionMode = 'off';
   readonly sentProfiles: Array<{ mode: NativePermissionMode; prompt: string }> = [];
   readonly modelChanges: string[] = [];
+  readonly mcpSignInRequests: NativeMcpSignInRequest[] = [];
   private readonly permissionWaiters = new Map<string, Deferred<void>>();
 
   constructor(readonly sessionId: string, public config?: SessionConfig) {
@@ -72,6 +78,12 @@ class FakeSdkCopilotSession {
       list: async () => ({ commands: FakeSdkCopilotClient.behavior.commands ?? [] }),
     },
     mcp: {
+      oauth: {
+        login: async (params: NativeMcpSignInRequest) => {
+          this.mcpSignInRequests.push(params);
+          return FakeSdkCopilotClient.behavior.mcpLogin?.(params) ?? {};
+        },
+      },
       list: async () => {
         this.serverListings += 1;
         return FakeSdkCopilotClient.behavior.listServers?.(this.serverListings)
@@ -186,6 +198,7 @@ class FakeSdkCopilotClient {
     }>;
     listTools?: (serverName: string) => Promise<{ tools: Array<{ name: string }> }>;
     listSkills?: () => Promise<void>;
+    mcpLogin?: (params: NativeMcpSignInRequest) => Promise<{ authorizationUrl?: string }>;
     resumeSession?: () => Promise<FakeSdkCopilotSession>;
     respondToPermission?: () => Promise<void>;
     send?: (session: FakeSdkCopilotSession, prompt: string) => Promise<void>;
@@ -320,6 +333,99 @@ beforeEach(() => {
   FakeSdkCopilotClient.instances.length = 0;
   FakeSdkCopilotSession.instances.length = 0;
   FakeSdkCopilotClient.behavior = {};
+});
+
+describe('copilotSdkRuntime MCP sign-in primitive', () => {
+  const resources = {
+    mcpServers: { notes: { type: 'http' as const, url: 'https://mcp.example.test' } },
+    skillDirectories: [],
+  };
+
+  it.each([
+    [undefined, 'in-memory'],
+    ['in-memory', 'in-memory'],
+    ['persistent', 'persistent'],
+  ] as const)('uses explicit OAuth token storage %s on create and resume', async (choice, expected) => {
+    const client = await createClient();
+    const config = sessionConfig({ resources: { ...resources, mcpOAuthTokenStorage: choice } });
+    const created = await client.createSession(config);
+    await created.disconnect();
+    const resumed = await client.resumeSession(created.sessionId, config);
+
+    expect(FakeSdkCopilotClient.instances[0].sessionConfigs.map(value => value.mcpOAuthTokenStorage))
+      .toEqual([expected, expected]);
+    await resumed.disconnect();
+  });
+
+  it.each([
+    {},
+    { authorizationUrl: 'https://auth.example.test/authorize?state=cl-test' },
+  ])('hands the native OAuth result back without starting a model turn: %j', async result => {
+    FakeSdkCopilotClient.behavior.mcpLogin = async () => result;
+    const client = await createClient();
+    const session = await client.createSession(sessionConfig({ resources }));
+
+    await expect(session.signInMcpServer('notes')).resolves.toEqual(result);
+
+    expect(FakeSdkCopilotSession.instances[0].mcpSignInRequests).toEqual([{
+      serverName: 'notes',
+      clientName: 'Claudian',
+      callbackSuccessMessage: 'Return to Claudian to finish connecting this server.',
+    }]);
+    expect(FakeSdkCopilotSession.instances[0].sentProfiles).toEqual([]);
+    await session.disconnect();
+  });
+
+  it.each(['ambient', 'toString'])('refuses the unselected server %s', async serverName => {
+    const client = await createClient();
+    const session = await client.createSession(sessionConfig({ resources }));
+
+    await expect(session.signInMcpServer(serverName)).rejects.toThrow(/not selected/i);
+
+    expect(FakeSdkCopilotSession.instances[0].mcpSignInRequests).toEqual([]);
+    await session.disconnect();
+  });
+
+  it('refuses sign-in when the session has no selected resources', async () => {
+    const session = await createSession();
+
+    await expect(session.signInMcpServer('notes')).rejects.toThrow(/not selected/i);
+
+    expect(FakeSdkCopilotSession.instances[0].mcpSignInRequests).toEqual([]);
+    await session.disconnect();
+  });
+
+  it('allows native OAuth initiation the startup budget before handing back its URL', async () => {
+    await withFakeTimers(async () => {
+      const initiation = createDeferred<{ authorizationUrl: string }>();
+      FakeSdkCopilotClient.behavior.mcpLogin = () => initiation.promise;
+      const client = await createClient();
+      const session = await client.createSession(sessionConfig({ resources }));
+      const signingIn = session.signInMcpServer('notes').catch(error => error as Error);
+
+      await jest.advanceTimersByTimeAsync(6_000);
+      initiation.resolve({ authorizationUrl: 'https://auth.example.test/authorize' });
+
+      expect(await signingIn).toEqual({ authorizationUrl: 'https://auth.example.test/authorize' });
+      await session.disconnect();
+    });
+  });
+
+  it('reports native OAuth initiation silence instead of waiting for user authorization', async () => {
+    await withFakeTimers(async () => {
+      FakeSdkCopilotClient.behavior.mcpLogin = () => neverAnswers();
+      const client = await createClient();
+      const session = await client.createSession(sessionConfig({ resources }));
+      const signingIn = session.signInMcpServer('notes').catch(error => error as Error);
+
+      await jest.advanceTimersByTimeAsync(31_000);
+
+      expect(await signingIn).toMatchObject({
+        category: 'transport', message: expect.stringContaining('30 seconds'),
+      });
+      await session.disconnect();
+    });
+  });
 });
 
 describe('copilotSdkRuntime native permission modes', () => {

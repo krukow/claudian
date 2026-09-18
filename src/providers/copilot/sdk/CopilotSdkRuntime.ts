@@ -7,6 +7,7 @@ import type { CopilotPermissionMode } from '../settings';
 import {
   acquireNativeWithin,
   copilotNativeSilenceError,
+  NATIVE_OPERATION_TIMEOUT_MS,
   NATIVE_OPERATION_TIMEOUT_SECONDS,
   NATIVE_STARTUP_TIMEOUT_MS,
   NATIVE_STARTUP_TIMEOUT_SECONDS,
@@ -70,8 +71,8 @@ function loadCopilotSdk(): Promise<CopilotSdkModule> {
  *
  * What empty mode used to supply is therefore supplied here instead. Every capability
  * Claudian does not support is stated on each session rather than defaulted: session
- * telemetry, the shared embedding cache and its retrieval, keychain-backed MCP OAuth
- * storage, MCP servers and apps, remote sessions and remote export, the built-in session
+ * telemetry, the shared embedding cache and its retrieval, MCP servers and apps,
+ * remote sessions and remote export, the built-in session
  * store, host git operations, long-term memory, infinite sessions, scheduling, skills,
  * file hooks, plugin directories, custom instructions and their on-demand discovery,
  * runtime configuration discovery, experimental features, the commit co-author trailer,
@@ -263,6 +264,7 @@ class SdkBackedClient implements CopilotSdkClient {
     if (outcome.kind === 'settled') {
       return new SdkBackedSession(
         session,
+        config,
         outcome.value.resourceDiagnostics,
         outcome.value.skillCommandNames,
         permissions,
@@ -597,6 +599,7 @@ class SdkBackedSession implements CopilotSdkSession {
 
   constructor(
     private readonly session: CopilotSession,
+    private readonly config: CopilotSdkSessionConfig,
     readonly resourceDiagnostics: readonly string[],
     /** Command names the selected skills answer to, lowercased for the runtime's match. */
     private readonly skillCommandNames: ReadonlySet<string>,
@@ -674,6 +677,22 @@ class SdkBackedSession implements CopilotSdkSession {
     );
   }
 
+  async signInMcpServer(serverName: string): Promise<{ authorizationUrl?: string }> {
+    const servers = this.config.resources?.mcpServers;
+    if (!servers || !Object.hasOwn(servers, serverName)) {
+      throw copilotConfigurationError(`The MCP server ${serverName} is not selected for this session.`);
+    }
+    return this.acquire(
+      this.session.rpc.mcp.oauth.login({
+        serverName,
+        clientName: 'Claudian',
+        callbackSuccessMessage: 'Return to Claudian to finish connecting this server.',
+      }),
+      `starting sign-in for the MCP server ${serverName}`,
+      NATIVE_STARTUP_TIMEOUT_MS,
+    );
+  }
+
   /**
    * The SDK resolves once the runtime acknowledges the abort, and rejects when the session
    * is disconnected or the connection failed. Which of the two happened decides whether
@@ -713,16 +732,20 @@ class SdkBackedSession implements CopilotSdkSession {
     }
   }
 
-  /** One bounded metadata call against a runtime that is already up. */
-  private async acquire<T>(work: Promise<T>, context: string): Promise<T> {
-    const outcome = await acquireNativeWithin(work);
+  /** One bounded operation against a runtime that is already up. */
+  private async acquire<T>(
+    work: Promise<T>,
+    context: string,
+    timeoutMs = NATIVE_OPERATION_TIMEOUT_MS,
+  ): Promise<T> {
+    const outcome = await acquireNativeWithin(work, undefined, timeoutMs);
     switch (outcome.kind) {
       case 'settled':
         return outcome.value;
       case 'rejected':
         throw toCopilotRuntimeError(outcome.error, 'provider');
       case 'timed-out':
-        throw copilotNativeSilenceError(context);
+        throw copilotNativeSilenceError(context, timeoutMs / 1_000);
     }
   }
 }
@@ -954,13 +977,13 @@ const TURN_TIMEOUT_MS = 600_000;
  * Nothing here is left to a runtime default. The SDK only fills these in for a client in
  * empty mode, which is the mode that shuts the CLI out of its keychain, so a session that
  * omitted them would inherit the coding agent's own behaviour: telemetry on, an embedding
- * cache shared on disk between sessions, MCP OAuth tokens written to the OS keychain, a
+ * cache shared on disk between sessions, persistent native MCP OAuth tokens, a
  * commit co-author trailer, and whatever instruction, skill, plugin, and MCP sources the
  * runtime discovers around the vault.
  *
- * The caller chooses tools, a model, directories, an approval mode, and the handlers; it
- * cannot reach any of this, because a session that could would read the user's global
- * Copilot configuration or act outside the vault.
+ * The caller chooses tools, a model, directories, an approval mode, and the handlers.
+ * MCP credential persistence is an explicit resource choice; other ambient integrations
+ * remain fixed at this boundary.
  */
 function toSessionConfig(
   config: CopilotSdkSessionConfig,
@@ -995,7 +1018,7 @@ function toSessionConfig(
     includeSubAgentStreamingEvents: false,
     infiniteSessions: { enabled: false },
     manageScheduleEnabled: false,
-    mcpOAuthTokenStorage: 'in-memory',
+    mcpOAuthTokenStorage: resources?.mcpOAuthTokenStorage ?? 'in-memory',
     mcpServers: { ...resources?.mcpServers },
     memory: { enabled: false },
     model: config.model,

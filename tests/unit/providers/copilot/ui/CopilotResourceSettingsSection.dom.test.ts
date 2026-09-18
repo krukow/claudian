@@ -764,6 +764,25 @@ describe('Copilot resource settings', () => {
     expect(container.textContent).toContain('mcp-config.json');
   });
 
+  it('renders sign-in controls only for remote MCP servers, never for skills or local servers', async () => {
+    write('home/.copilot/mcp-config.json', JSON.stringify({
+      mcpServers: {
+        local: { command: 'local-mcp' },
+        remote: { type: 'http', url: 'https://example.test/mcp' },
+      },
+    }));
+    write('home/.copilot/skills/review/SKILL.md', '---\nname: review\n---\n');
+    const { container } = renderSection();
+    const skill = await discovered(container, /Skill: review/);
+    const local = within(container).getByRole('checkbox', { name: /MCP server: local/ });
+
+    for (const checkbox of [skill, local]) {
+      const row = checkbox.closest('.claudian-copilot-resources-row')!;
+      expect(within(row as HTMLElement).queryAllByRole('button', { hidden: true })).toEqual([]);
+    }
+    expect(within(container).getByRole('button', { name: 'Sign in to remote' })).toBeTruthy();
+  });
+
   it('does not replace unchanged resource text when one skill is toggled', async () => {
     const skillPath = write('home/.copilot/skills/review/SKILL.md', '---\nname: review\ndescription: Review notes\n---\n');
     write('home/.copilot/skills/another/SKILL.md', '---\nname: another\ndescription: Another skill\n---\n');
@@ -781,6 +800,28 @@ describe('Copilot resource settings', () => {
     for (const [index, element] of textElements.entries()) {
       expect(element.firstChild).toBe(originalTextNodes[index]);
     }
+  });
+
+  it('offers sign-in only after selecting a remote server and opting in to remembered credentials', async () => {
+    write('home/.copilot/mcp-config.json', JSON.stringify({
+      mcpServers: { notes: { type: 'http', url: 'https://example.test/mcp' } },
+    }));
+    const { container, settings } = renderSection();
+    const selected = await discovered(container, /MCP server: notes/);
+    const signIn = within(container).getByRole('button', { name: 'Sign in to notes' }) as HTMLButtonElement;
+    expect(signIn.type).toBe('button');
+    expect(signIn.closest('label')).toBeNull();
+    expect(signIn.parentElement).toBe(selected.closest('.claudian-copilot-resources-row'));
+    expect(signIn.disabled).toBe(true);
+    selected.click();
+    await settle();
+    expect(signIn.disabled).toBe(true);
+
+    within(container).getByRole('checkbox', { name: 'Remember MCP sign-ins' }).click();
+    await settle();
+
+    expect(getCopilotHostResources(settings).rememberMcpSignIns).toBe(true);
+    expect(signIn.disabled).toBe(false);
   });
 
   it('offers accessible native pressed kind filters and restores the unfiltered actions', async () => {

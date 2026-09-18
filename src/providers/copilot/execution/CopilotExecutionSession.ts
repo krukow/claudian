@@ -669,6 +669,9 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
       return null;
     }
     return {
+      ...(resolution.resources.mcpOAuthTokenStorage
+        ? { mcpOAuthTokenStorage: resolution.resources.mcpOAuthTokenStorage }
+        : {}),
       mcpServers: resolution.resources.mcpServers,
       skillDirectories: resolution.resources.skillDirectories,
     };
