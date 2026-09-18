@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -42,6 +42,12 @@ import {
 } from '../sdk/FakeCopilotSdkRuntime';
 
 const VAULT_PATH = '/vault';
+let mockHomeDirectory = '/synthetic-copilot-home';
+
+jest.mock('node:os', () => ({
+  ...jest.requireActual<typeof os>('node:os'),
+  homedir: () => mockHomeDirectory,
+}));
 
 function createHost(overrides: Partial<Record<string, unknown>> = {}): ProviderHost {
   const settings: Record<string, unknown> = { ...overrides };
@@ -2537,11 +2543,13 @@ describe('Copilot session resources', () => {
   let resourceRoot = '';
 
   beforeEach(async () => {
-    resourceRoot = await mkdtemp(path.join(os.tmpdir(), 'copilot-session-resources-'));
+    resourceRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), 'copilot-session-resources-')));
+    mockHomeDirectory = path.join(resourceRoot, 'home');
   });
 
   afterEach(async () => {
     await rm(resourceRoot, { force: true, recursive: true });
+    mockHomeDirectory = '/synthetic-copilot-home';
   });
 
   async function writeSelection(host: ProviderHost, overrides: {
@@ -2632,6 +2640,39 @@ describe('Copilot session resources', () => {
       ]);
       expect(runtime.clients.map(client => client.lastSession?.sessionId))
         .toEqual(['copilot-session-1', 'copilot-session-1']);
+    } finally {
+      await session.dispose();
+    }
+  });
+
+  it.each([false, true])('reports an unreadable repository package only while it is enabled (opted out: %s)', async (disabled) => {
+    const broken = path.join(resourceRoot, '.github', 'skills', 'broken', 'SKILL.md');
+    const healthy = path.join(resourceRoot, '.agents', 'skills', 'healthy', 'SKILL.md');
+    await mkdir(path.join(resourceRoot, '.git'));
+    await mkdir(broken, { recursive: true });
+    await mkdir(path.dirname(healthy), { recursive: true });
+    await writeFile(healthy, '---\nname: healthy\n---\n');
+    const host = createHost();
+    updateCopilotProviderSettings(host.settings, {
+      resourcesByHost: {
+        [getHostnameKey()]: {
+          additionalMcpConfigPaths: [], additionalSkillRoots: [], selectedMcpServers: [],
+          selectedSkillPaths: [], disabledRepositorySkillPaths: disabled ? [broken] : [],
+        },
+      },
+    });
+    const runtime = createRuntime();
+    const session = new CopilotExecutionBackend(host, { runtime }).createSession(
+      createSessionConfig({ vaultWorkingDirectory: resourceRoot }),
+    );
+    try {
+      const events = await collect(session.execute(createRequest()).events);
+
+      expect(runtime.lastClient?.lastSession?.config.resources).toEqual({
+        mcpServers: {}, skillDirectories: [path.dirname(healthy)],
+      });
+      expect(events.some(event => event.type === 'notice' && event.level === 'warning'
+        && event.message.includes(broken))).toBe(!disabled);
     } finally {
       await session.dispose();
     }

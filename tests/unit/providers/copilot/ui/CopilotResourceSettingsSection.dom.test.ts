@@ -67,7 +67,7 @@ jest.mock('obsidian', () => {
 });
 
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -85,6 +85,7 @@ import {
   getCopilotHostResources,
   updateCopilotHostResources,
 } from '@/providers/copilot/resources/CopilotHostResources';
+import { resolveCopilotSelectedResources } from '@/providers/copilot/resources/CopilotResourceResolver';
 import type { CopilotResourceSettings } from '@/providers/copilot/resources/CopilotResourceSettings';
 import { updateCopilotProviderSettings } from '@/providers/copilot/settings';
 import { renderCopilotResourceSettings } from '@/providers/copilot/ui/CopilotResourceSettingsSection';
@@ -239,6 +240,81 @@ describe('Copilot resource settings', () => {
       .toBe(true);
     expect(persistedSelections).toEqual([]);
     expect(commandLoader.getCacheFingerprint(settings)).toBe(fingerprint);
+  });
+
+  it.each([false, true])('does not change an unverified saved skill before discovering its repository scope (alias: %s)', async (linked) => {
+    const skillPath = write('vault/.github/skills/review/SKILL.md', '---\nname: review\n---\n');
+    const vault = path.join(workspace, linked ? 'linked-vault' : 'vault');
+    if (linked) symlinkSync(path.join(workspace, 'vault'), vault, 'junction');
+    const { container, persistedSelections, settings } = renderSection({
+      resources: { selectedSkillPaths: [path.join(vault, '.github', 'skills', 'review', 'SKILL.md')] },
+      vaultDirectory: vault,
+    });
+    const pending = within(container).getByRole('checkbox', {
+      name: /Skill: review.*not checked yet/,
+    }) as HTMLInputElement;
+    pending.click();
+
+    expect(pending.checked).toBe(true);
+    expect(persistedSelections).toEqual([]);
+    expect(container.textContent).not.toContain('not found on this computer');
+    const verified = await discovered(container, /Skill: review.*repository skill/);
+    expect(verified).toBe(pending);
+    expect(verified.disabled).toBe(false);
+    verified.focus();
+    verified.click();
+    await settle();
+
+    expect(document.activeElement).toBe(verified);
+    expect(verified.checked).toBe(false);
+    expect(getCopilotHostResources(settings)).toMatchObject({
+      selectedSkillPaths: [], disabledRepositorySkillPaths: [skillPath],
+    });
+    expect(await resolveCopilotSelectedResources(
+      getCopilotHostResources(settings), path.join(workspace, 'vault'),
+    )).toEqual({ problems: [], resources: null });
+  });
+
+  it('cannot bulk-disable unverified skills after discovery fails', async () => {
+    const skillPath = write('vault/.github/skills/review/SKILL.md', '---\nname: review\n---\n');
+    jest.mocked(os.homedir).mockImplementationOnce(() => {
+      throw new Error('Home directory unavailable.');
+    });
+    const { container, settings, persistedSelections } = renderSection({
+      resources: { selectedSkillPaths: [skillPath] },
+    });
+    const disable = within(container).getByRole('button', { name: 'Disable all resources' }) as HTMLButtonElement;
+    const checkbox = within(container).getByRole('checkbox', { name: /Skill: review.*not checked yet/ }) as HTMLInputElement;
+    disable.click();
+    checkbox.click();
+
+    expect(disable.disabled).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+    expect(checkbox.checked).toBe(true);
+    expect(getCopilotHostResources(settings).selectedSkillPaths).toEqual([skillPath]);
+    expect(persistedSelections).toEqual([]);
+    expect(within(container).getByRole('status').textContent).toContain('Discovery failed');
+  });
+
+  it('clears alias opt-outs when automatic skills are enabled in bulk', async () => {
+    const skillPath = write('vault/.github/skills/review/SKILL.md', '---\nname: review\n---\n');
+    const alias = path.join(workspace, 'linked-vault');
+    symlinkSync(path.join(workspace, 'vault'), alias, 'junction');
+    const saved = path.join(alias, '.github', 'skills', 'review', 'SKILL.md');
+    const { container, settings } = renderSection({
+      resources: { selectedSkillPaths: [saved], disabledRepositorySkillPaths: [saved] },
+    });
+    const checkbox = await discovered(container, /Skill: review.*repository skill/);
+    expect(resourceCheckboxes(container)).toEqual([checkbox]);
+    expect(checkbox.checked).toBe(false);
+    within(container).getByRole('button', { name: 'Enable all resources' }).click();
+    await settle();
+
+    expect(checkbox.checked).toBe(true);
+    expect(getCopilotHostResources(settings).selectedSkillPaths).toEqual([]);
+    expect(getCopilotHostResources(settings)).not.toHaveProperty('disabledRepositorySkillPaths');
+    expect((await resolveCopilotSelectedResources(getCopilotHostResources(settings), alias)).resources?.skillPaths)
+      .toEqual([skillPath]);
   });
 
   it('keeps selections unverified after failed automatic discovery and can retry', async () => {
