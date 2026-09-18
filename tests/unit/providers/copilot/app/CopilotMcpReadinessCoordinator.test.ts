@@ -215,3 +215,35 @@ it('surfaces cleanup failure during cancellation without publishing stale readin
   expect(service.getState(references[0])).toEqual({ phase: 'unchecked' });
   await service.dispose();
 });
+
+it.each(['cache', 'selection', 'runtime'] as const)(
+  'invalidates completed checks after %s changes without resurrecting them when settings revert',
+  async change => {
+    const runtime = new FakeCopilotSdkRuntime();
+    const { references, registry, service, settings } = await setup(runtime);
+    await service.check();
+    expect(service.getState(references[0])).toEqual({ phase: 'connected', toolCount: 0 });
+    await registry.runTransition(['copilot'], async () => {
+      updateCopilotProviderSettings(settings, change === 'runtime'
+        ? { cliPath: '/opt/other-copilot' }
+        : { resourcesByHost: updateCopilotHostResources(settings, change === 'cache'
+          ? { rememberMcpSignIns: false }
+          : { selectedMcpServers: [] }) });
+    });
+    expect(service.getState(references[0])).toEqual({ phase: 'unchecked' });
+    await registry.runTransition(['copilot'], async () => {
+      updateCopilotProviderSettings(settings, change === 'runtime'
+        ? { cliPath: '' }
+        : { resourcesByHost: updateCopilotHostResources(settings, {
+          rememberMcpSignIns: true, selectedMcpServers: references,
+        }) });
+    });
+    expect(service.getState(references[0])).toEqual({ phase: 'unchecked' });
+    await service.ensureChecked();
+    expect(service.getState(references[0])).toEqual({ phase: 'connected', toolCount: 0 });
+    expect(runtime.clients.flatMap(client => client.createdSessions.map(session => (
+      Object.keys(session.config.resources?.mcpServers ?? {})
+    )))).toEqual([['first'], ['second'], ['first'], ['second']]);
+    await service.dispose();
+  },
+);

@@ -77,7 +77,7 @@ import { configureAxe } from 'jest-axe';
 import { ProviderExecutionLifecycleRegistry } from '@/core/execution/ProviderExecutionLifecycleRegistry';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
 import { ProviderWorkspaceRegistry } from '@/core/providers/ProviderWorkspaceRegistry';
-import type { ProviderSettingsTabRendererContext } from '@/core/providers/types';
+import type { ProviderId, ProviderSettingsTabRendererContext } from '@/core/providers/types';
 import type { ClaudianSettings } from '@/core/types';
 import { CopilotCommandLoader } from '@/providers/copilot/app/CopilotCommandLoader';
 import { CopilotCommandMetadataProbe } from '@/providers/copilot/app/CopilotCommandMetadataProbe';
@@ -124,6 +124,8 @@ function write(relativePath: string, content: string): string {
 }
 
 function renderSection(options: {
+  beforeSettingsCommit?: () => Promise<void>;
+  expectedSignInDisposalFailure?: string;
   persistenceError?: Error;
   resources?: Partial<CopilotResourceSettings>;
   settings?: Record<string, unknown>;
@@ -136,6 +138,7 @@ function renderSection(options: {
   settings: Record<string, unknown>;
   dispose: () => void;
   mcpSignIn: CopilotMcpSignInCoordinator;
+  registry: ProviderExecutionLifecycleRegistry;
 } {
   const settings = options.settings ?? { providerConfigs: {} };
   updateCopilotProviderSettings(settings, {
@@ -155,19 +158,22 @@ function renderSection(options: {
   const registry = new ProviderExecutionLifecycleRegistry();
   const host = {
     executionLifecycleRegistry: registry,
-    runProviderExecutionTransition: (ids: string[], action: () => Promise<void>) => registry.runTransition(ids, action),
+    runProviderExecutionTransition: registry.runTransition.bind(registry),
     getResolvedProviderCliPath: async () => '/usr/bin/copilot',
     app: { vault: { adapter: { basePath: options.vaultDirectory ?? path.join(workspace, 'vault') } } },
     applyProviderRuntimeSettings: async (
-      _providerIds: readonly string[],
+      providerIds: ProviderId[],
       mutation: (value: ClaudianSettings) => void,
       onApplied?: () => void,
     ) => {
-      if (options.persistenceError) {
-        throw options.persistenceError;
-      }
-      mutation(settings as unknown as ClaudianSettings);
-      persistedSelections.push(getCopilotHostResources(settings));
+      await registry.runTransition(providerIds, async () => {
+        await options.beforeSettingsCommit?.();
+        if (options.persistenceError) {
+          throw options.persistenceError;
+        }
+        mutation(settings as unknown as ClaudianSettings);
+        persistedSelections.push(getCopilotHostResources(settings));
+      });
       onApplied?.();
     },
     settings: settings as unknown as ClaudianSettings,
@@ -193,13 +199,24 @@ function renderSection(options: {
   cleanups.push(async () => {
     dispose();
     await mcpReadiness.dispose();
-    await mcpSignIn.dispose();
+    if (options.expectedSignInDisposalFailure) {
+      await expect(mcpSignIn.dispose()).rejects.toThrow(options.expectedSignInDisposalFailure);
+    } else {
+      await mcpSignIn.dispose();
+    }
   });
-  return { commandLoader, container, persistedSelections, settings, dispose, mcpSignIn };
+  return { commandLoader, container, persistedSelections, settings, dispose, mcpSignIn, registry };
 }
 
 async function settle(): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, 0));
+  await waitFor(() => {
+    for (const input of within(document.body).queryAllByRole('checkbox', { name: 'Remember MCP sign-ins' })) {
+      expect((input as HTMLInputElement).disabled).toBe(false);
+    }
+    for (const button of within(document.body).queryAllByRole('button', { name: /^(Discover|Discovering|Refresh) resources$/ })) {
+      expect((button as HTMLButtonElement).disabled).toBe(false);
+    }
+  });
 }
 
 /** Waits for discovery to reach the list. */
@@ -238,6 +255,131 @@ afterEach(async () => {
 });
 
 describe('Copilot resource settings', () => {
+  it('keeps completed MCP checks across skill-only changes while explicit Refresh checks again', async () => {
+    const configPath = write('home/.copilot/mcp-config.json', JSON.stringify({
+      mcpServers: {
+        notes: { type: 'http', url: 'https://notes.example.test/mcp' },
+        wiki: { type: 'http', url: 'https://wiki.example.test/mcp' },
+      },
+    }));
+    const skillPath = write('home/.copilot/skills/review/SKILL.md', '---\nname: review\n---\n');
+    const runtime = new FakeCopilotSdkRuntime();
+    const { container, settings } = renderSection({
+      runtime,
+      resources: { selectedMcpServers: ['notes', 'wiki'].map(name => ({ configPath, name })) },
+    });
+    await waitFor(() => expect(within(container).getAllByText('Connected (0 tools)')).toHaveLength(2));
+    const initialClients = [...runtime.clients];
+    const skill = within(container).getByRole('checkbox', { name: /Skill: review/ });
+    for (const selected of [true, false]) {
+      skill.click();
+      await settle();
+      await waitFor(() => expect(within(container).getAllByText('Connected (0 tools)')).toHaveLength(2));
+      expect(getCopilotHostResources(settings).selectedSkillPaths).toEqual(selected ? [skillPath] : []);
+      expect(runtime.clients).toEqual(initialClients);
+    }
+
+    within(container).getByRole('button', { name: 'Refresh resources' }).click();
+    await settle();
+    await waitFor(() => expect(within(container).getAllByText('Connected (0 tools)')).toHaveLength(2));
+    expect(runtime.clients.flatMap(client => client.createdSessions.map(session => (
+      Object.keys(session.config.resources?.mcpServers ?? {})
+    )))).toEqual([['notes'], ['wiki'], ['notes'], ['wiki']]);
+  });
+
+  it('rechecks confirmed authentication even when the chat-runtime refresh fails', async () => {
+    const configPath = write('home/.copilot/mcp-config.json', JSON.stringify({
+      mcpServers: { notes: { type: 'http', url: 'https://example.test/mcp' } },
+    }));
+    let authenticated = false;
+    const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
+      onSessionCreated: session => {
+        session.mcpReadinessBehavior = async () => authenticated
+          ? { phase: 'connected', toolCount: 1 } : { phase: 'needs-auth' };
+        session.mcpSignInBehavior = async () => { authenticated = true; return {}; };
+      },
+    }));
+    const reference = { configPath, name: 'notes' };
+    const { container, mcpSignIn, registry } = renderSection({
+      expectedSignInDisposalFailure: 'Existing chat runtime could not be refreshed.',
+      runtime, resources: { selectedMcpServers: [reference], rememberMcpSignIns: true },
+    });
+    await waitFor(() => expect(within(container).getByText('Sign-in required')).toBeTruthy());
+    registry.registerTransitionHook('copilot', {
+      beforeTransition: () => { throw new Error('Existing chat runtime could not be refreshed.'); },
+    });
+    await mcpSignIn.signIn(reference);
+
+    await waitFor(() => expect(within(container).getByText('Connected (1 tool)')).toBeTruthy());
+    expect(mcpSignIn.getState(reference)).toEqual({
+      phase: 'connected', warning: expect.stringContaining('Existing chat runtime could not be refreshed.'),
+    });
+    expect(within(container).queryByRole('button', { name: 'Sign in to notes' })).toBeNull();
+  });
+
+  it('reports failed probe quiescence instead of committing runtime settings, and permits retry', async () => {
+    const configPath = write('home/.copilot/mcp-config.json', JSON.stringify({
+      mcpServers: { notes: { type: 'http', url: 'https://example.test/mcp' } },
+    }));
+    const entered = createDeferred();
+    const listing = createDeferred();
+    let failStop = true;
+    const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
+      onSessionCreated: session => {
+        session.mcpReadinessBehavior = async () => {
+          entered.resolve();
+          await listing.promise;
+          return { phase: 'needs-auth' };
+        };
+      },
+      stopBehavior: async () => { if (failStop) throw new Error('The MCP probe could not be stopped.'); },
+    }));
+    const { container, settings } = renderSection({
+      runtime,
+      resources: { selectedMcpServers: [{ configPath, name: 'notes' }], rememberMcpSignIns: true },
+    });
+    await entered.promise;
+    within(container).getByRole('checkbox', { name: 'Remember MCP sign-ins' }).click();
+    listing.resolve();
+    await waitFor(() => {
+      expect(within(container).getByRole('status').textContent)
+        .toContain('Could not save resource settings: The MCP probe could not be stopped.');
+    });
+    expect(getCopilotHostResources(settings).rememberMcpSignIns).toBe(true);
+
+    failStop = false;
+    within(container).getByRole('checkbox', { name: 'Remember MCP sign-ins' }).click();
+    await settle();
+    expect(getCopilotHostResources(settings).rememberMcpSignIns).toBeUndefined();
+  });
+
+  it('disables sign-in while the remembered-credentials choice is being saved', async () => {
+    const configPath = write('home/.copilot/mcp-config.json', JSON.stringify({
+      mcpServers: { notes: { type: 'http', url: 'https://example.test/mcp' } },
+    }));
+    const commit = createDeferred();
+    const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
+      onSessionCreated: session => {
+        session.mcpReadinessBehavior = async () => ({ phase: 'needs-auth' });
+      },
+    }));
+    const { container } = renderSection({
+      beforeSettingsCommit: () => commit.promise,
+      runtime,
+      resources: { selectedMcpServers: [{ configPath, name: 'notes' }], rememberMcpSignIns: true },
+    });
+    await waitFor(() => expect(within(container).getByText('Sign-in required')).toBeTruthy());
+    const signIn = within(container).getByRole('button', { name: 'Sign in to notes' }) as HTMLButtonElement;
+    expect(signIn.disabled).toBe(false);
+    within(container).getByRole('checkbox', { name: 'Remember MCP sign-ins' }).click();
+    try {
+      expect(signIn.disabled).toBe(true);
+    } finally {
+      commit.resolve();
+      await settle();
+    }
+  });
+
   it('checks enabled MCPs after rendering, keeps skills status-free, and does not probe on filters', async () => {
     const configPath = write('home/.copilot/mcp-config.json', JSON.stringify({
       mcpServers: {
@@ -530,6 +672,7 @@ describe('Copilot resource settings', () => {
     writeFileSync(skillPath, '---\nname: review\ndescription: Updated skill\n---\n');
     within(container).getByRole('button', { name: 'Refresh resources' }).click();
     await discovered(container, /Updated skill/);
+    await settle();
 
     expect(commandLoader.getCacheFingerprint(settings)).not.toBe(fingerprint);
     expect(getCopilotHostResources(settings).selectedSkillPaths).toEqual([skillPath]);
@@ -821,6 +964,7 @@ describe('Copilot resource settings', () => {
     await waitFor(() => {
       expect(container.textContent).toContain('not found on this computer');
     });
+    await settle();
 
     within(container).getByRole('button', { name: 'Enable all resources' }).click();
     await settle();
