@@ -220,6 +220,7 @@ describe('CopilotClientFactory authentication gate', () => {
 
     expect(error.message).toContain('COPILOT_HOME');
     expect(error.message).toContain(COLD_START_IDENTITY.baseDirectory);
+    expect(error.message).toContain('Connect Copilot');
   });
 
   /** What the CLI did say is still reported: it may name an expiry or an SSO refusal. */

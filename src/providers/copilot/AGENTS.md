@@ -142,7 +142,7 @@ them as pending here.
   MCP apps, remote sessions and remote export, the built-in session
   store, host git operations, memory, infinite sessions, scheduling, file hooks, plugin
   directories, custom instructions and their on-demand discovery, runtime configuration
-  discovery,   general experimental mode, the commit co-author trailer, and the runtime's own
+  discovery, general experimental mode, the commit co-author trailer, and the runtime's own
   `environment_context` description of the host. MCP servers and skills are stated there
   too, from the caller's resources alone. Several of
   those default the other way outside empty mode, so an omission is not a smaller session
@@ -237,7 +237,6 @@ them as pending here.
   it must never live under the vault — including under `.claudian/`.
 - The settings connection flow checks the vault's own `COPILOT_HOME`, launches browser sign-in only after a user action, then verifies authentication through SDK model discovery. Authentication errors direct users to Connect Copilot, never to a shell command.
 - Browser sign-in sets `storeTokenPlaintext: false` in the isolated CLI home's `settings.json`, preserving other keys, and uses pipes with closed stdin rather than a PTY so the CLI cannot obtain consent for plaintext fallback. Do not copy global account records/tokens or disable keychain. A successful process exit alone is not proof of authentication.
-- Permission modes are host-scoped and apply only to persistent, unrestricted chat. The SDK boundary configures the native `/permissions` command before publishing a session; do not assume a generated SDK RPC exists on the installed CLI. Assisted approvals require one event-aware response owner because the SDK callback omits recommendation metadata; only an affirmative recommendation may bypass the human prompt.
 - That directory is always absolute, by the same rule the CLI path is held to in
   `runtime/CopilotAbsolutePath`. Every host variable it is built from — `XDG_STATE_HOME`,
   `LOCALAPPDATA`, `HOME`, `USERPROFILE`, and the temporary-location variables — is
@@ -442,6 +441,9 @@ them as pending here.
   that fails is retried through the next client and reported when no next client can exist.
 - Approvals, questions, and events all carry the identity of the live session they came
   from, so a session Claudian dropped can never answer for the run that replaced it.
+- Permission modes are host-scoped and apply only to persistent chat with a `provider-default` or `unrestricted` tool policy. `CopilotExecutionSession` snapshots the effective mode before asynchronous acquisition and includes it in session identity; auxiliary and restricted turns always use Ask. Approval modes never widen available or excluded tools.
+- Before publishing a created or resumed session, the SDK boundary calls `session.rpc.options.update({ featureFlags: { AUTO_APPROVAL: mode === 'judge' } })`, then `session.rpc.commands.invoke({ name: 'permissions', input })`, where input is `default`, `assisted`, or `allow-all`. SDK 1.0.11 exposes generated `setAllowAll`/`getAllowAll` methods that CLI 1.0.86-2 rejects with `Unhandled method`; do not substitute them or enable general experimental mode.
+- Assisted approvals have one event-aware response owner: the SDK invokes its ordinary callback before public events and omits prompt metadata. Only while that owner is attached in judge mode does the callback return `no-result`. Normalize native `assistedApproval` and SDK `autoApproval`; only an affirmative recommendation without a managed-human requirement may approve once. Keep request, turn, cancellation, and disposal fences, and never attribute an AI or standing approval with `approvedInteractively`.
 - Input the provider cannot carry is reported on the turn rather than dropped. An image
   reaches nothing — the CLI receives a text prompt and `capabilities.ts` advertises no
   image support — so the turn says which attachments were not sent.

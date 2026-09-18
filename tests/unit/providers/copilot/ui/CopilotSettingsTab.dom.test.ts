@@ -392,9 +392,12 @@ describe('Copilot settings tab', () => {
     expect(description).not.toContain('NODE_EXTRA_CA_CERTS');
   });
 
-  it('offers discovery through the shared model picker', () => {
+  it('offers in-app connection and discovery through the shared model picker', () => {
     const { container } = renderSettingsTab();
 
+    expect(within(container).getByRole('button', { name: 'Connect Copilot' }).getAttribute('type'))
+      .toBe('button');
+    expect(container.textContent).toContain('Use Connect Copilot above to sign in and choose a model.');
     expect(within(container).getByRole('button', { name: 'Discover' })).toBeTruthy();
   });
 
