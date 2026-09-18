@@ -38,9 +38,12 @@ export function buildTabRuntimeShell(
   const dom = buildTabDOM(contentEl);
   const state = new ChatState({
     onStreamingStateChanged: isStreaming => {
+      runtimeRef.requirePublished().ui.updateResponseControls();
       options.onStreamingChanged?.(runtimeRef.requirePublished(), isStreaming);
     },
+    onCancellationChanged: () => runtimeRef.requirePublished().ui.updateResponseControls(),
     onRewindingStateChanged: isRewinding => {
+      runtimeRef.requirePublished().ui.updateResponseControls();
       options.onRewindingChanged?.(runtimeRef.requirePublished(), isRewinding);
     },
     onAttentionChanged: attention => {

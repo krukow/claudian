@@ -74,6 +74,7 @@ jest.mock('obsidian', () => {
 });
 
 import { fireEvent, screen, waitFor, within } from '@testing-library/dom';
+import { configureAxe } from 'jest-axe';
 import { type App, Menu, Notice, type WorkspaceLeaf } from 'obsidian';
 
 import { ConversationRepository } from '@/app/conversations/ConversationRepository';
@@ -81,10 +82,12 @@ import { DEFAULT_CLAUDIAN_SETTINGS } from '@/app/settings/defaultSettings';
 import { ConversationPersistenceStore } from '@/core/bootstrap/ConversationPersistenceStore';
 import {
   type ChatRewindResult,
+  type ProviderExecutionEvent,
   ProviderExecutionLifecycleRegistry,
   type ProviderExecutionSession,
   type RewindableExecutionSession,
 } from '@/core/execution';
+import type { ProviderSessionConfig } from '@/core/execution/ProviderExecutionBackend';
 import { ProviderRegistry } from '@/core/providers/ProviderRegistry';
 import { ProviderWorkspaceRegistry } from '@/core/providers/ProviderWorkspaceRegistry';
 import { VaultFileAdapter } from '@/core/storage/VaultFileAdapter';
@@ -104,6 +107,8 @@ beforeAll(() => {
   };
   Object.assign(HTMLElement.prototype, {
     empty(this: HTMLElement) { this.replaceChildren(); },
+    scrollIntoView() {},
+    appendText(this: HTMLElement, text: string) { this.appendChild(document.createTextNode(text)); },
     addClass(this: HTMLElement, ...classes: string[]) { this.classList.add(...classes); },
     removeClass(this: HTMLElement, ...classes: string[]) { this.classList.remove(...classes); },
     hasClass(this: HTMLElement, cls: string) { return this.classList.contains(cls); },
@@ -131,7 +136,8 @@ afterEach(() => {
 
 async function createHarness(options: {
   archived?: boolean;
-  createSession?: () => ProviderExecutionSession;
+  createSession?: (config: ProviderSessionConfig) => ProviderExecutionSession;
+  beforeWrite?: (path: string, content: string) => Promise<void>;
   messages?: Conversation['messages'];
 } = {}) {
   ProviderRegistry.register('claude', {
@@ -154,7 +160,10 @@ async function createHarness(options: {
           if (content === undefined) throw new Error(`Missing fixture file: ${path}`);
           return content;
         },
-        write: async (path: string, content: string) => { files.set(path, content); },
+        write: async (path: string, content: string) => {
+          await options.beforeWrite?.(path, content);
+          files.set(path, content);
+        },
         mkdir: async (path: string) => { folders.add(path); },
         remove: async (path: string) => { files.delete(path); },
       },
@@ -177,7 +186,11 @@ async function createHarness(options: {
       offref: () => {},
     },
   } as unknown as App;
-  const settings = { ...DEFAULT_CLAUDIAN_SETTINGS, enableDualPane: false };
+  const settings = {
+    ...DEFAULT_CLAUDIAN_SETTINGS,
+    enableAutoTitleGeneration: false,
+    enableDualPane: false,
+  };
   const persistence = new ConversationPersistenceStore(new VaultFileAdapter(app), `device-${'b'.repeat(64)}`);
   const repository = new ConversationRepository({
     getSettings: () => settings,
@@ -221,6 +234,8 @@ async function createHarness(options: {
     getConversationSync: (id: string) => repository.getSync(id),
     getCachedConversation: (id: string) => repository.getSync(id),
     switchConversation: (id: string) => repository.switchTo(id),
+    updateConversation: (id, updates) => repository.update(id, updates),
+    renameConversation: (id, title) => repository.update(id, { title }),
     deleteConversation: (id: string) => repository.delete(id),
     getAllViews: () => views,
     findConversationAcrossViews: (id: string) => {
@@ -327,6 +342,237 @@ it.each([
   }
 });
 
+function createResponseSession(
+  phase: 'thinking' | 'text' | 'tool' | 'approval' = 'thinking',
+  sessionInstanceId = 'synthetic-response',
+) {
+  let release!: () => void;
+  const settlement = new Promise<void>(resolve => { release = resolve; });
+  let started = false;
+  let cancelled = false;
+  let aborted = false;
+  let config: ProviderSessionConfig;
+  const session: ProviderExecutionSession = {
+    providerId: 'claude',
+    sessionInstanceId,
+    execute: (request) => {
+      started = true;
+      request.signal.addEventListener('abort', () => { aborted = true; }, { once: true });
+      const scope = {
+        kind: 'requested' as const,
+        sessionInstanceId: session.sessionInstanceId,
+        executionId: 'execution',
+        turnId: 'turn',
+        sequence: 0,
+      };
+      return {
+        executionId: scope.executionId,
+        turnId: scope.turnId,
+        cancel: () => { cancelled = true; },
+        events: (async function* (): AsyncIterable<ProviderExecutionEvent> {
+          yield { type: 'turn_started', accepted: true, scope };
+          if (phase === 'tool') {
+            yield {
+              type: 'tool_started',
+              name: 'Read',
+              input: { file_path: 'example.md' },
+              toolCallId: 'read-example',
+              toolScope: { kind: 'main' },
+              scope: { ...scope, sequence: 1 },
+            };
+          } else if (phase === 'approval') {
+            await config.interactionPort.requestApproval({
+              kind: 'approval',
+              sessionInstanceId: session.sessionInstanceId,
+              turnId: scope.turnId,
+              interactionId: 'approval',
+              toolName: 'Bash',
+              input: { command: 'echo synthetic' },
+              description: 'Synthetic approval',
+            }, request.signal);
+          } else {
+            yield {
+              type: phase === 'thinking' ? 'thinking_delta' : 'text_delta',
+              text: 'Considering the request',
+              scope: { ...scope, sequence: 1 },
+            };
+          }
+          await settlement;
+          yield { type: 'cancelled', scope: { ...scope, sequence: 2 } };
+        })(),
+      };
+    },
+    cancel: () => { cancelled = true; },
+    getSnapshot: () => ({ providerId: 'claude', revision: 0, status: 'idle' }),
+    getStatus: () => 'idle',
+    onEvent: () => () => {},
+    dispose: async () => { release(); },
+  };
+  return {
+    session,
+    createSession: (sessionConfig: ProviderSessionConfig) => { config = sessionConfig; return session; },
+    release,
+    get started() { return started; },
+    get cancelled() { return cancelled; },
+    get aborted() { return aborted; },
+  };
+}
+
+it('stops only the owning response and waits for real provider settlement without losing queued input', async () => {
+  const provider = createResponseSession();
+  const otherProvider = createResponseSession('thinking', 'neighbor-response');
+  const sessions = [provider.session, otherProvider.session];
+  const harness = await createHarness({ createSession: () => {
+    const session = sessions.shift();
+    if (!session) throw new Error('Unexpected provider session');
+    return session;
+  } });
+  let turn: Promise<void> | undefined;
+  let otherTurn: Promise<void> | undefined;
+  try {
+    const view = await harness.restorePane('active-tab');
+    const otherConversation = await harness.repository.create({ providerId: 'claude' });
+    const neighbor = await harness.restorePane('neighbor-tab', otherConversation.id);
+    const tab = view.getActiveTab()!;
+    expect(within(view.containerEl).queryByRole('button', { name: 'Stop response' })).toBeNull();
+    tab.dom.inputEl.value = 'Help with this request';
+    turn = tab.controllers.inputController.sendMessage();
+    await waitFor(() => { expect(provider.started).toBe(true); });
+    const otherTab = neighbor.getActiveTab()!;
+    otherTab.dom.inputEl.value = 'Keep working independently';
+    otherTurn = otherTab.controllers.inputController.sendMessage();
+    await waitFor(() => { expect(otherProvider.started).toBe(true); });
+
+    const stop = within(view.containerEl).getByRole<HTMLButtonElement>('button', { name: 'Stop response' });
+    expect(stop.type).toBe('button');
+    expect(stop.textContent).toBe('Stop');
+    expect(stop.title).toContain('esc');
+    expect((await configureAxe({ rules: { region: { enabled: false } } })(stop)).violations).toEqual([]);
+    tab.dom.inputEl.value = 'Queued follow-up';
+    await tab.controllers.inputController.sendMessage();
+    tab.dom.inputEl.value = 'Draft still being written';
+    stop.click();
+    stop.click();
+
+    expect(provider.cancelled).toBe(true);
+    expect(tab.state.isStreaming).toBe(true);
+    expect(stop.disabled).toBe(true);
+    expect(stop.textContent).toBe('Stopping...');
+    expect(tab.dom.inputEl.value).toContain('Queued follow-up');
+    expect(tab.dom.inputEl.value).toContain('Draft still being written');
+    expect(neighbor.getActiveTab()!.state.cancelRequested).toBe(false);
+    expect(otherProvider.cancelled).toBe(false);
+    expect(otherTab.state.isStreaming).toBe(true);
+    expect(within(neighbor.containerEl).getByRole<HTMLButtonElement>('button', { name: 'Stop response' }).disabled).toBe(false);
+
+    provider.release();
+    await turn;
+    expect(tab.state.isStreaming).toBe(false);
+    expect(within(view.containerEl).queryByRole('button', { name: 'Stop response' })).toBeNull();
+    expect(tab.state.messages.some(message => message.content === 'Help with this request')).toBe(true);
+    expect(tab.state.messages.some(message => message.isInterrupt)).toBe(true);
+  } finally {
+    provider.release();
+    otherProvider.release();
+    await turn;
+    await otherTurn;
+    await harness.dispose();
+  }
+});
+
+it.each(['text', 'tool', 'approval'] as const)('Escape stops an active %s response with the same pending projection', async phase => {
+  const provider = createResponseSession(phase);
+  const harness = await createHarness({ createSession: provider.createSession });
+  let turn: Promise<void> | undefined;
+  try {
+    const view = await harness.restorePane('active-tab');
+    const tab = view.getActiveTab()!;
+    tab.dom.inputEl.value = 'Synthetic request';
+    turn = tab.controllers.inputController.sendMessage();
+    await waitFor(() => {
+      expect(provider.started).toBe(true);
+      expect(tab.state.requiresAction).toBe(phase === 'approval');
+      expect(tab.state.messages.some(message => message.toolCalls?.length)).toBe(phase === 'tool');
+    });
+    const stop = within(view.containerEl).getByRole<HTMLButtonElement>('button', { name: 'Stop response' });
+    fireEvent.keyDown(tab.dom.inputEl, { key: 'Escape' });
+    expect(provider.aborted).toBe(true);
+    expect(provider.cancelled).toBe(true);
+    expect(stop.disabled).toBe(true);
+    expect(stop.textContent).toBe('Stopping...');
+    expect(tab.state.isStreaming).toBe(true);
+    provider.release();
+    await turn;
+    expect(tab.state.requiresAction).toBe(false);
+    expect(within(view.containerEl).queryByRole('button', { name: 'Stop response' })).toBeNull();
+    await harness.dispose();
+    tab.state.isStreaming = true;
+    stop.click();
+    expect(tab.state.cancelRequested).toBe(false);
+  } finally {
+    provider.release();
+    await turn;
+    await harness.dispose();
+  }
+});
+
+it.each(['session preparation', 'input staging'])('never sends a turn stopped during %s', async phase => {
+  const provider = createResponseSession();
+  let finishPreparation!: () => void;
+  const preparation = new Promise<void>(resolve => { finishPreparation = resolve; });
+  let preparing = false;
+  const harness = await createHarness({
+    createSession: () => {
+      preparing = phase === 'session preparation';
+      return provider.session;
+    },
+    beforeWrite: async (_path, content) => {
+      if (phase === 'input staging' && content.includes('"staged"')) preparing = true;
+      if (preparing) await preparation;
+    },
+  });
+  let turn: Promise<void> | undefined;
+  try {
+    const view = await harness.restorePane('preparing-tab');
+    const tab = view.getActiveTab()!;
+    tab.dom.inputEl.value = 'Do not send this after I stop';
+    turn = tab.controllers.inputController.sendMessage();
+    await waitFor(() => { expect(preparing).toBe(true); });
+    fireEvent.keyDown(tab.dom.inputEl, { key: 'Escape' });
+    const stop = within(view.containerEl).getByRole<HTMLButtonElement>('button', { name: 'Stop response' });
+    expect(stop.disabled).toBe(true);
+    expect(stop.textContent).toBe('Stopping...');
+    expect(tab.state.isStreaming).toBe(true);
+    finishPreparation();
+    provider.release();
+    await turn;
+    expect(provider.started).toBe(false);
+    expect(tab.state.isStreaming).toBe(false);
+    expect(tab.state.messages.some(message => message.isInterrupt)).toBe(true);
+    expect(within(view.containerEl).queryByRole('button', { name: 'Stop response' })).toBeNull();
+  } finally {
+    finishPreparation();
+    provider.release();
+    await turn;
+    await harness.dispose();
+  }
+});
+
+it('hides the response control when initialization fails and restores the unsent draft', async () => {
+  const harness = await createHarness({ createSession: () => { throw new Error('Synthetic initialization failure'); } });
+  try {
+    const view = await harness.restorePane('failed-tab');
+    const tab = view.getActiveTab()!;
+    tab.dom.inputEl.value = 'Keep this unsent request';
+    await tab.controllers.inputController.sendMessage();
+    expect(tab.state.isStreaming).toBe(false);
+    expect(tab.dom.inputEl.value).toBe('Keep this unsent request');
+    expect(within(view.containerEl).queryByRole('button', { name: 'Stop response' })).toBeNull();
+  } finally {
+    await harness.dispose();
+  }
+});
+
 async function createRewindHarness() {
   let finishRewind!: (result: ChatRewindResult) => void;
   const pendingRewind = new Promise<ChatRewindResult>(resolve => { finishRewind = resolve; });
@@ -380,6 +626,7 @@ it('disables deletion across panes while a real provider rewind refuses forced t
     await harness.startRewind(remoteTab);
 
     expect(remoteTab.state.isRewinding).toBe(true);
+    expect(within(remote.containerEl).queryByRole('button', { name: 'Stop response' })).toBeNull();
     expect(remote.getTabManager()!.isTabWorking(remoteTab.id)).toBe(false);
     expect(await remote.getTabManager()!.closeTab(remoteTab.id, true)).toBe(false);
     const row = local.containerEl.querySelector<HTMLElement>('[data-conversation-id="shared-chat"]')!;

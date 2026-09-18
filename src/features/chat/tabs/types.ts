@@ -118,6 +118,8 @@ export interface TabServices {
  * UI components managed per-tab.
  */
 export interface TabUIComponents {
+  readonly stopResponseButton: HTMLButtonElement;
+  readonly updateResponseControls: () => void;
   readonly contextTray: ComposerContextTray;
   readonly fileContextManager: FileContextManager;
   readonly linkedContentController: LinkedContentController;

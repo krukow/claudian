@@ -527,13 +527,16 @@ export class InputController {
     try {
       userMsg.content = admittedTurnRequest.text;
       userMsg.linkedContentPath = admittedTurnRequest.linkedContentPath;
-      const result = await coordinator.execute(this.createExecutionSubmission(
-        displayContent,
-        admittedTurnRequest,
-        userMsg,
-        assistantMsg,
-        dynamicSystemPromptSections,
-      ));
+      const result = await coordinator.execute({
+        ...this.createExecutionSubmission(
+          displayContent,
+          admittedTurnRequest,
+          userMsg,
+          assistantMsg,
+          dynamicSystemPromptSections,
+        ),
+        isCancellationRequested: () => state.cancelRequested,
+      });
       didEnqueueToSdk = result.accepted;
       planCompleted = result.planCompleted;
       shouldReportReviewableSettlement = result.status === 'completed'

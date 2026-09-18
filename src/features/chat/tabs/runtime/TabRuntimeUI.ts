@@ -216,7 +216,7 @@ function buildInputToolbar(
   options: TabRuntimeConstructionContext,
   runtimeRef: PublishedTabRuntimeRef,
   onUserModified: () => void,
-): ReturnType<typeof createInputToolbar> {
+): ReturnType<typeof createInputToolbar> & Pick<TabUIComponents, 'stopResponseButton' | 'updateResponseControls'> {
   const { dom } = shell;
   const { plugin } = options;
 
@@ -449,7 +449,20 @@ function buildInputToolbar(
     'tab input toolbar layout',
     () => toolbarComponents.layoutController.destroy(),
   );
-  return toolbarComponents;
+  const stopResponseButton = inputToolbar.createEl('button', {
+    cls: 'claudian-stop-response',
+    text: 'Stop',
+    attr: { type: 'button', 'aria-label': 'Stop response', title: 'Stop response (esc)' },
+  });
+  const updateResponseControls = (): void => {
+    const active = shell.state.isStreaming && !shell.state.isRewinding;
+    stopResponseButton.style.display = active ? '' : 'none';
+    stopResponseButton.disabled = shell.state.cancelRequested;
+    const label = shell.state.cancelRequested ? 'Stopping...' : 'Stop';
+    if (stopResponseButton.textContent !== label) stopResponseButton.textContent = label;
+  };
+  updateResponseControls();
+  return { ...toolbarComponents, stopResponseButton, updateResponseControls };
 }
 
 export function buildTabRuntimeUI(
@@ -505,6 +518,8 @@ export function buildTabRuntimeUI(
   options.registerCleanup('tab navigation sidebar', () => navigationSidebar.destroy());
 
   const ui: TabUIComponents = {
+    stopResponseButton: toolbar.stopResponseButton,
+    updateResponseControls: toolbar.updateResponseControls,
     contextTray,
     ...contextManagers,
     modelSelector: toolbar.modelSelector,
