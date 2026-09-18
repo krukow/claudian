@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { ProviderExecutionLifecycleRegistry } from '@/core/execution/ProviderExecutionLifecycleRegistry';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
 import { CopilotMcpReadinessCoordinator } from '@/providers/copilot/app/CopilotMcpReadinessCoordinator';
-import { updateCopilotHostResources } from '@/providers/copilot/resources/CopilotHostResources';
+import { getCopilotHostResources, updateCopilotHostResources } from '@/providers/copilot/resources/CopilotHostResources';
 import { updateCopilotProviderSettings } from '@/providers/copilot/settings';
 
 import { createDeferred, FakeCopilotSdkClient, FakeCopilotSdkRuntime } from '../sdk/FakeCopilotSdkRuntime';
@@ -244,6 +244,98 @@ it.each(['cache', 'selection', 'runtime'] as const)(
     expect(runtime.clients.flatMap(client => client.createdSessions.map(session => (
       Object.keys(session.config.resources?.mcpServers ?? {})
     )))).toEqual([['first'], ['second'], ['first'], ['second']]);
+    await service.dispose();
+  },
+);
+
+it.each([
+  { operation: 'metadata', releaseFails: false, commits: true, releases: ['disconnect:ok', 'delete:ok', 'stop:ok'] },
+  { operation: 'create-session', releaseFails: false, commits: true, releases: ['stop:ok'] },
+  { operation: 'metadata', releaseFails: true, commits: false, releases: ['disconnect:ok', 'delete:ok', 'stop:failed'] },
+  { operation: 'create-session', releaseFails: true, commits: false, releases: ['stop:failed'] },
+  { operation: 'auth-gate', releaseFails: false, commits: false, releases: ['stop:ok', 'force-stop:ok'] },
+  { operation: 'auth-gate', releaseFails: true, commits: false, releases: ['stop:failed', 'force-stop:failed'] },
+])(
+  'commits settings after cancelled $operation failure only with certified release (releaseFails=$releaseFails)',
+  async ({ operation, releaseFails, commits, releases }) => {
+    const entered = createDeferred();
+    const release = createDeferred();
+    const cancelled = createDeferred();
+    const releaseResults: string[] = [];
+    const failOperation = async (): Promise<never> => {
+      entered.resolve();
+      await release.promise;
+      throw new Error(`Ordinary ${operation} failure.`);
+    };
+    const client = new FakeCopilotSdkClient({
+      authStatusBehavior: operation === 'auth-gate' ? failOperation : undefined,
+      sessionGate: operation === 'create-session' ? failOperation : undefined,
+      onSessionCreated: session => {
+        session.mcpReadinessBehavior = failOperation;
+        session.disconnectBehavior = async () => { releaseResults.push('disconnect:ok'); };
+      },
+      deleteSessionBehavior: async () => { releaseResults.push('delete:ok'); },
+      stopBehavior: async () => {
+        releaseResults.push(releaseFails ? 'stop:failed' : 'stop:ok');
+        if (releaseFails) throw new Error('SDK stop failed.');
+      },
+      forceStopBehavior: async () => {
+        releaseResults.push(releaseFails ? 'force-stop:failed' : 'force-stop:ok');
+        if (releaseFails) throw new Error('SDK force-stop failed.');
+      },
+    });
+    const { references, registry, service, settings } = await setup(
+      new FakeCopilotSdkRuntime(() => client),
+    );
+    const checking = service.check(references[0]);
+    await entered.promise;
+    service.subscribe(() => {
+      if (service.getState(references[0]).phase === 'unchecked') cancelled.resolve();
+    });
+    const changingSettings = registry.runTransition(['copilot'], async () => {
+      updateCopilotProviderSettings(settings, {
+        resourcesByHost: updateCopilotHostResources(settings, { rememberMcpSignIns: false }),
+      });
+    });
+    await cancelled.promise;
+    release.resolve();
+    const results = await Promise.allSettled([checking, changingSettings]);
+
+    expect(releaseResults).toEqual(releases);
+    const failure = expect.objectContaining({ message: expect.stringContaining(`Ordinary ${operation} failure.`) });
+    const expected = commits
+      ? { status: 'fulfilled', value: undefined }
+      : { status: 'rejected', reason: failure };
+    expect(results).toEqual([expected, expected]);
+    const messages = results.flatMap(result => result.status === 'rejected'
+      ? [result.reason instanceof Error ? result.reason.message : String(result.reason)]
+      : []);
+    expect(messages.map(message => message.includes('SDK stop failed.')))
+      .toEqual(commits ? [] : [operation !== 'auth-gate', operation !== 'auth-gate']);
+    expect(getCopilotHostResources(settings).rememberMcpSignIns).toBe(commits ? undefined : true);
+    expect(service.getState(references[0])).toEqual({ phase: 'unchecked' });
+    await service.dispose();
+  },
+);
+
+it.each(['metadata', 'create-session'])(
+  'still reports an uncancelled %s failure after successful cleanup',
+  async operation => {
+    const client = new FakeCopilotSdkClient({
+      sessionGate: operation === 'create-session'
+        ? async () => { throw new Error('Session creation failed.'); }
+        : undefined,
+      onSessionCreated: session => {
+        session.mcpReadinessBehavior = async () => { throw new Error('Metadata failed.'); };
+      },
+    });
+    const { references, service } = await setup(new FakeCopilotSdkRuntime(() => client));
+    await service.check(references[0]);
+
+    expect(service.getState(references[0])).toEqual({
+      phase: 'error', message: operation === 'metadata' ? 'Metadata failed.' : 'Session creation failed.',
+    });
+    expect(client.stopped).toBe(1);
     await service.dispose();
   },
 );
