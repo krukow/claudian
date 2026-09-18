@@ -1,10 +1,11 @@
-import { type App, Modal } from 'obsidian';
+import { type App, Modal, Notice } from 'obsidian';
 
 import type {
   CopilotMcpSignInCoordinator,
   CopilotMcpSignInState,
 } from '../app/CopilotMcpSignInCoordinator';
 import type { CopilotMcpServerReference } from '../resources/CopilotResourceSettings';
+import { describeError } from '../sdk/CopilotRuntimeError';
 
 export class CopilotMcpSignInModal extends Modal {
   private unsubscribe: (() => void) | null = null;
@@ -29,14 +30,21 @@ export class CopilotMcpSignInModal extends Modal {
   onClose(): void {
     this.unsubscribe?.();
     this.unsubscribe = null;
-    void this.service.cancel(this.reference);
+    void this.service.cancel(this.reference).catch(error => {
+      const state = this.service.getState(this.reference);
+      new Notice(state.phase === 'connected'
+        ? `Signed in, but follow-up failed: ${describeError(error)}`
+        : `Could not close MCP sign-in: ${describeError(error)}`);
+    });
     this.contentEl.empty();
   }
 
   private render(state: CopilotMcpSignInState): void {
     this.contentEl.empty();
     const message = state.phase === 'connected'
-      ? 'Signed in. Resources will check the connection and tool list. Retry your chat message to use this server.'
+      ? state.warning
+        ? `Signed in, but follow-up failed: ${state.warning}`
+        : 'Signed in. Resources will check the connection and tool list. Retry your chat message to use this server.'
       : state.phase === 'waiting'
       ? 'Complete sign-in in your browser. This window will update when the server connects.'
       : state.phase === 'error'

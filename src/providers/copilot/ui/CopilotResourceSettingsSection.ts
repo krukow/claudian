@@ -97,6 +97,7 @@ export function renderCopilotResourceSettings(
   const persist = async (mutate: ResourceMutation): Promise<void> => {
     if (disposed) return;
     saving += 1;
+    renderList();
     renderStatus();
     try {
       await context.plugin.applyProviderRuntimeSettings(
@@ -119,7 +120,9 @@ export function renderCopilotResourceSettings(
     }
     renderList();
     renderStatus();
-    if (!disposed && !saveFailure) check();
+    if (!disposed && !saveFailure) {
+      void workspace.mcpReadiness.ensureChecked().catch(reportReadinessFailure);
+    }
   };
 
   const rememberSetting = new Setting(container)
@@ -287,7 +290,7 @@ export function renderCopilotResourceSettings(
       renderList();
       renderStatus();
     }
-    if (!disposed && !discoveryFailure && !refreshing) check();
+    if (!disposed && !discoveryFailure) check();
   };
 
   discoverButton.addEventListener('click', () => {
@@ -410,7 +413,7 @@ export function renderCopilotResourceSettings(
             if (!disposed) new CopilotMcpSignInModal(context.plugin.app, workspace.mcpSignIn, reference).open();
           });
         }
-        const disabled = !row.selected || row.missing || selection.rememberMcpSignIns !== true;
+        const disabled = saving > 0 || !row.selected || row.missing || selection.rememberMcpSignIns !== true;
         if (rendered.signIn.disabled !== disabled) rendered.signIn.disabled = disabled;
         const title = disabled
           ? 'Select this server and enable Remember MCP sign-ins first.'
@@ -436,9 +439,11 @@ export function renderCopilotResourceSettings(
 
   function check(reference?: CopilotMcpServerReference): void {
     if (disposed) return;
-    void workspace.mcpReadiness.check(reference).catch(error => {
-      new Notice(`MCP readiness check failed: ${error instanceof Error ? error.message : String(error)}`);
-    });
+    void workspace.mcpReadiness.check(reference).catch(reportReadinessFailure);
+  }
+
+  function reportReadinessFailure(error: unknown): void {
+    new Notice(`MCP readiness check failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   const unsubscribeReadiness = workspace.mcpReadiness.subscribe(renderList);

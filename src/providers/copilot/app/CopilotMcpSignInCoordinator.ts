@@ -3,7 +3,7 @@ import { getVaultPath } from '@/utils/path';
 
 import { getCopilotHostResources } from '../resources/CopilotHostResources';
 import { resolveCopilotSelectedResources } from '../resources/CopilotResourceResolver';
-import type { CopilotMcpServerReference } from '../resources/CopilotResourceSettings';
+import type { CopilotMcpServerReference, CopilotResourceSettings } from '../resources/CopilotResourceSettings';
 import { CopilotClientFactory } from '../sdk/CopilotClientFactory';
 import { copilotNativeSilenceError, settleNativeWithin } from '../sdk/CopilotNativeBudget';
 import { describeError } from '../sdk/CopilotRuntimeError';
@@ -11,7 +11,8 @@ import type { CopilotSdkRuntime, CopilotSdkSession } from '../sdk/CopilotSdkPort
 import { getCopilotProviderSettings, getEnabledCopilotModels } from '../settings';
 
 export type CopilotMcpSignInState =
-  | { readonly phase: 'idle' | 'starting' | 'connected' }
+  | { readonly phase: 'idle' | 'starting' }
+  | { readonly phase: 'connected'; readonly warning?: string }
   | { readonly phase: 'waiting'; readonly authorizationUrl: string }
   | { readonly phase: 'error'; readonly message: string };
 
@@ -19,17 +20,39 @@ export class CopilotMcpSignInCoordinator {
   private readonly factory: CopilotClientFactory;
   private readonly states = new Map<string, CopilotMcpSignInState>();
   private readonly listeners = new Set<() => void>();
+  private readonly unregister: () => void;
+  private readonly lifecycleFailures: unknown[] = [];
   private controller: AbortController | null = null;
+  private authentication: Promise<void> | null = null;
   private flight: Promise<void> | null = null;
   private activeReference: string | null = null;
+  private cancellationRevision = 0;
   private cancelled = false;
   private disposed = false;
+  private disposal: Promise<void> | null = null;
+  private transitioning = false;
 
   constructor(
     private readonly host: ProviderHost,
     options: { readonly runtime?: CopilotSdkRuntime } = {},
   ) {
     this.factory = new CopilotClientFactory(host, options);
+    this.unregister = host.executionLifecycleRegistry.registerTransitionHook('copilot', {
+      beforeTransition: async () => {
+        this.transitioning = true;
+        this.cancellationRevision += 1;
+        if (!this.authentication) return;
+        const authentication = this.authentication;
+        const signal = this.controller!.signal;
+        this.controller!.abort(new Error('Copilot settings changed during MCP sign-in. Try again.'));
+        try {
+          await authentication;
+        } catch (error) {
+          if (error !== signal.reason) throw error;
+        }
+      },
+      afterTransition: () => { this.transitioning = false; },
+    });
   }
 
   getState(reference: CopilotMcpServerReference): CopilotMcpSignInState {
@@ -44,8 +67,20 @@ export class CopilotMcpSignInCoordinator {
   signIn(reference: CopilotMcpServerReference): Promise<void> {
     if (this.disposed) return Promise.reject(new Error('MCP sign-in is disposed.'));
     const id = referenceId(reference);
+    if (this.transitioning) {
+      this.publish(id, { phase: 'error', message: 'Copilot settings are changing. Wait for them to finish, then try again.' });
+      return Promise.resolve();
+    }
     if (this.flight) {
-      if (this.activeReference === id) return this.flight;
+      if (this.activeReference === id) {
+        if (this.controller?.signal.aborted) {
+          const revision = this.cancellationRevision;
+          return this.flight.then(() => {
+            if (revision === this.cancellationRevision && !this.disposed) return this.signIn(reference);
+          });
+        }
+        return this.flight;
+      }
       this.publish(id, { phase: 'error', message: 'Finish or cancel the current MCP sign-in first.' });
       return Promise.resolve();
     }
@@ -53,18 +88,35 @@ export class CopilotMcpSignInCoordinator {
     this.controller = controller;
     this.activeReference = id;
     this.cancelled = false;
+    const generation = this.host.executionLifecycleRegistry.getProviderGeneration('copilot');
+    let authenticated = false;
     const timer = window.setTimeout(() => {
       controller.abort(new Error('MCP sign-in timed out. Try again when you are ready.'));
     }, 300_000);
-    this.flight = Promise.resolve().then(async () => {
+    this.authentication = Promise.resolve().then(async () => {
       controller.signal.throwIfAborted();
       this.publish(id, { phase: 'starting' });
-      await this.authenticate(reference, controller.signal);
-      controller.signal.throwIfAborted();
-      await this.host.runProviderExecutionTransition(['copilot'], async () => {});
+      await this.authenticate(reference, controller.signal, generation, () => { authenticated = true; });
+    }).catch(error => {
+      if (!authenticated || error !== controller.signal.reason) throw error;
+    }).finally(() => { this.authentication = null; });
+    // A transition drains native authentication, never the flight awaiting that transition.
+    this.flight = this.authentication.then(async () => {
+      try {
+        this.assertAuthorized(reference, generation);
+        await this.host.runProviderExecutionTransition(['copilot'], async () => {
+          this.assertAuthorized(reference, generation + 1);
+        });
+        this.assertAuthorized(reference, generation + 1);
+      } catch (error) {
+        this.lifecycleFailures.push(error);
+        throw error;
+      }
       this.publish(id, { phase: 'connected' });
     }).catch(error => {
-      this.publish(id, this.cancelled && error === controller.signal.reason
+      this.publish(id, authenticated
+        ? { phase: 'connected', warning: describeError(error) }
+        : this.cancelled && error === controller.signal.reason
         ? { phase: 'idle' }
         : { phase: 'error', message: describeError(error) });
     }).finally(() => {
@@ -77,20 +129,34 @@ export class CopilotMcpSignInCoordinator {
   }
 
   async cancel(reference?: CopilotMcpServerReference): Promise<void> {
-    if (reference && this.activeReference !== referenceId(reference)) return;
+    if (reference && this.activeReference !== null && this.activeReference !== referenceId(reference)) return;
+    this.cancellationRevision += 1;
     this.cancelled = true;
     this.controller?.abort(new Error('MCP sign-in cancelled.'));
     await this.flight;
+    if (this.lifecycleFailures.length > 0) {
+      throw new AggregateError(this.lifecycleFailures, this.lifecycleFailures.map(describeError).join('; '));
+    }
   }
 
-  async dispose(): Promise<void> {
+  dispose(): Promise<void> {
+    if (this.disposal) return this.disposal;
     this.disposed = true;
-    await this.cancel();
-    this.listeners.clear();
-    this.states.clear();
+    this.unregister();
+    this.disposal = this.cancel().finally(() => {
+      this.listeners.clear();
+      this.states.clear();
+    });
+    return this.disposal;
   }
 
-  private async authenticate(reference: CopilotMcpServerReference, signal: AbortSignal): Promise<void> {
+  private assertAuthorized(
+    reference: CopilotMcpServerReference,
+    generation: number,
+  ): CopilotResourceSettings {
+    if (generation !== this.host.executionLifecycleRegistry.getProviderGeneration('copilot')) {
+      throw new Error('Copilot settings changed during MCP sign-in. Try again.');
+    }
     const selection = getCopilotHostResources(this.host.settings);
     if (!selection.rememberMcpSignIns) {
       throw new Error('Enable Remember MCP sign-ins to connect a server from settings.');
@@ -98,6 +164,20 @@ export class CopilotMcpSignInCoordinator {
     if (!selection.selectedMcpServers.some(ref => referenceId(ref) === referenceId(reference))) {
       throw new Error('Select this MCP server before signing in.');
     }
+    return selection;
+  }
+
+  private async authenticate(
+    reference: CopilotMcpServerReference,
+    signal: AbortSignal,
+    generation: number,
+    onAuthenticated: () => void,
+  ): Promise<void> {
+    const assertActive = (): CopilotResourceSettings => {
+      signal.throwIfAborted();
+      return this.assertAuthorized(reference, generation);
+    };
+    const selection = assertActive();
     const resolution = await resolveCopilotSelectedResources({
       ...selection,
       selectedMcpServers: [reference],
@@ -115,20 +195,22 @@ export class CopilotMcpSignInCoordinator {
     if (!workingDirectory || !model) throw new Error('Connect Copilot and select a model first.');
     signal.throwIfAborted();
     const identity = await this.factory.resolveIdentity(workingDirectory);
-    signal.throwIfAborted();
+    assertActive();
     const client = await this.factory.createClient(identity);
     let session: CopilotSdkSession | undefined;
     let status: string | undefined;
+    let signInRequested = false;
     let changed: (() => void) | undefined;
     const failures: unknown[] = [];
     try {
-      signal.throwIfAborted();
+      assertActive();
       session = await client.createSession({
         availableTools: [],
         model: model.rawId,
         onEvent: event => {
           if (event.type === 'session.mcp_server_status_changed' && event.data.serverName === reference.name) {
             status = event.data.status;
+            if (signInRequested && status === 'connected') onAuthenticated();
             changed?.();
           }
         },
@@ -142,10 +224,12 @@ export class CopilotMcpSignInCoordinator {
         systemMessage: { mode: 'replace', content: 'MCP authentication only; do not run a model turn.' },
         workingDirectory,
       });
-      signal.throwIfAborted();
+      assertActive();
       status = undefined;
+      signInRequested = true;
       const result = await session.signInMcpServer(reference.name);
-      signal.throwIfAborted();
+      if (!result.authorizationUrl) onAuthenticated();
+      assertActive();
       if (result.authorizationUrl) {
         const authorizationUrl = validateAuthorizationUrl(result.authorizationUrl);
         this.publish(referenceId(reference), { phase: 'waiting', authorizationUrl });
@@ -167,9 +251,10 @@ export class CopilotMcpSignInCoordinator {
         });
       }
     } catch (error) {
-      if (!signal.aborted) failures.push(error);
+      if (error !== signal.reason) failures.push(error);
     }
     changed = undefined;
+    const cleanupFailures: unknown[] = [];
     const releases: Array<[string, () => Promise<void>]> = [];
     if (session) {
       const acquired = session;
@@ -182,12 +267,15 @@ export class CopilotMcpSignInCoordinator {
     }
     for (const [step, release] of releases) {
       const outcome = await settleNativeWithin(release());
-      if (outcome.kind === 'rejected') failures.push(outcome.error);
-      if (outcome.kind === 'timed-out') failures.push(copilotNativeSilenceError(step));
+      if (outcome.kind === 'rejected') cleanupFailures.push(outcome.error);
+      if (outcome.kind === 'timed-out') cleanupFailures.push(copilotNativeSilenceError(step));
     }
-    try { await client.stop(); } catch (error) { failures.push(error); }
+    try { await client.stop(); } catch (error) { cleanupFailures.push(error); }
+    failures.push(...cleanupFailures);
     if (failures.length > 0) {
-      throw new Error(failures.map(describeError).join('; '), { cause: new AggregateError(failures) });
+      const error = new AggregateError(failures, failures.map(describeError).join('; '));
+      if (cleanupFailures.length > 0) this.lifecycleFailures.push(error);
+      throw error;
     }
     signal.throwIfAborted();
   }

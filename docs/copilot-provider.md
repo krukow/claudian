@@ -92,6 +92,8 @@ The checkbox controls enablement, not connection status. Once the list renders, 
 
 Each MCP row separately shows **Not checked**, **Queued**, **Checking...**, **Connected (N tools)**, **Sign-in required**, or an actionable failure. Connected requires both a native connection and a successful tool listing; zero tools is valid. A cached credential or an earlier sign-in is not enough. **Check** retries or refreshes the result without forcing sign-in. Disabled servers are not started, and skills have neither connection status nor sign-in controls. Leaving the Copilot tab cancels its queue and releases temporary sessions within the native operation/cleanup budgets; reopening performs fresh checks. Results are a point-in-time check, not continuous monitoring.
 
+Changing only skills preserves completed MCP checks instead of reconnecting every server. MCP selection, credential-cache, or runtime configuration changes invalidate those results; **Check** and **Refresh** still perform fresh checks. Runtime settings wait for active native operations to stop before committing. A failed shutdown is reported as a failed settings change rather than silently applying it; retry after addressing the failure.
+
 After editing a skill in place, click **Refresh** to reload its native command metadata and rebuild the chat runtime without changing your selections.
 
 Repository detection follows filesystem links and uses the nearest containing `.git` directory or worktree `.git` file at the vault's physical location, including when the vault is a subdirectory such as `repo/content`. Skill selections and opt-outs identify the same package through directory aliases. Claudian does not scan the entire repository or inherit skills from a surrounding outer repository. The automatic defaults apply without visiting settings first. A vault outside a Git repository keeps its local skills opt-in. Personal skill roots remain opt-in even if the home directory is a Git repository or a repository source links to a personal root.
@@ -105,6 +107,8 @@ Enable **Remember MCP sign-ins**, select the HTTP/SSE server, then choose **Sign
 Skills and local stdio servers have no Sign in control. Skills are instruction packages, not authenticated services. The native OAuth and cache-reuse flow is covered with a loopback test server; compatibility with an individual remote service still depends on that service's OAuth support.
 
 Remembered credentials use the Copilot CLI's cache on this computer. The CLI normally uses the OS keychain, but may fall back to local token files outside the vault if the keychain is unavailable. This is an explicit opt-in, not a keychain-only guarantee. Turning the option off changes future runtime storage; it does not revoke or delete credentials already cached by the CLI.
+
+Sign-in is unavailable while resource choices are being saved, and runtime-setting transitions cancel pending authorization before committing. Closing and immediately reopening sign-in waits for the previous attempt's cleanup before starting another. Once native authentication is confirmed, closing the dialog or a failed runtime refresh cannot undo it: Claudian keeps the signed-in outcome, reports any cleanup or refresh failure separately, and rechecks readiness. Failed teardown also produces a notice after the dialog closes.
 
 ### Permission modes
 

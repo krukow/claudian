@@ -38,9 +38,13 @@ export class CopilotMcpReadinessCoordinator {
     this.unregister = host.executionLifecycleRegistry.registerTransitionHook('copilot', {
       beforeTransition: async () => {
         this.transitioning = true;
-        await this.cancel();
+        await this.quiesce();
       },
       afterTransition: () => {
+        const stamp = this.stamp();
+        for (const [id, entry] of this.states) {
+          if (entry.stamp !== stamp) this.states.delete(id);
+        }
         this.transitioning = false;
         this.notify();
       },
@@ -59,18 +63,27 @@ export class CopilotMcpReadinessCoordinator {
   }
 
   check(reference?: CopilotMcpServerReference): Promise<void> {
+    return this.enqueue(reference, false);
+  }
+
+  ensureChecked(): Promise<void> {
+    return this.enqueue(undefined, true);
+  }
+
+  private enqueue(reference: CopilotMcpServerReference | undefined, onlyUnchecked: boolean): Promise<void> {
     if (this.disposed) return Promise.reject(new Error('MCP readiness is disposed.'));
     if (this.transitioning) return Promise.resolve();
     if (this.controller?.signal.aborted) {
       const generation = this.cancellationGeneration;
       return this.flight!.then(() => {
-        if (generation === this.cancellationGeneration) return this.check(reference);
+        if (generation === this.cancellationGeneration) return this.enqueue(reference, onlyUnchecked);
       });
     }
     const references = reference ? [reference] : getCopilotHostResources(this.host.settings).selectedMcpServers;
     for (const candidate of references) {
       if (!this.selected(candidate)) continue;
       const phase = this.getState(candidate).phase;
+      if (onlyUnchecked && phase !== 'unchecked') continue;
       if (phase === 'queued' || phase === 'checking') continue;
       this.pending.set(referenceId(candidate), candidate);
       this.publish(candidate, this.stamp(), { phase: 'queued' });
@@ -90,10 +103,17 @@ export class CopilotMcpReadinessCoordinator {
   }
 
   async cancel(): Promise<void> {
+    this.states.clear();
+    await this.quiesce();
+  }
+
+  private async quiesce(): Promise<void> {
     this.cancellationGeneration += 1;
     this.controller?.abort(new Error('MCP readiness check cancelled.'));
     this.pending.clear();
-    this.states.clear();
+    for (const [id, { state }] of this.states) {
+      if (state.phase === 'queued' || state.phase === 'checking') this.states.delete(id);
+    }
     this.notify();
     await this.flight;
   }
@@ -111,11 +131,15 @@ export class CopilotMcpReadinessCoordinator {
       if (signal.aborted) break;
       if (!this.selected(reference)) continue;
       const stamp = this.stamp();
+      const generation = this.host.executionLifecycleRegistry.getProviderGeneration('copilot');
+      const current = () => this.selected(reference)
+        && stamp === this.stamp()
+        && generation === this.host.executionLifecycleRegistry.getProviderGeneration('copilot');
       this.publish(reference, stamp, { phase: 'checking' });
       try {
         const resolution = await this.resolve(reference);
         signal.throwIfAborted();
-        if (!this.selected(reference) || stamp !== this.stamp()) continue;
+        if (!current()) continue;
         if (resolution.problems.length > 0 || !resolution.resources) {
           throw new Error(resolution.problems.join('; ') || 'Server configuration is unavailable. Refresh and retry.');
         }
@@ -124,7 +148,7 @@ export class CopilotMcpReadinessCoordinator {
         if (!workingDirectory) throw new Error('Open a local vault before checking MCP servers.');
         const identity = await this.factory.resolveIdentity(workingDirectory);
         signal.throwIfAborted();
-        if (!this.selected(reference) || stamp !== this.stamp()) continue;
+        if (!current()) continue;
         const result = await this.probe(reference, resolution.resources, identity, signal).catch(error => {
           if (signal.aborted) throw error;
           return { phase: 'error', message: describeError(error) } as const;
@@ -136,13 +160,13 @@ export class CopilotMcpReadinessCoordinator {
           this.notify();
           continue;
         }
-        if (!signal.aborted) this.publish(reference, stamp, result);
+        if (!signal.aborted && current()) this.publish(reference, stamp, result);
       } catch (error) {
         if (signal.aborted) {
           if (error !== signal.reason) throw error;
           break;
         }
-        this.publish(reference, stamp, { phase: 'error', message: describeError(error) });
+        if (current()) this.publish(reference, stamp, { phase: 'error', message: describeError(error) });
       }
     }
   }
@@ -209,11 +233,12 @@ export class CopilotMcpReadinessCoordinator {
   }
 
   private stamp(): string {
+    const selection = getCopilotHostResources(this.host.settings);
     return hash([
-      this.host.executionLifecycleRegistry.getProviderGeneration('copilot'),
       computeCopilotEnvironmentHash(this.host.settings),
       getVaultPath(this.host.app),
-      getCopilotHostResources(this.host.settings),
+      selection.selectedMcpServers,
+      selection.rememberMcpSignIns === true,
     ]);
   }
 
