@@ -11,6 +11,7 @@ import type {
   ProviderInteractionPort,
   ProviderQuestionInteractionRequest,
   ProviderSessionConfig,
+  ProviderToolPolicy,
 } from '@/core/execution';
 import { ProviderExecutionLifecycleRegistry } from '@/core/execution';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
@@ -22,9 +23,14 @@ import {
 import type {
   CopilotSdkEvent,
   CopilotSdkPermissionRequest,
+  CopilotSdkPermissionResult,
   CopilotSdkUserInputRequest,
 } from '@/providers/copilot/sdk/CopilotSdkPort';
-import { updateCopilotProviderSettings } from '@/providers/copilot/settings';
+import {
+  type CopilotPermissionMode,
+  setCopilotPermissionMode,
+  updateCopilotProviderSettings,
+} from '@/providers/copilot/settings';
 import { getHostnameKey } from '@/utils/env';
 
 import {
@@ -133,6 +139,152 @@ function createRuntime(
     ...(onSessionCreated ? { onSessionCreated } : {}),
   }));
 }
+
+describe('CopilotExecutionSession permission profiles', () => {
+  it.each(['persistent', 'ephemeral'] as const)(
+    'only accepts the native judge recommendation for %s when that turn is eligible',
+    async lifecycle => {
+      const host = createHost();
+      setCopilotPermissionMode(host.settings, 'judge');
+      const approvals: ProviderApprovalInteractionRequest[] = [];
+      const results: CopilotSdkPermissionResult[] = [];
+      const config = createSessionConfig({ lifecycle });
+      const runtime = createRuntime(native => {
+        native.sendBehavior = async () => {
+          results.push(await native.requestPermission({
+            kind: 'read', intention: 'Read another note.', path: '/other/note.md',
+          }, { autoApproval: { recommendation: 'approve' } }));
+        };
+      });
+      const session = new CopilotExecutionBackend(host, { runtime }).createSession({
+        ...config,
+        interactionPort: {
+          ...config.interactionPort,
+          requestApproval: async request => {
+            approvals.push(request);
+            return { decision: 'deny', interactionId: request.interactionId };
+          },
+        },
+      });
+      try {
+        await collect(session.execute(createRequest()).events);
+
+        expect(results).toEqual([lifecycle === 'persistent'
+          ? { kind: 'approve-once' }
+          : { kind: 'reject', feedback: 'Denied by the user.' }]);
+        expect(approvals.map(request => request.toolName))
+          .toEqual(lifecycle === 'persistent' ? [] : ['read']);
+      } finally {
+        await session.dispose();
+      }
+    },
+  );
+
+  it.each<CopilotPermissionMode>(['ask', 'allow-all', 'judge'])(
+    'applies the explicit %s chat profile without widening tool selection',
+    async (mode) => {
+      const host = createHost();
+      setCopilotPermissionMode(host.settings, mode);
+      const runtime = createRuntime();
+      const session = new CopilotExecutionBackend(host, { runtime }).createSession(createSessionConfig());
+      try {
+        const events = await collect(session.execute(createRequest()).events);
+
+        expect(events.at(-1)).toMatchObject({ reason: 'completed', type: 'turn_completed' });
+        expect(runtime.lastClient?.lastSession?.config).toMatchObject({
+          availableTools: ['builtin:*'],
+          model: 'gpt-5',
+          permissionMode: mode,
+        });
+        expect([...(runtime.lastClient?.lastSession?.config.excludedTools ?? [])].sort()).toEqual([
+          'factories_manage', 'list_agents', 'read_agent', 'run_factory', 'task', 'write_agent',
+        ]);
+        expect(runtime.clientOptions[0].environment).not.toHaveProperty('COPILOT_ALLOW_ALL');
+      } finally {
+        await session.dispose();
+      }
+    },
+  );
+
+  describe.each<CopilotPermissionMode>(['allow-all', 'judge'])('with %s stored', (mode) => {
+    it.each<{ lifecycle: ProviderSessionConfig['lifecycle']; toolPolicy: ProviderToolPolicy }>([
+      { lifecycle: 'ephemeral', toolPolicy: { kind: 'provider-default' } },
+      { lifecycle: 'ephemeral', toolPolicy: { kind: 'unrestricted' } },
+      { lifecycle: 'ephemeral', toolPolicy: { kind: 'read-only' } },
+      { lifecycle: 'persistent', toolPolicy: { kind: 'passive' } },
+      { lifecycle: 'persistent', toolPolicy: { kind: 'read-only' } },
+      { lifecycle: 'persistent', toolPolicy: { kind: 'allow-list', names: ['view'] } },
+    ])('forces Ask for $lifecycle / $toolPolicy.kind', async ({ lifecycle, toolPolicy }) => {
+      const host = createHost();
+      setCopilotPermissionMode(host.settings, mode);
+      const runtime = createRuntime();
+      const session = new CopilotExecutionBackend(host, { runtime }).createSession(
+        createSessionConfig({ lifecycle }),
+      );
+      try {
+        const events = await collect(session.execute(createRequest({ toolPolicy })).events);
+
+        expect(events.at(-1)).toMatchObject({ reason: 'completed', type: 'turn_completed' });
+        expect(runtime.lastClient?.lastSession?.config.permissionMode).toBe('ask');
+      } finally {
+        await session.dispose();
+      }
+    });
+  });
+
+  it('reopens the same native conversation when the permission mode changes', async () => {
+    const host = createHost();
+    const runtime = createRuntime();
+    const session = new CopilotExecutionBackend(host, { runtime }).createSession(createSessionConfig());
+    const nativeSessions: FakeCopilotSdkSession[] = [];
+    try {
+      for (const mode of ['allow-all', 'ask', 'judge', 'ask'] as const) {
+        setCopilotPermissionMode(host.settings, mode);
+        await collect(session.execute(createRequest()).events);
+        const current = runtime.lastClient?.lastSession;
+        expect(current?.config.permissionMode).toBe(mode);
+        if (current) nativeSessions.push(current);
+      }
+
+      expect(new Set(nativeSessions).size).toBe(4);
+      expect(nativeSessions.map(native => native.sessionId))
+        .toEqual(Array(4).fill('copilot-session-1'));
+      expect(nativeSessions.slice(0, -1).map(native => native.disconnected)).toEqual([1, 1, 1]);
+      expect(runtime.lastClient?.deletedSessions).toEqual([]);
+    } finally {
+      await session.dispose();
+    }
+  });
+
+  it('captures the profile before asynchronous acquisition and uses a new choice next turn', async () => {
+    const entered = createDeferred();
+    const release = createDeferred();
+    const host = createHost();
+    setCopilotPermissionMode(host.settings, 'allow-all');
+    const runtime = new FakeCopilotSdkRuntime(async () => {
+      entered.resolve();
+      await release.promise;
+      return new FakeCopilotSdkClient();
+    });
+    const session = new CopilotExecutionBackend(host, { runtime }).createSession(createSessionConfig());
+    try {
+      const first = collect(session.execute(createRequest()).events);
+      await entered.promise;
+      setCopilotPermissionMode(host.settings, 'judge');
+      release.resolve();
+      await first;
+
+      expect(runtime.lastClient?.lastSession?.config.permissionMode).toBe('allow-all');
+
+      await collect(session.execute(createRequest()).events);
+
+      expect(runtime.lastClient?.lastSession?.config.permissionMode).toBe('judge');
+    } finally {
+      release.resolve();
+      await session.dispose();
+    }
+  });
+});
 
 describe('CopilotExecutionBackend', () => {
   it('creates sessions bound to the vault working directory', () => {

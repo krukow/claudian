@@ -9,14 +9,24 @@ import {
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import type { CopilotClientOptions, SessionConfig } from '@github/copilot-sdk';
+import type { CopilotClientOptions, SessionConfig, SessionEvent } from '@github/copilot-sdk';
 
+import type { ProviderApprovalInteractionRequest, ProviderInteractionPort } from '@/core/execution';
+import { CopilotInteractionHandler } from '@/providers/copilot/execution/CopilotInteractionHandler';
 import type {
   CopilotSdkClient,
+  CopilotSdkPermissionPrompt,
+  CopilotSdkPermissionRequest,
+  CopilotSdkPermissionResult,
   CopilotSdkSession,
   CopilotSdkSessionConfig,
 } from '@/providers/copilot/sdk/CopilotSdkPort';
 import { copilotSdkRuntime } from '@/providers/copilot/sdk/CopilotSdkRuntime';
+import type { CopilotPermissionMode } from '@/providers/copilot/settings';
+
+import { createDeferred, type Deferred } from './FakeCopilotSdkRuntime';
+
+type NativePermissionMode = 'off' | 'on' | 'auto';
 
 /** The SDK session surface the wrapper drives, with only the turn controls under test. */
 class FakeSdkCopilotSession {
@@ -28,14 +38,33 @@ class FakeSdkCopilotSession {
   readonly optionUpdates: Array<Record<string, unknown>> = [];
   serverListings = 0;
   readonly toolListings: string[] = [];
+  readonly permissionInputs: string[] = [];
+  readonly featureUpdates: Array<Record<string, boolean>> = [];
+  readonly permissionResponses: Array<{
+    requestId: string;
+    result: Exclude<CopilotSdkPermissionResult, { kind: 'no-result' }>;
+  }> = [];
+  permissionMode: NativePermissionMode = 'off';
+  readonly sentProfiles: Array<{ mode: NativePermissionMode; prompt: string }> = [];
+  readonly modelChanges: string[] = [];
+  private readonly permissionWaiters = new Map<string, Deferred<void>>();
 
-  constructor(readonly sessionId: string) {
+  constructor(readonly sessionId: string, public config?: SessionConfig) {
     FakeSdkCopilotSession.instances.push(this);
   }
 
   readonly rpc = {
     commands: {
       invoke: async (params: { input?: string; name: string }) => {
+        if (params.name === 'permissions') {
+          this.permissionInputs.push(params.input ?? '');
+          const result = await FakeSdkCopilotClient.behavior.configurePermissions?.(params.input ?? '')
+            ?? { kind: 'text', text: 'Permission mode configured.' };
+          if (result && typeof result === 'object' && 'kind' in result && result.kind === 'text') {
+            this.permissionMode = params.input === 'allow-all' ? 'on' : params.input === 'assisted' ? 'auto' : 'off';
+          }
+          return result;
+        }
         this.invocations.push(params);
         return FakeSdkCopilotClient.behavior.invokeCommand?.(params)
           ?? { displayPrompt: `/${params.name}`, kind: 'agent-prompt', prompt: 'expanded' };
@@ -56,8 +85,24 @@ class FakeSdkCopilotSession {
     },
     options: {
       update: async (params: Record<string, unknown>) => {
-        this.optionUpdates.push(params);
-        await FakeSdkCopilotClient.behavior.updateOptions?.();
+        if (params.featureFlags) {
+          this.featureUpdates.push(params.featureFlags as Record<string, boolean>);
+        } else {
+          this.optionUpdates.push(params);
+          await FakeSdkCopilotClient.behavior.updateOptions?.();
+        }
+        return { success: true, pluginHookCount: 0 };
+      },
+    },
+    permissions: {
+      handlePendingPermissionRequest: async (params: {
+        requestId: string;
+        result: Exclude<CopilotSdkPermissionResult, { kind: 'no-result' }>;
+      }) => {
+        this.permissionResponses.push(params);
+        await FakeSdkCopilotClient.behavior.respondToPermission?.();
+        this.permissionWaiters.get(params.requestId)?.resolve();
+        return { success: true };
       },
     },
     skills: {
@@ -72,6 +117,40 @@ class FakeSdkCopilotSession {
       },
     },
   };
+
+  async sendAndWait(prompt: string): Promise<void> {
+    this.sentProfiles.push({ mode: this.permissionMode, prompt });
+    await FakeSdkCopilotClient.behavior.send?.(this, prompt);
+  }
+
+  async setModel(model: string): Promise<void> {
+    this.modelChanges.push(model);
+    await FakeSdkCopilotClient.behavior.setModel?.();
+  }
+
+  async dispatchEvent(event: SessionEvent): Promise<void> {
+    // The SDK invokes its permission callback before public event subscribers.
+    const response = event.type === 'permission.requested' && !event.data.resolvedByHook
+      && this.disconnected === 0
+      ? this.config?.onPermissionRequest?.(event.data.permissionRequest, { sessionId: this.sessionId })
+      : undefined;
+    this.config?.onEvent?.(event);
+    const attributed = await response;
+    const result = attributed?.kind === 'attributed' ? attributed.result : attributed;
+    if (event.type === 'permission.requested' && result && result.kind !== 'no-result'
+      && this.disconnected === 0) {
+      await this.rpc.permissions.handlePendingPermissionRequest({
+        requestId: event.data.requestId,
+        result,
+      });
+    }
+  }
+
+  waitForPermissionResponse(requestId: string): Promise<void> {
+    const waiter = createDeferred();
+    this.permissionWaiters.set(requestId, waiter);
+    return waiter.promise;
+  }
 
   async abort(): Promise<void> {
     this.aborted += 1;
@@ -94,7 +173,7 @@ class FakeSdkCopilotClient {
   static behavior: {
     abort?: () => Promise<void>;
     commands?: Array<{ description?: string; kind: string; name: string }>;
-    createSession?: () => Promise<FakeSdkCopilotSession>;
+    createSession?: (config: SessionConfig) => Promise<FakeSdkCopilotSession>;
     deleteSession?: () => Promise<void>;
     disconnect?: () => Promise<void>;
     disableSkill?: () => Promise<void>;
@@ -108,6 +187,10 @@ class FakeSdkCopilotClient {
     listTools?: (serverName: string) => Promise<{ tools: Array<{ name: string }> }>;
     listSkills?: () => Promise<void>;
     resumeSession?: () => Promise<FakeSdkCopilotSession>;
+    respondToPermission?: () => Promise<void>;
+    send?: (session: FakeSdkCopilotSession, prompt: string) => Promise<void>;
+    configurePermissions?: (input: string) => Promise<unknown>;
+    setModel?: () => Promise<void>;
     skills?: Array<{
       commandName?: string;
       name: string;
@@ -151,8 +234,10 @@ class FakeSdkCopilotClient {
 
   async createSession(config: SessionConfig): Promise<FakeSdkCopilotSession> {
     this.sessionConfigs.push(config);
-    return (await FakeSdkCopilotClient.behavior.createSession?.())
+    const session = (await FakeSdkCopilotClient.behavior.createSession?.(config))
       ?? new FakeSdkCopilotSession('copilot-session-1');
+    session.config = config;
+    return session;
   }
 
   async resumeSession(
@@ -160,8 +245,10 @@ class FakeSdkCopilotClient {
     config: SessionConfig,
   ): Promise<FakeSdkCopilotSession> {
     this.sessionConfigs.push(config);
-    return (await FakeSdkCopilotClient.behavior.resumeSession?.())
+    const session = (await FakeSdkCopilotClient.behavior.resumeSession?.())
       ?? new FakeSdkCopilotSession(sessionId);
+    session.config = config;
+    return session;
   }
 
   async deleteSession(sessionId: string): Promise<void> {
@@ -221,7 +308,7 @@ function sessionConfig(
     availableTools: [],
     model: 'gpt-5',
     onEvent: () => {},
-    onPermissionRequest: async () => ({ kind: 'deny' } as never),
+    onPermissionRequest: async () => ({ kind: 'reject' }),
     onUserInputRequest: async () => ({} as never),
     systemMessage: { content: 'system', mode: 'replace' },
     workingDirectory: '/vault',
@@ -233,6 +320,483 @@ beforeEach(() => {
   FakeSdkCopilotClient.instances.length = 0;
   FakeSdkCopilotSession.instances.length = 0;
   FakeSdkCopilotClient.behavior = {};
+});
+
+describe('copilotSdkRuntime native permission modes', () => {
+  it.each<[CopilotPermissionMode | undefined, NativePermissionMode]>([
+    [undefined, 'off'],
+    ['ask', 'off'],
+    ['allow-all', 'on'],
+    ['judge', 'auto'],
+  ])('applies %s before a new session can send', async (permissionMode, mode) => {
+    const client = await createClient();
+    const session = await client.createSession(sessionConfig({
+      availableTools: ['builtin:view'],
+      model: 'claude-sonnet-4.5',
+      permissionMode,
+    }));
+    const native = FakeSdkCopilotSession.instances[0];
+
+    await session.send('Read the note.');
+
+    expect(native.sentProfiles).toEqual([{
+      mode,
+      prompt: 'Read the note.',
+    }]);
+    expect(native.permissionInputs).toEqual([
+      mode === 'auto' ? 'assisted' : mode === 'on' ? 'allow-all' : 'default',
+    ]);
+    expect(native.featureUpdates).toEqual([{ AUTO_APPROVAL: mode === 'auto' }]);
+    expect(native.config?.availableTools).toEqual(['builtin:view']);
+    expect(native.optionUpdates).toEqual([]);
+    await session.disconnect();
+  });
+
+  it.each<[CopilotPermissionMode, NativePermissionMode]>([
+    ['ask', 'off'], ['allow-all', 'on'], ['judge', 'auto'],
+  ])('replaces persisted native Allow all with %s on resume', async (permissionMode, mode) => {
+    FakeSdkCopilotClient.behavior.resumeSession = async () => {
+      const native = new FakeSdkCopilotSession('saved-conversation');
+      native.permissionMode = 'on';
+      return native;
+    };
+    const client = await createClient();
+    const session = await client.resumeSession('saved-conversation', sessionConfig({ permissionMode }));
+
+    await session.send('Continue.');
+
+    expect(FakeSdkCopilotSession.instances[0].sentProfiles).toEqual([{
+      mode,
+      prompt: 'Continue.',
+    }]);
+    expect(session.sessionId).toBe('saved-conversation');
+    expect(FakeSdkCopilotClient.instances[0].deletedSessions).toEqual([]);
+    await session.disconnect();
+  });
+
+  it.each([
+    { kind: 'agent-prompt', prompt: 'Not a mode change.' },
+    { kind: 'client-action', action: 'show-permissions' },
+  ])('refuses an unconfirmed judge configuration %j', async (state) => {
+    FakeSdkCopilotClient.behavior.configurePermissions = async () => state;
+    const client = await createClient();
+
+    await expect(client.createSession(sessionConfig({ permissionMode: 'judge' })))
+      .rejects.toThrow(/permission mode/i);
+    expect(FakeSdkCopilotSession.instances[0].sentProfiles).toEqual([]);
+    expect(FakeSdkCopilotSession.instances[0].disconnected).toBe(1);
+    expect(FakeSdkCopilotClient.instances[0].deletedSessions).toEqual(['copilot-session-1']);
+  });
+
+  it('reports unsupported permission commands without handing back a usable session', async () => {
+    FakeSdkCopilotClient.behavior.configurePermissions = async () => {
+      throw new Error('Unknown command: permissions');
+    };
+    const client = await createClient();
+
+    await expect(client.resumeSession('saved-conversation', sessionConfig()))
+      .rejects.toThrow(/permission mode.*Copilot CLI/i);
+    expect(FakeSdkCopilotSession.instances[0].sentProfiles).toEqual([]);
+    expect(FakeSdkCopilotSession.instances[0].disconnected).toBe(1);
+    expect(FakeSdkCopilotClient.instances[0].deletedSessions).toEqual([]);
+  });
+
+  it('preserves native judge mode when a reused session changes its chat model', async () => {
+    const client = await createClient();
+    const session = await client.createSession(sessionConfig({ permissionMode: 'judge' }));
+
+    await session.setModel('claude-sonnet-4.5');
+    await session.send('Review the changes.');
+
+    expect(FakeSdkCopilotSession.instances[0].sentProfiles).toEqual([{
+      mode: 'auto', prompt: 'Review the changes.',
+    }]);
+    expect(FakeSdkCopilotSession.instances[0].modelChanges).toEqual(['claude-sonnet-4.5']);
+    await session.disconnect();
+  });
+
+  it('does not apply a late judge model change after the session was released', async () => {
+    const entered = createDeferred();
+    const release = createDeferred();
+    FakeSdkCopilotClient.behavior.setModel = async () => {
+      entered.resolve();
+      await release.promise;
+    };
+    const client = await createClient();
+    const session = await client.createSession(sessionConfig({ permissionMode: 'judge' }));
+    const changing = session.setModel('claude-sonnet-4.5').catch(error => error as Error);
+    await entered.promise;
+    await session.disconnect();
+    release.resolve();
+
+    expect(await changing).toMatchObject({ category: 'transport' });
+    expect(FakeSdkCopilotSession.instances[0].permissionInputs).toEqual(['assisted']);
+  });
+
+  it('shares the setup deadline with resources and cleans up a silent permission RPC', async () => {
+    await withFakeTimers(async () => {
+      const permission = createDeferred<{ kind: 'text'; text: string }>();
+      FakeSdkCopilotClient.behavior.configurePermissions = () => permission.promise;
+      const client = await createClient();
+      const opening = client.createSession(sessionConfig({
+        permissionMode: 'judge',
+        resources: { mcpServers: {}, skillDirectories: ['/skills/review'] },
+      })).catch(error => error as Error);
+
+      await jest.advanceTimersByTimeAsync(31_000);
+
+      expect(await opening).toMatchObject({
+        category: 'transport', message: expect.stringContaining('30 seconds'),
+      });
+      expect(FakeSdkCopilotClient.instances[0].deletedSessions).toEqual(['copilot-session-1']);
+      expect(FakeSdkCopilotSession.instances[0].disconnected).toBe(1);
+      permission.resolve({ kind: 'text', text: 'Permission mode configured.' });
+      await jest.advanceTimersByTimeAsync(0);
+      expect(FakeSdkCopilotSession.instances[0].disabledSkills).toEqual([]);
+      expect(FakeSdkCopilotSession.instances[0].sentProfiles).toEqual([]);
+      expect(FakeSdkCopilotClient.instances[0].forceStopped).toBe(1);
+    });
+  });
+});
+
+function permissionEvent(
+  requestId: string,
+  prompt: unknown = { autoApproval: { recommendation: 'approve', model: 'gpt-5' } },
+  overrides: Record<string, unknown> = {},
+): SessionEvent {
+  return {
+    id: `event-${requestId}`,
+    parentId: null,
+    timestamp: '2026-09-17T12:00:00Z',
+    type: 'permission.requested',
+    data: {
+      requestId,
+      permissionRequest: {
+        intention: 'Read another note.',
+        kind: 'read',
+        path: '/other/note.md',
+      },
+      promptRequest: { kind: 'read', path: '/other/note.md', ...prompt as object },
+      ...overrides,
+    },
+  } as SessionEvent;
+}
+
+function judgeHandler() {
+  const approvals: ProviderApprovalInteractionRequest[] = [];
+  const interactionPort: ProviderInteractionPort = {
+    requestApproval: async request => {
+      approvals.push(request);
+      return { decision: 'deny', interactionId: request.interactionId };
+    },
+    askUserQuestion: async request => ({ answers: {}, interactionId: request.interactionId }),
+    dismissInteraction: () => {},
+    requestPlanDecision: async request => ({ decision: null, interactionId: request.interactionId }),
+  };
+  const active = { signal: new AbortController().signal, turnId: 'test-turn' };
+  const handler = new CopilotInteractionHandler({
+    getActiveTurn: () => active,
+    getPermissionMode: () => 'judge',
+    getToolPolicy: () => ({ kind: 'provider-default' }),
+    interactionPort,
+    sessionInstanceId: 'test-session',
+  }).bind({});
+  return { approvals, handle: handler.handlePermissionRequest };
+}
+
+describe('copilotSdkRuntime judge event ownership', () => {
+  it.each(['assistedApproval', 'autoApproval'])('responds once using %s despite SDK callback ordering', async field => {
+    const judge = judgeHandler();
+    const handled: Array<{ request: CopilotSdkPermissionRequest; prompt?: CopilotSdkPermissionPrompt }> = [];
+    const forwarded: SessionEvent[] = [];
+    const event = permissionEvent('read-1', {
+      [field]: { recommendation: 'approve', model: 'gpt-5' },
+    });
+    FakeSdkCopilotClient.behavior.send = async native => {
+      const response = native.waitForPermissionResponse('read-1');
+      await native.dispatchEvent(event);
+      await response;
+    };
+    const client = await createClient();
+    const session = await client.createSession(sessionConfig({
+      permissionMode: 'judge',
+      onEvent: incoming => { forwarded.push(incoming); },
+      onPermissionRequest: async (request, prompt) => {
+        handled.push({ request, prompt });
+        return judge.handle(request, prompt);
+      },
+    }));
+
+    await session.send('Read another note.');
+
+    expect(handled).toEqual([{
+      request: { kind: 'read', intention: 'Read another note.', path: '/other/note.md' },
+      prompt: expect.objectContaining({ autoApproval: { recommendation: 'approve', model: 'gpt-5' } }),
+    }]);
+    expect(FakeSdkCopilotSession.instances[0].permissionResponses).toEqual([{
+      requestId: 'read-1', result: { kind: 'approve-once' },
+    }]);
+    expect(forwarded).toEqual([event]);
+    expect(judge.approvals).toEqual([]);
+    await session.disconnect();
+  });
+
+  it.each(['ask', 'allow-all'] as const)(
+    'keeps the ordinary SDK callback as the only response owner in %s mode',
+    async (permissionMode) => {
+      const prompts: Array<CopilotSdkPermissionPrompt | undefined> = [];
+      FakeSdkCopilotClient.behavior.send = async native => {
+        await native.dispatchEvent(permissionEvent('read-1'));
+      };
+      const client = await createClient();
+      const session = await client.createSession(sessionConfig({
+        permissionMode,
+        onPermissionRequest: async (_request, prompt) => {
+          prompts.push(prompt);
+          return { kind: 'approve-once', approvedInteractively: true };
+        },
+      }));
+
+      await session.send('Read another note.');
+
+      expect(prompts).toEqual([undefined]);
+      expect(FakeSdkCopilotSession.instances[0].permissionResponses).toEqual([{
+        requestId: 'read-1', result: { kind: 'approve-once', approvedInteractively: true },
+      }]);
+      await session.disconnect();
+    },
+  );
+
+  it('rejects early requests before the event responder can attach', async () => {
+    const handled: CopilotSdkPermissionRequest[] = [];
+    FakeSdkCopilotClient.behavior.createSession = async config => {
+      const native = new FakeSdkCopilotSession('early-session', config);
+      await native.dispatchEvent(permissionEvent('early'));
+      return native;
+    };
+    const client = await createClient();
+    const session = await client.createSession(sessionConfig({
+      permissionMode: 'judge',
+      onPermissionRequest: async request => {
+        handled.push(request);
+        return { kind: 'approve-once' };
+      },
+    }));
+
+    expect(handled).toEqual([]);
+    expect(FakeSdkCopilotSession.instances[0].permissionResponses).toEqual([{
+      requestId: 'early', result: expect.objectContaining({ kind: 'reject' }),
+    }]);
+    await session.disconnect();
+  });
+
+  it('leaves hook-resolved requests alone', async () => {
+    const handled: CopilotSdkPermissionRequest[] = [];
+    FakeSdkCopilotClient.behavior.send = async native => {
+      await native.dispatchEvent(permissionEvent('hook-resolved', {}, { resolvedByHook: true }));
+    };
+    const client = await createClient();
+    const session = await client.createSession(sessionConfig({
+      permissionMode: 'judge',
+      onPermissionRequest: async request => {
+        handled.push(request);
+        return { kind: 'approve-once' };
+      },
+    }));
+
+    await session.send('Read another note.');
+
+    expect(handled).toEqual([]);
+    expect(FakeSdkCopilotSession.instances[0].permissionResponses).toEqual([]);
+    await session.disconnect();
+  });
+
+  it.each([
+    {},
+    { autoApproval: { recommendation: 'requireApproval' } },
+    { autoApproval: { recommendation: 'excluded' } },
+    { autoApproval: { recommendation: 'error', failureReason: 'timeout' } },
+    { autoApproval: { recommendation: 'error', failureReason: 'model_error' } },
+    { autoApproval: { recommendation: 'approve' }, managedApprovalRequired: true },
+    { autoApproval: { recommendation: 'APPROVE' } },
+    { autoApproval: { recommendation: 'approve', reason: 42 } },
+    { autoApproval: { recommendation: 'approve', failureReason: 'timeout' } },
+    { autoApproval: { recommendation: 'approve' }, managedApprovalRequired: 'true' },
+  ])('routes an uncertain or managed event to a human (%j)', async prompt => {
+    const judge = judgeHandler();
+    FakeSdkCopilotClient.behavior.send = async native => {
+      const response = native.waitForPermissionResponse('read-1');
+      await native.dispatchEvent(permissionEvent('read-1', prompt));
+      await response;
+    };
+    const client = await createClient();
+    const session = await client.createSession(sessionConfig({
+      permissionMode: 'judge',
+      onPermissionRequest: judge.handle,
+    }));
+
+    await session.send('Read another note.');
+
+    expect(judge.approvals[0]).toMatchObject({ toolName: 'read', turnId: 'test-turn' });
+    expect(FakeSdkCopilotSession.instances[0].permissionResponses).toEqual([{
+      requestId: 'read-1', result: { kind: 'reject', feedback: 'Denied by the user.' },
+    }]);
+    await session.disconnect();
+  });
+
+  it('preserves a native judge failure reason for the human approval surface', async () => {
+    const prompts: Array<CopilotSdkPermissionPrompt | undefined> = [];
+    FakeSdkCopilotClient.behavior.send = async native => {
+      const response = native.waitForPermissionResponse('read-1');
+      await native.dispatchEvent(permissionEvent('read-1', {
+        autoApproval: {
+          recommendation: 'error', reason: 'The judge timed out.', failureReason: 'timeout',
+        },
+      }));
+      await response;
+    };
+    const client = await createClient();
+    const session = await client.createSession(sessionConfig({
+      permissionMode: 'judge',
+      onPermissionRequest: async (_request, prompt) => {
+        prompts.push(prompt);
+        return { kind: 'reject' };
+      },
+    }));
+
+    await session.send('Read another note.');
+
+    expect(prompts).toEqual([expect.objectContaining({
+      autoApproval: {
+        recommendation: 'error', reason: 'The judge timed out.', failureReason: 'timeout',
+      },
+    })]);
+    await session.disconnect();
+  });
+
+  it.each(['abort', 'disconnect', 'completed', 'idle'] as const)(
+    'cancels a pending permission when its native scope ends through %s',
+    async transition => {
+      const entered = createDeferred();
+      const finishNative = createDeferred();
+      const decision = createDeferred<CopilotSdkPermissionResult>();
+      let promptSignal: AbortSignal | undefined;
+      FakeSdkCopilotClient.behavior.send = async native => {
+        await native.dispatchEvent(permissionEvent('read-1'));
+        await finishNative.promise;
+      };
+      const client = await createClient();
+      const session = await client.createSession(sessionConfig({
+        permissionMode: 'judge',
+        onPermissionRequest: async (_request, prompt) => {
+          promptSignal = prompt?.signal;
+          entered.resolve();
+          return decision.promise;
+        },
+      }));
+      const sending = session.send('Read another note.').catch(error => error as Error);
+      try {
+        await entered.promise;
+        if (transition === 'abort') await session.abort();
+        else if (transition === 'disconnect') await session.disconnect();
+        else if (transition === 'completed') {
+          await FakeSdkCopilotSession.instances[0].dispatchEvent({
+            id: 'completed', parentId: null, timestamp: '2026-09-17T12:00:01Z',
+            type: 'permission.completed',
+            data: { requestId: 'read-1', result: { kind: 'approved' } },
+          });
+        } else {
+          finishNative.resolve();
+          await sending;
+        }
+        expect(promptSignal?.aborted).toBe(true);
+        decision.resolve({ kind: 'approve-once', approvedInteractively: true });
+        await new Promise(resolve => setImmediate(resolve));
+
+        expect(FakeSdkCopilotSession.instances[0].permissionResponses).toEqual([]);
+      } finally {
+        decision.resolve({ kind: 'reject' });
+        finishNative.resolve();
+        await sending;
+        await session.disconnect();
+      }
+    },
+  );
+
+  it('does not attribute replayed request IDs to a later turn on the same session', async () => {
+    const handled: string[] = [];
+    FakeSdkCopilotClient.behavior.send = async (native, prompt) => {
+      if (prompt === 'second') await native.dispatchEvent(permissionEvent('first'));
+      const response = native.waitForPermissionResponse(prompt);
+      await native.dispatchEvent(permissionEvent(prompt));
+      await response;
+    };
+    const client = await createClient();
+    const session = await client.createSession(sessionConfig({
+      permissionMode: 'judge',
+      onPermissionRequest: async request => {
+        handled.push(request.kind);
+        return { kind: 'approve-once' };
+      },
+    }));
+
+    await session.send('first');
+    await session.send('second');
+
+    expect(handled).toEqual(['read', 'read']);
+    expect(FakeSdkCopilotSession.instances[0].permissionResponses).toEqual([
+      { requestId: 'first', result: { kind: 'approve-once' } },
+      { requestId: 'second', result: { kind: 'approve-once' } },
+    ]);
+    await session.disconnect();
+  });
+
+  it('rejects late permission events while no turn owns the prepared session', async () => {
+    const judge = judgeHandler();
+    const client = await createClient();
+    const session = await client.createSession(sessionConfig({
+      permissionMode: 'judge', onPermissionRequest: judge.handle,
+    }));
+    await session.send('First turn.');
+    const native = FakeSdkCopilotSession.instances[0];
+    const response = native.waitForPermissionResponse('late');
+
+    await native.dispatchEvent(permissionEvent('late'));
+    await response;
+
+    expect(judge.approvals).toEqual([]);
+    expect(native.permissionResponses).toEqual([{
+      requestId: 'late', result: expect.objectContaining({ kind: 'reject' }),
+    }]);
+    await session.disconnect();
+  });
+
+  it.each(['Permission connection closed.', 'Invalid configuration for the permission response.'])(
+    'surfaces permission delivery failures as an unusable runtime: %s',
+    async message => {
+      const finishNative = createDeferred();
+      const judge = judgeHandler();
+      FakeSdkCopilotClient.behavior.respondToPermission = async () => {
+        throw new Error(message);
+      };
+      FakeSdkCopilotClient.behavior.send = async native => {
+        await native.dispatchEvent(permissionEvent('read-1'));
+        await finishNative.promise;
+      };
+      const client = await createClient();
+      const session = await client.createSession(sessionConfig({
+        permissionMode: 'judge', onPermissionRequest: judge.handle,
+      }));
+      try {
+        await expect(session.send('Read another note.')).rejects.toMatchObject({
+          category: 'transport', message: expect.stringContaining(message),
+        });
+      } finally {
+        finishNative.resolve();
+        await session.disconnect();
+      }
+    },
+  );
 });
 
 /**

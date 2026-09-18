@@ -16,6 +16,8 @@ import {
   normalizeCopilotResourcesByHost,
 } from './resources/CopilotResourceSettings';
 
+export type CopilotPermissionMode = 'ask' | 'allow-all' | 'judge';
+
 export interface CopilotProviderSettings {
   cliPath: string;
   cliPathsByHost: HostnameCliPaths;
@@ -24,6 +26,7 @@ export interface CopilotProviderSettings {
   environmentHash: string;
   environmentVariables: string;
   modelAliases: Record<string, string>;
+  permissionModesByHost: Record<string, CopilotPermissionMode>;
   preferredReasoningByModel: Record<string, CopilotReasoningEffort>;
   resourcesByHost: CopilotResourcesByHost;
   visibleModels: string[];
@@ -38,6 +41,7 @@ export const DEFAULT_COPILOT_PROVIDER_SETTINGS: Readonly<CopilotProviderSettings
     environmentHash: '',
     environmentVariables: '',
     modelAliases: {},
+    permissionModesByHost: {},
     preferredReasoningByModel: {},
     resourcesByHost: {},
     visibleModels: [],
@@ -71,6 +75,7 @@ export function getCopilotProviderSettings(
       knownModelIds,
       retainSelection,
     ),
+    permissionModesByHost: normalizePermissionModesByHost(config.permissionModesByHost),
     preferredReasoningByModel: normalizeCopilotPreferredReasoning(
       config.preferredReasoningByModel,
       discoveredModels,
@@ -130,6 +135,9 @@ export function updateCopilotProviderSettings(
       knownModelIds,
       retainSelection,
     ),
+    permissionModesByHost: normalizePermissionModesByHost(
+      updates.permissionModesByHost ?? current.permissionModesByHost,
+    ),
     preferredReasoningByModel: normalizeCopilotPreferredReasoning(
       updates.preferredReasoningByModel ?? current.preferredReasoningByModel,
       discoveredModels,
@@ -149,6 +157,44 @@ export function updateCopilotProviderSettings(
     ...next,
   });
   return next;
+}
+
+export function decodeCopilotPermissionMode(value: unknown): CopilotPermissionMode {
+  return value === 'allow-all' || value === 'judge' ? value : 'ask';
+}
+
+export function getCopilotPermissionMode(
+  settings: Record<string, unknown>,
+  hostname: string = getHostnameKey(),
+): CopilotPermissionMode {
+  const modes = getProviderConfig(settings, 'copilot').permissionModesByHost;
+  return decodeCopilotPermissionMode(
+    isRecord(modes) && Object.hasOwn(modes, hostname) ? modes[hostname] : undefined,
+  );
+}
+
+/** A synced selection must never grant approval on another computer. */
+export function setCopilotPermissionMode(
+  settings: Record<string, unknown>,
+  mode: CopilotPermissionMode,
+  hostname: string = getHostnameKey(),
+): void {
+  const config = getProviderConfig(settings, 'copilot');
+  setProviderConfig(settings, 'copilot', {
+    ...config,
+    permissionModesByHost: {
+      ...(isRecord(config.permissionModesByHost) ? config.permissionModesByHost : {}),
+      [hostname]: decodeCopilotPermissionMode(mode),
+    },
+  });
+}
+
+function normalizePermissionModesByHost(value: unknown): Record<string, CopilotPermissionMode> {
+  return isRecord(value)
+    ? Object.fromEntries(Object.entries(value).map(([host, mode]) => [
+      host, decodeCopilotPermissionMode(mode),
+    ]))
+    : {};
 }
 
 /**

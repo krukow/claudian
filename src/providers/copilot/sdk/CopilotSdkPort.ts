@@ -1,4 +1,5 @@
 import type { CopilotReasoningEffort } from '../models';
+import type { CopilotPermissionMode } from '../settings';
 import type {
   MCPServerConfig,
   ModelInfo,
@@ -23,6 +24,15 @@ export type CopilotSdkMcpServerConfig = MCPServerConfig;
 export type CopilotSdkModel = ModelInfo;
 export type CopilotSdkPermissionRequest = PermissionRequest;
 export type CopilotSdkPermissionResult = PermissionRequestResult;
+/** Metadata available on permission events, but omitted from the SDK callback. */
+export type CopilotSdkPermissionPrompt = Pick<
+  NonNullable<Extract<SessionEvent, { type: 'permission.requested' }>['data']['promptRequest']>,
+  'autoApproval'
+> & {
+  readonly managedApprovalRequired?: boolean;
+  /** Ends when the native prompt is resolved, cancelled, or loses its turn. */
+  readonly signal?: AbortSignal;
+};
 export type CopilotSdkUserInputRequest = Parameters<UserInputHandler>[0];
 export type CopilotSdkUserInputResponse = Awaited<ReturnType<UserInputHandler>>;
 
@@ -84,10 +94,13 @@ export interface CopilotSdkSessionConfig {
   readonly onEvent: (event: CopilotSdkEvent) => void;
   readonly onPermissionRequest: (
     request: CopilotSdkPermissionRequest,
+    prompt?: CopilotSdkPermissionPrompt,
   ) => Promise<CopilotSdkPermissionResult>;
   readonly onUserInputRequest: (
     request: CopilotSdkUserInputRequest,
   ) => Promise<CopilotSdkUserInputResponse>;
+  /** Defaults to Ask. Only eligible persistent chat uses the explicit host choice. */
+  readonly permissionMode?: CopilotPermissionMode;
   readonly reasoningEffort?: CopilotReasoningEffort;
   /** The named MCP servers and skills this session may use. Absent means none of them. */
   readonly resources?: CopilotSdkSessionResources;

@@ -99,6 +99,25 @@ jest.mock('obsidian', () => {
     }
   }
 
+  class MockDropdownComponent {
+    readonly selectEl: HTMLSelectElement;
+    constructor(container: HTMLElement) {
+      this.selectEl = container.appendChild(document.createElement('select'));
+    }
+    addOption(value: string, text: string): this {
+      const option = this.selectEl.appendChild(document.createElement('option'));
+      option.value = value;
+      option.textContent = text;
+      return this;
+    }
+    setValue(value: string): this { this.selectEl.value = value; return this; }
+    setDisabled(disabled: boolean): this { this.selectEl.disabled = disabled; return this; }
+    onChange(callback: (value: string) => void): this {
+      this.selectEl.addEventListener('change', () => callback(this.selectEl.value));
+      return this;
+    }
+  }
+
   class MockSetting {
     controlEl = document.createElement('div');
     descEl = document.createElement('div');
@@ -112,6 +131,11 @@ jest.mock('obsidian', () => {
 
     addButton(callback: (button: MockButtonComponent) => void): this {
       callback(new MockButtonComponent(this.controlEl));
+      return this;
+    }
+
+    addDropdown(callback: (dropdown: MockDropdownComponent) => void): this {
+      callback(new MockDropdownComponent(this.controlEl));
       return this;
     }
 

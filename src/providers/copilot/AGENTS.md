@@ -143,12 +143,12 @@ them as pending here.
   MCP OAuth storage, MCP apps, remote sessions and remote export, the built-in session
   store, host git operations, memory, infinite sessions, scheduling, file hooks, plugin
   directories, custom instructions and their on-demand discovery, runtime configuration
-  discovery, experimental features, the commit co-author trailer, and the runtime's own
+  discovery, general experimental mode, the commit co-author trailer, and the runtime's own
   `environment_context` description of the host. MCP servers and skills are stated there
   too, from the caller's resources alone. Several of
   those default the other way outside empty mode, so an omission is not a smaller session
   but a coding-agent one. The port exposes none of them: a caller chooses tools, a model,
-  directories, and handlers, and cannot weaken the floor.
+  directories, an approval mode, and handlers, and cannot weaken the floor. LLM judge enables only the native `AUTO_APPROVAL` feature flag, not general experimental mode.
 - A session's installed plugins are the exception, and the reason `COPILOT_HOME` isolation
   is load-bearing rather than tidy. The SDK clears them only in empty mode, through the
   options patch it sends after create and resume, and exposes no session field for them;
@@ -433,6 +433,9 @@ them as pending here.
   that fails is retried through the next client and reported when no next client can exist.
 - Approvals, questions, and events all carry the identity of the live session they came
   from, so a session Claudian dropped can never answer for the run that replaced it.
+- Permission modes are host-scoped and apply only to persistent chat with a `provider-default` or `unrestricted` tool policy. `CopilotExecutionSession` snapshots the effective mode before asynchronous acquisition and includes it in session identity; auxiliary and restricted turns always use Ask. Approval modes never widen available or excluded tools.
+- Before publishing a created or resumed session, the SDK boundary calls `session.rpc.options.update({ featureFlags: { AUTO_APPROVAL: mode === 'judge' } })`, then `session.rpc.commands.invoke({ name: 'permissions', input })`, where input is `default`, `assisted`, or `allow-all`. SDK 1.0.11 exposes generated `setAllowAll`/`getAllowAll` methods that CLI 1.0.86-2 rejects with `Unhandled method`; do not substitute them or enable general experimental mode.
+- Assisted approvals have one event-aware response owner: the SDK invokes its ordinary callback before public events and omits prompt metadata. Only while that owner is attached in judge mode does the callback return `no-result`. Normalize native `assistedApproval` and SDK `autoApproval`; only an affirmative recommendation without a managed-human requirement may approve once. Keep request, turn, cancellation, and disposal fences, and never attribute an AI or standing approval with `approvedInteractively`.
 - Input the provider cannot carry is reported on the turn rather than dropped. An image
   reaches nothing — the CLI receives a text prompt and `capabilities.ts` advertises no
   image support — so the turn says which attachments were not sent.

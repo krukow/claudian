@@ -6,7 +6,10 @@ export interface LocalModelServer {
   close(): Promise<void>;
 }
 
-export async function startLocalModelServer(toolCallName?: string): Promise<LocalModelServer> {
+export async function startLocalModelServer(
+  toolCallName?: string,
+  judgeReply = 'Synthetic invalid judge recommendation.',
+): Promise<LocalModelServer> {
   const completionRequests: string[] = [];
   const server = createServer((request, response) => {
     let body = '';
@@ -16,6 +19,20 @@ export async function startLocalModelServer(toolCallName?: string): Promise<Loca
       response.setHeader('content-type', 'application/json');
       if (request.method === 'POST' && request.url === '/v1/chat/completions') {
         completionRequests.push(body);
+        const payload: { stream?: boolean } = JSON.parse(body);
+        if (payload.stream !== true) {
+          response.end(JSON.stringify({
+            id: 'chatcmpl-claudian-judge-fixture',
+            object: 'chat.completion',
+            created: 0,
+            model: 'gpt-4o',
+            choices: [{
+              index: 0, message: { role: 'assistant', content: judgeReply }, finish_reason: 'stop',
+            }],
+            usage: { completion_tokens: 1, prompt_tokens: 1, total_tokens: 2 },
+          }));
+          return;
+        }
         response.setHeader('content-type', 'text/event-stream');
         const chunk = {
           created: 0,

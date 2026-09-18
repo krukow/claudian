@@ -7,7 +7,7 @@ The Copilot provider is disabled until you turn it on.
 ## Requirements
 
 - The GitHub Copilot CLI, installed by you. Claudian never bundles, downloads, or updates it.
-- CLI version 1.0.79 or newer. Claudian talks to the CLI through `@github/copilot-sdk` 1.0.11, which is built against `@github/copilot` 1.0.79, so an older CLI may not speak the protocol the SDK sends. The built-in tool list Claudian filters against was captured on CLI 1.0.83, and a newer CLI is recommended.
+- A current Copilot CLI. Claudian uses `@github/copilot-sdk` 1.0.11; native permission modes have been exercised against CLI 1.0.86-2. An older CLI may not implement these APIs even if the SDK exposes them.
 - A GitHub account with an active Copilot subscription. **Connect Copilot** handles sign-in.
 - In-app connection requires a CLI whose `login` command supports `--web-flow`. Claudian checks this capability before starting sign-in.
 - The same Obsidian and desktop requirements as the rest of Claudian.
@@ -45,7 +45,7 @@ Leave **CLI path** empty for automatic discovery. Set an absolute path only when
 
 - **Chat**: pick a Copilot model in the chat model selector and send a message. Text and reasoning stream as they arrive, tool calls appear as they start and finish, and usage is reported against the model's context window.
 - **Tools**: Copilot runs its own built-in tools inside your vault. Claudian narrows them to the ones it can render, and the background-agent and factory families are never available.
-- **Approvals**: every action the CLI asks permission for is routed to the Claudian approval prompt. There is no blanket allow and no permission-mode switch: approving once and approving for the session are both your choice, and a request that arrives with no live turn is refused.
+- **Approvals**: use the single **Tool approvals** dropdown to choose **Ask**, **LLM judge**, or **Allow all** under Copilot's permission settings. The choice applies to chat on this computer, not auxiliary or restricted turns. Requests without a live owning turn are refused.
 - **Questions**: when the CLI asks a question, Claudian shows it with the choices the CLI offered.
 - **Context**: the note a message was sent from, the editor selection, and any browser or canvas selection travel with the prompt. Directories you have added as external context are opened to the session alongside the vault.
 - **Auxiliary work**: conversation titles, inline edits, and instruction refinement each run as their own short-lived Copilot session, separate from the chat runtime. Their native session data is deleted when the work finishes, and none of them ever starts an MCP server or loads a skill.
@@ -73,6 +73,16 @@ Leave **CLI path** empty for automatic discovery. Set an absolute path only when
 | Plugin selection | No — see the plugin isolation limit below |
 
 Unsupported capabilities are not offered in Claudian's UI.
+
+## Permission modes
+
+- **Ask** keeps the ordinary CLI approval prompts.
+- **Allow all** uses the CLI's native permission mode for tools, file paths, and URLs. It does not enable additional tools or MCP servers.
+- **LLM judge** uses the native CLI's assisted approval: an affirmative recommendation may approve a request, while uncertain, excluded, failed, or managed-human-approval requests still ask you. The native judge can make additional model requests and uses its own model selection.
+
+These preferences apply only to persistent Copilot chat with a provider-default or unrestricted tool policy on this computer. They do not change global Copilot CLI configuration or another computer's choice. Titles, inline edits, instruction refinement, and restricted tool policies always use Ask.
+
+Claudian configures each created or resumed session through the native `/permissions` command, enabling only the `AUTO_APPROVAL` feature flag for LLM judge. It does not enable general experimental mode or run a custom judge. A CLI that cannot configure the requested mode fails before a turn starts rather than silently using a different mode.
 
 ## MCP servers and skills
 
@@ -110,7 +120,7 @@ An MCP configuration file is the format the Copilot CLI uses: a JSON document wi
 - Server definitions that authenticate through OAuth or OIDC, or that use `deferTools`, are refused with a message naming the field: the pinned SDK cannot carry them, and Claudian will not silently drop the mechanism a server is reached with.
 - Only the tools a selected server actually offers are allowed, and a server's own `tools` restriction is kept. A server that is still starting is waited for while the session opens; one that failed, needs authentication, or is disabled contributes no tools and is reported on the turn rather than waited out.
 - Skills a selected package did not declare — including the CLI's own built-in skills — are disabled for the session before any turn runs.
-- Claudian adds no automatic approvals for selected resources. The CLI still owns permission requests, including its native skill behavior; requests it sends are handled by Claudian's existing approval prompt.
+- Selecting resources never changes your permission mode. **Ask**, **Allow all**, or **LLM judge** continues to govern the requests they make.
 
 ## Data, storage, and network
 
@@ -151,4 +161,4 @@ Contributors can exercise the real SDK and installed CLI against synthetic skill
 CLAUDIAN_COPILOT_RESOURCE_SMOKE_CLI_PATH="/absolute/path/to/copilot" npm run check:copilot-resources -- --runInBand
 ```
 
-This opt-in smoke uses temporary state homes and no real account credentials or model endpoint. It covers resource isolation, cold resume, MCP approval decisions, and native skill expansion; it does not deploy the plugin or exercise the Obsidian UI.
+This opt-in smoke uses temporary state homes and no real account credentials or model endpoint. It covers resource isolation, cold resume, MCP approval decisions, native allow-all, affirmative and failed native judge recommendations, and native skill expansion; it does not deploy the plugin or exercise the Obsidian UI.

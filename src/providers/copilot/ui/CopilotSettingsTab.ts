@@ -29,6 +29,7 @@ import {
   updateCopilotProviderSettings,
 } from '../settings';
 import { CopilotConnectionModal } from './CopilotConnectionModal';
+import { renderCopilotPermissionSettings } from './CopilotPermissionSettings';
 import { renderCopilotResourceSettings } from './CopilotResourceSettingsSection';
 
 const COPILOT_PROVIDER_ID = 'copilot' as const;
@@ -160,6 +161,7 @@ export const copilotSettingsTabRenderer: ProviderSettingsTabRenderer = {
       refreshModelCatalog,
     );
 
+    renderCopilotPermissionSettings(container, context);
     renderCopilotResourceSettings(container, context);
 
     renderEnvironmentSettingsSection({

@@ -3,6 +3,7 @@ import type {
   CopilotSdkClientOptions,
   CopilotSdkEvent,
   CopilotSdkModel,
+  CopilotSdkPermissionPrompt,
   CopilotSdkPermissionRequest,
   CopilotSdkPermissionResult,
   CopilotSdkRuntime,
@@ -57,8 +58,9 @@ export class FakeCopilotSdkSession implements CopilotSdkSession {
 
   requestPermission(
     request: CopilotSdkPermissionRequest,
+    prompt?: CopilotSdkPermissionPrompt,
   ): Promise<CopilotSdkPermissionResult> {
-    return this.config.onPermissionRequest(request);
+    return this.config.onPermissionRequest(request, prompt);
   }
 
   requestUserInput(

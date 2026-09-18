@@ -41,7 +41,12 @@ import type {
   CopilotSdkSessionConfig,
   CopilotSdkSessionResources,
 } from '../sdk/CopilotSdkPort';
-import { getCopilotProviderSettings, getEnabledCopilotModels } from '../settings';
+import {
+  type CopilotPermissionMode,
+  getCopilotPermissionMode,
+  getCopilotProviderSettings,
+  getEnabledCopilotModels,
+} from '../settings';
 import { CopilotEventNormalizer } from './CopilotEventNormalizer';
 import type { CopilotExecutionEventDraft } from './CopilotExecutionEventDraft';
 import { CopilotInteractionHandler } from './CopilotInteractionHandler';
@@ -50,6 +55,7 @@ import {
   decodeSkillCommandInput,
   describeUnsupportedInput,
   encodeAdditionalDirectories,
+  encodeCopilotPermissionMode,
   encodeCopilotResourceDigest,
   encodePrompt,
   encodeReasoningEffort,
@@ -138,6 +144,7 @@ interface ActiveExecution {
   cancellation: Promise<void> | null;
   cancelled: boolean;
   readonly normalizer: CopilotEventNormalizer;
+  readonly permissionMode: CopilotPermissionMode;
   readonly request: ProviderExecutionRequest;
   /** What the turn's selected resources could not resolve to, reported on the turn. */
   resourceProblems: readonly string[];
@@ -227,6 +234,7 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
           : null
       ),
       getToolPolicy: () => this.active?.request.toolPolicy ?? null,
+      getPermissionMode: () => this.active?.permissionMode ?? 'ask',
       interactionPort: config.interactionPort,
       sessionInstanceId: this.sessionInstanceId,
     });
@@ -254,6 +262,11 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
         }),
         nextScope: () => this.nextScope(active),
       }),
+      permissionMode: encodeCopilotPermissionMode(
+        this.config.lifecycle,
+        request.toolPolicy,
+        getCopilotPermissionMode(this.host.settings),
+      ),
       request,
       resourceProblems: [],
       run,
@@ -533,6 +546,7 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
     });
     const identityKey = encodeSessionIdentity({
       additionalDirectories,
+      permissionMode: active.permissionMode,
       ...(resources ? { resources } : {}),
       systemMessage,
       toolSelection,
@@ -562,6 +576,7 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
       },
       onPermissionRequest: interactions.handlePermissionRequest,
       onUserInputRequest: interactions.handleUserInputRequest,
+      permissionMode: active.permissionMode,
       ...(resources ? { resources } : {}),
       systemMessage,
       workingDirectory: this.config.vaultWorkingDirectory,

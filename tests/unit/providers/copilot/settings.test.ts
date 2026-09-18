@@ -5,8 +5,10 @@ import {
 import type { CopilotDiscoveredModel } from '@/providers/copilot/models';
 import {
   DEFAULT_COPILOT_PROVIDER_SETTINGS,
+  getCopilotPermissionMode,
   getCopilotProviderSettings,
   getEnabledCopilotModels,
+  setCopilotPermissionMode,
   updateCopilotProviderSettings,
 } from '@/providers/copilot/settings';
 
@@ -24,6 +26,47 @@ const discoveredModel: CopilotDiscoveredModel = {
   supportsVision: true,
 };
 
+describe('Copilot host permission modes', () => {
+  it.each(['ask', 'allow-all', 'judge'] as const)(
+    'uses an explicit %s choice only on the computer that chose it',
+    (mode) => {
+      const settings = settingsWithConfig({ permissionModesByHost: { laptop: mode } });
+
+      expect(getCopilotPermissionMode(settings, 'laptop')).toBe(mode);
+      expect(getCopilotPermissionMode(settings, 'desktop')).toBe('ask');
+    },
+  );
+
+  it.each([undefined, null, true, 1, 'auto', 'on', 'ALLOW-ALL', {}, ['allow-all']])(
+    'fails closed for a malformed persisted mode %j',
+    (mode) => {
+      const settings = settingsWithConfig({
+        permissionMode: 'allow-all',
+        permissionModesByHost: { laptop: mode },
+      });
+
+      expect(getCopilotPermissionMode(settings, 'laptop')).toBe('ask');
+      expect(getCopilotPermissionMode(settings, 'desktop')).toBe('ask');
+    },
+  );
+
+  it('changes one host without dropping other hosts or unknown provider fields', () => {
+    const settings = settingsWithConfig({
+      futureOption: { keep: true },
+      permissionModesByHost: { laptop: 'judge', desktop: 'ask' },
+    });
+
+    setCopilotPermissionMode(settings, 'allow-all', 'desktop');
+    updateCopilotProviderSettings(settings, { enabled: true });
+
+    expect(getProviderConfig(settings, 'copilot')).toMatchObject({
+      enabled: true,
+      futureOption: { keep: true },
+      permissionModesByHost: { laptop: 'judge', desktop: 'allow-all' },
+    });
+  });
+});
+
 describe('getCopilotProviderSettings', () => {
   it('defaults to disabled with no models when nothing is persisted', () => {
     expect(getCopilotProviderSettings({})).toEqual(DEFAULT_COPILOT_PROVIDER_SETTINGS);
@@ -38,6 +81,7 @@ describe('getCopilotProviderSettings', () => {
       environmentHash: false,
       environmentVariables: ['SECRET=leaked'],
       modelAliases: ['nope'],
+      permissionModesByHost: 'not-a-map',
       preferredReasoningByModel: 42,
       resourcesByHost: 'not-a-map',
       visibleModels: { nope: true },
