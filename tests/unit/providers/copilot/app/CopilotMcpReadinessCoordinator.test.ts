@@ -2,9 +2,11 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import type { ProviderExecutionEvent, ProviderInteractionPort } from '@/core/execution';
 import { ProviderExecutionLifecycleRegistry } from '@/core/execution/ProviderExecutionLifecycleRegistry';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
 import { CopilotMcpReadinessCoordinator } from '@/providers/copilot/app/CopilotMcpReadinessCoordinator';
+import { CopilotExecutionBackend } from '@/providers/copilot/execution/CopilotExecutionBackend';
 import { getCopilotHostResources, updateCopilotHostResources } from '@/providers/copilot/resources/CopilotHostResources';
 import { updateCopilotProviderSettings } from '@/providers/copilot/settings';
 
@@ -44,7 +46,7 @@ async function setup(runtime: FakeCopilotSdkRuntime) {
     settings,
   } as unknown as ProviderHost;
   const service = new CopilotMcpReadinessCoordinator(host, { runtime });
-  return { configPath, references, registry, service, settings, setCliPath: (value: string) => { cliPath = value; } };
+  return { configPath, host, references, registry, service, settings, setCliPath: (value: string) => { cliPath = value; } };
 }
 
 it('reports each isolated server, including empty tools, without starting disabled servers or granting tools', async () => {
@@ -339,3 +341,65 @@ it.each(['metadata', 'create-session'])(
     await service.dispose();
   },
 );
+
+it('retires unfinished readiness when a failed chat lease skips the before-transition hook', async () => {
+  const entered = createDeferred();
+  const release = createDeferred();
+  const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
+    onSessionCreated: session => {
+      session.mcpReadinessBehavior = async () => {
+        entered.resolve();
+        await release.promise;
+        return { phase: 'connected', toolCount: 1 };
+      };
+    },
+  }));
+  const { host, references, registry, service } = await setup(runtime);
+  const interactionPort: ProviderInteractionPort = {
+    requestApproval: async () => { throw new Error('Unexpected approval.'); },
+    askUserQuestion: async () => { throw new Error('Unexpected question.'); },
+    requestPlanDecision: async () => { throw new Error('Unexpected plan decision.'); },
+    dismissInteraction: () => {},
+  };
+  const chatClient = new FakeCopilotSdkClient({
+    stopBehavior: async () => { throw new Error('Chat runtime stop failed.'); },
+  });
+  const lease = registry.acquire(
+    new CopilotExecutionBackend(host, { runtime: new FakeCopilotSdkRuntime(() => chatClient) }),
+    { interactionPort, lifecycle: 'persistent', nativePersistence: 'provider-default', vaultWorkingDirectory: root },
+    'chat',
+  );
+  const events: ProviderExecutionEvent[] = [];
+  for await (const event of lease.session.execute({
+    configuration: {
+      model: 'copilot/gpt-5-mini',
+      systemInstructions: { kind: 'explicit', instructions: 'Synthetic chat lease.' },
+    },
+    input: [{ type: 'text', text: 'Start the chat runtime.' }],
+    signal: new AbortController().signal,
+    toolPolicy: { kind: 'passive' },
+  }).events) events.push(event);
+  expect(events.at(-1)).toMatchObject({ type: 'turn_completed', reason: 'completed' });
+  const checking = service.check();
+  try {
+    await entered.promise;
+    await expect(registry.runTransition(['copilot'], async () => {}))
+      .rejects.toThrow('Chat runtime stop failed.');
+
+    expect(references.map(reference => service.getState(reference))).toEqual([
+      { phase: 'unchecked' }, { phase: 'unchecked' },
+    ]);
+    const rechecking = service.check(references[0]);
+    release.resolve();
+    await Promise.all([checking, rechecking]);
+    expect(service.getState(references[0])).toEqual({ phase: 'connected', toolCount: 1 });
+    expect(runtime.clients.flatMap(client => client.createdSessions.map(session => (
+      Object.keys(session.config.resources?.mcpServers ?? {})
+    )))).toEqual([['first'], ['first']]);
+  } finally {
+    release.resolve();
+    await checking;
+    await service.dispose();
+    await registry.dispose();
+  }
+});

@@ -117,7 +117,7 @@ Skills and local stdio servers have no Sign in control. Skills are instruction p
 
 Remembered credentials use the Copilot CLI's cache on this computer. The CLI normally uses the OS keychain, but may fall back to local token files outside the vault if the keychain is unavailable. This is an explicit opt-in, not a keychain-only guarantee. Turning the option off changes future runtime storage; it does not revoke or delete credentials already cached by the CLI.
 
-Sign-in is unavailable while resource choices are being saved, and runtime-setting transitions cancel pending authorization before committing. Closing and immediately reopening sign-in waits for the previous attempt's cleanup before starting another. Once native authentication is confirmed, closing the dialog or a failed runtime refresh cannot undo it: Claudian keeps the signed-in outcome, reports any cleanup or refresh failure separately, and rechecks readiness. Failed teardown also produces a notice after the dialog closes.
+Sign-in is unavailable while resource choices are being saved, and runtime-setting transitions cancel pending authorization before committing. Closing and immediately reopening sign-in waits for the previous attempt's cleanup before starting another. Once native authentication is confirmed, closing the dialog or a failed runtime refresh cannot undo it: Claudian keeps the signed-in outcome, reports any cleanup or refresh failure separately, and rechecks readiness. Failed teardown also produces a notice after the dialog closes. A later successful sign-in does not replay an earlier attempt's refresh warning, while unresolved native cleanup failures remain reportable during shutdown.
 
 **Where Claudian looks**
 

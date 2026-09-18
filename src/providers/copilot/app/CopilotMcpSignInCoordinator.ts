@@ -16,12 +16,26 @@ export type CopilotMcpSignInState =
   | { readonly phase: 'waiting'; readonly authorizationUrl: string }
   | { readonly phase: 'error'; readonly message: string };
 
+export class CopilotMcpSignInFollowUpError extends Error {
+  constructor(readonly authenticated: boolean, error: unknown) {
+    super(describeError(error), { cause: error });
+    this.name = 'CopilotMcpSignInFollowUpError';
+  }
+}
+
+interface CopilotMcpSignInAttempt {
+  readonly referenceId: string;
+  authenticated: boolean;
+  failure?: { readonly error: unknown };
+}
+
 export class CopilotMcpSignInCoordinator {
   private readonly factory: CopilotClientFactory;
   private readonly states = new Map<string, CopilotMcpSignInState>();
   private readonly listeners = new Set<() => void>();
   private readonly unregister: () => void;
-  private readonly lifecycleFailures: unknown[] = [];
+  private readonly cleanupFailures: unknown[] = [];
+  private attempt: CopilotMcpSignInAttempt | null = null;
   private controller: AbortController | null = null;
   private authentication: Promise<void> | null = null;
   private flight: Promise<void> | null = null;
@@ -89,16 +103,17 @@ export class CopilotMcpSignInCoordinator {
     this.activeReference = id;
     this.cancelled = false;
     const generation = this.host.executionLifecycleRegistry.getProviderGeneration('copilot');
-    let authenticated = false;
+    const attempt: CopilotMcpSignInAttempt = { referenceId: id, authenticated: false };
+    this.attempt = attempt;
     const timer = window.setTimeout(() => {
       controller.abort(new Error('MCP sign-in timed out. Try again when you are ready.'));
     }, 300_000);
     this.authentication = Promise.resolve().then(async () => {
       controller.signal.throwIfAborted();
       this.publish(id, { phase: 'starting' });
-      await this.authenticate(reference, controller.signal, generation, () => { authenticated = true; });
+      await this.authenticate(reference, controller.signal, generation, attempt);
     }).catch(error => {
-      if (!authenticated || error !== controller.signal.reason) throw error;
+      if (!attempt.authenticated || error !== controller.signal.reason) throw error;
     }).finally(() => { this.authentication = null; });
     // A transition drains native authentication, never the flight awaiting that transition.
     this.flight = this.authentication.then(async () => {
@@ -109,12 +124,12 @@ export class CopilotMcpSignInCoordinator {
         });
         this.assertAuthorized(reference, generation + 1);
       } catch (error) {
-        this.lifecycleFailures.push(error);
+        attempt.failure = { error };
         throw error;
       }
       this.publish(id, { phase: 'connected' });
     }).catch(error => {
-      this.publish(id, authenticated
+      this.publish(id, attempt.authenticated
         ? { phase: 'connected', warning: describeError(error) }
         : this.cancelled && error === controller.signal.reason
         ? { phase: 'idle' }
@@ -129,23 +144,32 @@ export class CopilotMcpSignInCoordinator {
   }
 
   async cancel(reference?: CopilotMcpServerReference): Promise<void> {
-    if (reference && this.activeReference !== null && this.activeReference !== referenceId(reference)) return;
+    const attempt = await this.cancelAttempt(reference);
+    if (attempt?.failure) throw new CopilotMcpSignInFollowUpError(attempt.authenticated, attempt.failure.error);
+  }
+
+  private async cancelAttempt(reference?: CopilotMcpServerReference): Promise<CopilotMcpSignInAttempt | null> {
+    const attempt = this.attempt;
+    if (reference && attempt?.referenceId !== referenceId(reference)) return null;
     this.cancellationRevision += 1;
     this.cancelled = true;
     this.controller?.abort(new Error('MCP sign-in cancelled.'));
     await this.flight;
-    if (this.lifecycleFailures.length > 0) {
-      throw new AggregateError(this.lifecycleFailures, this.lifecycleFailures.map(describeError).join('; '));
-    }
+    return attempt;
   }
 
   dispose(): Promise<void> {
     if (this.disposal) return this.disposal;
     this.disposed = true;
     this.unregister();
-    this.disposal = this.cancel().finally(() => {
+    this.disposal = this.cancelAttempt().then(() => {
+      if (this.cleanupFailures.length > 0) {
+        throw new AggregateError(this.cleanupFailures, this.cleanupFailures.map(describeError).join('; '));
+      }
+    }).finally(() => {
       this.listeners.clear();
       this.states.clear();
+      this.attempt = null;
     });
     return this.disposal;
   }
@@ -171,7 +195,7 @@ export class CopilotMcpSignInCoordinator {
     reference: CopilotMcpServerReference,
     signal: AbortSignal,
     generation: number,
-    onAuthenticated: () => void,
+    attempt: CopilotMcpSignInAttempt,
   ): Promise<void> {
     const assertActive = (): CopilotResourceSettings => {
       signal.throwIfAborted();
@@ -210,7 +234,7 @@ export class CopilotMcpSignInCoordinator {
         onEvent: event => {
           if (event.type === 'session.mcp_server_status_changed' && event.data.serverName === reference.name) {
             status = event.data.status;
-            if (signInRequested && status === 'connected') onAuthenticated();
+            if (signInRequested && status === 'connected') attempt.authenticated = true;
             changed?.();
           }
         },
@@ -228,7 +252,7 @@ export class CopilotMcpSignInCoordinator {
       status = undefined;
       signInRequested = true;
       const result = await session.signInMcpServer(reference.name);
-      if (!result.authorizationUrl) onAuthenticated();
+      if (!result.authorizationUrl) attempt.authenticated = true;
       assertActive();
       if (result.authorizationUrl) {
         const authorizationUrl = validateAuthorizationUrl(result.authorizationUrl);
@@ -274,7 +298,10 @@ export class CopilotMcpSignInCoordinator {
     failures.push(...cleanupFailures);
     if (failures.length > 0) {
       const error = new AggregateError(failures, failures.map(describeError).join('; '));
-      if (cleanupFailures.length > 0) this.lifecycleFailures.push(error);
+      if (cleanupFailures.length > 0) {
+        this.cleanupFailures.push(error);
+        attempt.failure = { error };
+      }
       throw error;
     }
     signal.throwIfAborted();

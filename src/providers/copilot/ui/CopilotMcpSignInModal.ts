@@ -1,8 +1,9 @@
 import { type App, Modal, Notice } from 'obsidian';
 
-import type {
-  CopilotMcpSignInCoordinator,
-  CopilotMcpSignInState,
+import {
+  type CopilotMcpSignInCoordinator,
+  CopilotMcpSignInFollowUpError,
+  type CopilotMcpSignInState,
 } from '../app/CopilotMcpSignInCoordinator';
 import type { CopilotMcpServerReference } from '../resources/CopilotResourceSettings';
 import { describeError } from '../sdk/CopilotRuntimeError';
@@ -31,8 +32,7 @@ export class CopilotMcpSignInModal extends Modal {
     this.unsubscribe?.();
     this.unsubscribe = null;
     void this.service.cancel(this.reference).catch(error => {
-      const state = this.service.getState(this.reference);
-      new Notice(state.phase === 'connected'
+      new Notice(error instanceof CopilotMcpSignInFollowUpError && error.authenticated
         ? `Signed in, but follow-up failed: ${describeError(error)}`
         : `Could not close MCP sign-in: ${describeError(error)}`);
     });

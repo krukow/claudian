@@ -53,6 +53,7 @@ let registry: ProviderExecutionLifecycleRegistry;
 
 beforeEach(async () => {
   expectedDisposalFailure = undefined;
+  jest.mocked(Notice).mockClear();
   HTMLElement.prototype.empty = function empty(this: HTMLElement) { this.replaceChildren(); };
   root = await mkdtemp(path.join(os.tmpdir(), 'claudian-mcp-modal-'));
   reference = { configPath: path.join(root, 'mcp.json'), name: 'notes' };
@@ -225,7 +226,6 @@ it('reports failed cancellation cleanup after the sign-in dialog has closed', as
 });
 
 it.each([false, true])('keeps confirmed sign-in distinct from failed chat refresh when closed=%s', async closed => {
-  expectedDisposalFailure = 'Existing chat runtime could not be refreshed.';
   const entered = createDeferred();
   const release = createDeferred();
   registry.registerTransitionHook('copilot', {
@@ -254,5 +254,65 @@ it.each([false, true])('keeps confirmed sign-in distinct from failed chat refres
   expect(within(document.body).queryByRole('button', { name: 'Done' }) !== null).toBe(!closed);
   expect(within(document.body).queryByRole('button', { name: 'Try again' })).toBeNull();
   if (!closed) modal.close();
-  await expect(service.dispose()).rejects.toThrow('Existing chat runtime could not be refreshed.');
+  await expect(service.dispose()).resolves.toBeUndefined();
 });
+
+it.each(['refresh', 'fence', 'cleanup'] as const)(
+  'does not repeat an old %s warning when a later clean sign-in closes',
+  async failureKind => {
+    const entered = createDeferred();
+    const release = createDeferred();
+    const unregister = registry.registerTransitionHook('copilot', {
+      beforeTransition: () => {
+        if (failureKind === 'refresh') throw new Error('Old runtime refresh failed.');
+      },
+    });
+    client = new FakeCopilotSdkClient({
+      stopBehavior: async () => {
+        if (failureKind === 'cleanup') throw new Error('Old native cleanup failed.');
+        if (failureKind === 'fence') { entered.resolve(); await release.promise; }
+      },
+    });
+    expectedDisposalFailure = failureKind === 'cleanup' ? 'Old native cleanup failed.' : undefined;
+    const first = new CopilotMcpSignInModal({} as App, service, reference);
+    first.onOpen();
+    if (failureKind === 'fence') {
+      await entered.promise;
+      const changing = registry.runTransition(['copilot'], async () => {});
+      await waitFor(() => {
+        if (registry.getProviderGeneration('copilot') !== 1) throw new Error('Transition has not started.');
+      });
+      release.resolve();
+      await changing;
+    }
+    const firstDialog = within(document.body).getByRole('dialog', { name: 'Sign in to notes' });
+    const firstDone = await waitFor(() => within(firstDialog).getByRole('button', { name: 'Done' }));
+    expect(within(firstDialog).getByRole('status').textContent).toContain('follow-up failed');
+    firstDone.click();
+    unregister();
+
+    client = new FakeCopilotSdkClient();
+    const second = new CopilotMcpSignInModal({} as App, service, reference);
+    second.onOpen();
+    const message = {
+      refresh: 'Old runtime refresh failed.',
+      fence: 'Copilot settings changed during MCP sign-in. Try again.',
+      cleanup: 'Old native cleanup failed.',
+    }[failureKind];
+    await waitFor(() => {
+      expect(Notice).toHaveBeenCalledWith(`Signed in, but follow-up failed: ${message}`);
+    });
+    const oldNotices = [...jest.mocked(Notice).mock.calls];
+    const secondDialog = within(document.body).getByRole('dialog', { name: 'Sign in to notes' });
+    const done = await waitFor(() => within(secondDialog).getByRole('button', { name: 'Done' }));
+    expect(service.getState(reference)).toEqual({ phase: 'connected' });
+    done.click();
+    await expect(service.cancel(reference)).resolves.toBeUndefined();
+    expect(jest.mocked(Notice).mock.calls).toEqual(oldNotices);
+
+    const error = expect.objectContaining({ message: expect.stringContaining('Old native cleanup failed.') });
+    expect(await Promise.allSettled([service.dispose()])).toEqual(failureKind === 'cleanup'
+      ? [{ status: 'rejected', reason: error }]
+      : [{ status: 'fulfilled', value: undefined }]);
+  },
+);
