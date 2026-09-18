@@ -92,6 +92,19 @@ describe('CopilotBrowserLogin process boundary', () => {
     expect(existsSync(path.join(directory, 'started'))).toBe(false);
   });
 
+  it.each([
+    ['help-fail', 'Could not check Copilot browser sign-in support.', false],
+    ['help-wait', 'Checking Copilot browser sign-in support timed out.', true],
+  ] as const)('reports a capability-check failure rather than failed browser approval for %s', async (mode, message, stopped) => {
+    const result = new CopilotBrowserLogin().signIn(identity(mode), new AbortController().signal);
+
+    await expect(result).rejects.toThrow(message);
+    await expect(result).rejects.toThrow('Check the installed Copilot CLI version and path. Sign-in was not started.');
+    expect(existsSync(path.join(directory, 'started'))).toBe(false);
+    expect(existsSync(path.join(directory, 'settings.json'))).toBe(false);
+    expect(existsSync(path.join(directory, 'stopped'))).toBe(stopped);
+  }, 20_000);
+
   it('does not overwrite unreadable CLI settings or expose their contents', async () => {
     writeFileSync(path.join(directory, 'settings.json'), 'SYNTHETIC_PRIVATE_DATA malformed JSON');
 

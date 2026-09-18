@@ -10,6 +10,8 @@ import { isAbsoluteCopilotPath } from './CopilotAbsolutePath';
 const LOGIN_TIMEOUT_MS = 300_000;
 const HELP_TIMEOUT_MS = 10_000;
 const OUTPUT_LIMIT = 32_768;
+const HELP_FAILURE_GUIDANCE =
+  'Check the installed Copilot CLI version and path. Sign-in was not started.';
 
 export class CopilotBrowserLogin {
   constructor(private readonly timeoutMs = LOGIN_TIMEOUT_MS) {}
@@ -24,14 +26,14 @@ export class CopilotBrowserLogin {
       throw new Error('Copilot sign-in requires an absolute CLI path and a private state directory.');
     }
     await fs.mkdir(identity.baseDirectory, { recursive: true, mode: 0o700 });
-    const help = await runLoginCommand(identity, ['login', '--help'], signal, HELP_TIMEOUT_MS);
+    const help = await runLoginCommand(identity, 'check-support', signal, HELP_TIMEOUT_MS);
     if (!help.includes('--web-flow')) {
       throw new Error('Update the installed Copilot CLI to a version that supports browser sign-in.');
     }
     await requireSecureCredentialStorage(identity.baseDirectory);
     signal.throwIfAborted();
     await runLoginCommand(
-      identity, ['login', '--web-flow'], signal, this.timeoutMs, onAuthorizationUrl,
+      identity, 'sign-in', signal, this.timeoutMs, onAuthorizationUrl,
     );
   }
 }
@@ -63,12 +65,18 @@ async function requireSecureCredentialStorage(home: string): Promise<void> {
 
 async function runLoginCommand(
   identity: CopilotClientIdentity,
-  args: string[],
+  phase: 'check-support' | 'sign-in',
   signal: AbortSignal,
   timeoutMs: number,
   onAuthorizationUrl?: (url: string) => void,
 ): Promise<string> {
   signal.throwIfAborted();
+  const checkingSupport = phase === 'check-support';
+  const args = ['login', checkingSupport ? '--help' : '--web-flow'];
+  const failureMessage = checkingSupport
+    ? `Could not check Copilot browser sign-in support. ${HELP_FAILURE_GUIDANCE}`
+    : 'Copilot sign-in did not complete. Retry browser approval and check that your '
+      + 'system credential store is available. Plaintext credential storage is not enabled.';
   const isScript = identity.cliPath.endsWith('.js');
   const proc = new ManagedStdioProcess({
     args: isScript ? [identity.cliPath, ...args] : args,
@@ -106,17 +114,18 @@ async function runLoginCommand(
         : new Error('Copilot connection cancelled.'));
       signal.addEventListener('abort', abort, { once: true });
       timer = window.setTimeout(() => reject(new Error(
-        'Copilot sign-in timed out. Select Connect Copilot to try again.',
+        checkingSupport
+          ? `Checking Copilot browser sign-in support timed out. ${HELP_FAILURE_GUIDANCE}`
+          : 'Copilot sign-in timed out. Select Connect Copilot to try again.',
       )), timeoutMs);
-      proc.onError(() => reject(new Error('Could not launch Copilot sign-in. Check the CLI path.')));
+      proc.onError(() => reject(new Error(
+        checkingSupport ? failureMessage : 'Could not launch Copilot sign-in. Check the CLI path.',
+      )));
       proc.onClose(state => {
         if (state.code === 0) {
           resolve();
         } else {
-          reject(new Error(
-            'Copilot sign-in did not complete. Retry browser approval and check that your '
-            + 'system credential store is available. Plaintext credential storage is not enabled.',
-          ));
+          reject(new Error(failureMessage));
         }
       });
       proc.start();
