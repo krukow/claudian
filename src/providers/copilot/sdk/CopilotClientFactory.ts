@@ -13,7 +13,12 @@ import {
   NATIVE_STARTUP_TIMEOUT_MS,
   NATIVE_STARTUP_TIMEOUT_SECONDS,
 } from './CopilotNativeBudget';
-import { copilotConfigurationError, toCopilotRuntimeError } from './CopilotRuntimeError';
+import {
+  copilotConfigurationError,
+  CopilotRuntimeError,
+  describeError,
+  toCopilotRuntimeError,
+} from './CopilotRuntimeError';
 import type {
   CopilotSdkAuthStatus,
   CopilotSdkClient,
@@ -100,11 +105,24 @@ export class CopilotClientFactory {
   /** Onboarding may inspect a signed-out account without weakening the execution gate. */
   async getAuthStatus(identity: CopilotClientIdentity): Promise<CopilotSdkAuthStatus> {
     const client = await this.startClient(identity);
+    let status: CopilotSdkAuthStatus;
     try {
-      return await this.readAuthStatus(client);
-    } finally {
-      await client.stop();
+      status = await this.readAuthStatus(client);
+    } catch (error) {
+      try {
+        await client.stop();
+      } catch (shutdownError) {
+        const probeError = toCopilotRuntimeError(error, 'authentication');
+        throw new CopilotRuntimeError(
+          probeError.category,
+          `${probeError.message} Shutting down the authentication probe also failed: ${describeError(shutdownError)}`,
+          { cause: new AggregateError([probeError, shutdownError]) },
+        );
+      }
+      throw error;
     }
+    await client.stop();
+    return status;
   }
 
   /**

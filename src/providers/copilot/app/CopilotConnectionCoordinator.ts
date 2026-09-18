@@ -133,7 +133,7 @@ export class CopilotConnectionCoordinator {
       }
       const intent = this.host.chatModelSelection.beginIntent();
       this.publish({ phase: 'saving' });
-      await this.host.applyProviderRuntimeSettings(['copilot'], settings => {
+      await this.host.mutateSettings(settings => {
         signal.throwIfAborted();
         this.assertEnvironment(environment);
         const current = getCopilotProviderSettings(settings);
