@@ -53,18 +53,17 @@ it.each([false, true])('publishes a chosen model even if dismissed during save=%
   const commit = createDeferred();
   const settings: Record<string, unknown> = { settingsProvider: 'copilot' };
   const settingsCoordinator = new SettingsCoordinator(
-    settings as unknown as ClaudianSettings, async () => {},
+    settings as unknown as ClaudianSettings, async () => {
+      saving.resolve();
+      await commit.promise;
+    },
   );
   const host = {
     app: { vault: { adapter: { basePath: '/vault' } } },
     chatModelSelection: new ChatModelSelectionCoordinator(settingsCoordinator),
-    applyProviderRuntimeSettings: async (
-      _providers: unknown, mutation: (settings: ClaudianSettings) => void,
-    ) => {
-      mutation(settings as unknown as ClaudianSettings);
-      saving.resolve();
-      await commit.promise;
-    },
+    mutateSettings: (mutation: (settings: ClaudianSettings) => void) => (
+      settingsCoordinator.mutate(mutation)
+    ),
     executionLifecycleRegistry: new ProviderExecutionLifecycleRegistry(),
     getResolvedProviderCliPath: async () => '/usr/bin/copilot',
     notifyProviderChatOptionsChanged: () => {},

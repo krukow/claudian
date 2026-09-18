@@ -441,6 +441,7 @@ them as pending here.
 
 ## Model and Settings Rules
 
+- Connection confirmation persists catalog, enablement, and model choices through `ProviderHost.mutateSettings`, then commits the future-chat seed through the app-owned `chatModelSelection` port. These writes do not change runtime inputs and must not quiesce existing execution leases. CLI and environment edits retain the runtime-settings transition boundary.
 - `COPILOT_REASONING_EFFORTS` mirrors the SDK's `ReasoningEffort` union exactly. Persisted
   and discovered efforts are validated against it so an unknown value never reaches
   `setModel`.
