@@ -29,6 +29,7 @@ import type {
   SessionConfig,
 } from './copilotSdkModule';
 import type {
+  CopilotMcpReadiness,
   CopilotSdkClient,
   CopilotSdkClientOptions,
   CopilotSdkEvent,
@@ -691,6 +692,27 @@ class SdkBackedSession implements CopilotSdkSession {
       `starting sign-in for the MCP server ${serverName}`,
       NATIVE_STARTUP_TIMEOUT_MS,
     );
+  }
+
+  async checkMcpServer(serverName: string): Promise<CopilotMcpReadiness> {
+    if (!Object.hasOwn(this.config.resources?.mcpServers ?? {}, serverName)) {
+      throw copilotConfigurationError(`The MCP server ${serverName} is not selected for this session.`);
+    }
+    const states = await this.acquire(
+      readMcpServerStates(this.session, [serverName]), 'checking the MCP connection',
+    );
+    const state = states.get(serverName);
+    if (state?.status === 'needs-auth') return { phase: 'needs-auth' };
+    if (state?.status !== 'connected') {
+      return {
+        phase: 'error',
+        message: state?.failure ?? `Server is ${state?.status ?? 'unavailable'}. Check its configuration and retry.`,
+      };
+    }
+    const listing = await this.acquire(
+      this.session.rpc.mcp.listTools({ serverName }), 'listing the MCP server tools',
+    );
+    return { phase: 'connected', toolCount: listing.tools.length };
   }
 
   /**

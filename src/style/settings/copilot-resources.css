@@ -136,3 +136,28 @@
 .claudian-copilot-resources-problems {
   margin: 0 12px;
 }
+
+.claudian-copilot-mcp-readiness {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 45%;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.claudian-copilot-mcp-readiness svg {
+  width: 14px;
+  height: 14px;
+}
+
+.claudian-copilot-mcp-readiness[data-phase="connected"] {
+  color: var(--text-success);
+}
+
+.claudian-copilot-mcp-readiness[data-phase="needs-auth"],
+.claudian-copilot-mcp-readiness[data-phase="error"] {
+  color: var(--text-warning);
+}

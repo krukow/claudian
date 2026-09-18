@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import { ProviderExecutionLifecycleRegistry } from '@/core/execution/ProviderExecutionLifecycleRegistry';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
 import type { ProviderCommandLoaderContext } from '@/core/providers/types';
 import { CopilotCommandLoader } from '@/providers/copilot/app/CopilotCommandLoader';
@@ -60,6 +61,7 @@ function createHost(selectedSkillPaths: string[] = [], vaultDirectory = VAULT_PA
 
   return {
     app: { vault: { adapter: { basePath: vaultDirectory } } },
+    executionLifecycleRegistry: new ProviderExecutionLifecycleRegistry(),
     getResolvedProviderCliPath: async () => '/usr/local/bin/copilot',
     settings,
   } as unknown as ProviderHost;

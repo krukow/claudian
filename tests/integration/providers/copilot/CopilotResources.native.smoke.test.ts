@@ -142,9 +142,11 @@ describeWithCli('Copilot native resource isolation', () => {
       },
     };
     const started = await startClient();
-    await started.createSession(config);
+    const session = await started.createSession({ ...config, availableTools: [] });
     await waitForMarker(selectedMarker);
 
+    expect(await session.checkMcpServer('selected')).toEqual({ phase: 'connected', toolCount: 2 });
+    expect(readFileSync(selectedMarker, 'utf8')).toBe('started\n');
     expect(existsSync(homeMarker)).toBe(false);
     expect(existsSync(workspaceMarker)).toBe(false);
     expect(existsSync(selectedMarker)).toBe(true);

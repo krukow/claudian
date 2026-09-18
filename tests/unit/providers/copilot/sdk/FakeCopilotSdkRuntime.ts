@@ -1,4 +1,5 @@
 import type {
+  CopilotMcpReadiness,
   CopilotSdkClient,
   CopilotSdkClientOptions,
   CopilotSdkEvent,
@@ -39,6 +40,9 @@ export class FakeCopilotSdkSession implements CopilotSdkSession {
   disconnectBehavior: () => Promise<void> = async () => {};
   setModelBehavior: () => Promise<void> = async () => {};
   mcpSignInBehavior: (serverName: string) => Promise<{ authorizationUrl?: string }> = async () => ({});
+  mcpReadinessBehavior: (serverName: string) => Promise<CopilotMcpReadiness> = async () => ({
+    phase: 'connected', toolCount: 0,
+  });
 
   constructor(
     readonly sessionId: string,
@@ -57,6 +61,10 @@ export class FakeCopilotSdkSession implements CopilotSdkSession {
   async signInMcpServer(serverName: string): Promise<{ authorizationUrl?: string }> {
     this.mcpSignIns.push(serverName);
     return this.mcpSignInBehavior(serverName);
+  }
+
+  checkMcpServer(serverName: string): Promise<CopilotMcpReadiness> {
+    return this.mcpReadinessBehavior(serverName);
   }
 
   emit(event: CopilotSdkEvent): void {

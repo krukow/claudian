@@ -1726,6 +1726,54 @@ describe('copilotSdkRuntime turn aborts', () => {
 describe('copilotSdkRuntime session resources', () => {
   const notesServer = { command: '/usr/bin/notes-mcp' } as const;
 
+  it.each([0, 2])('checks connected MCP readiness with %s tools without granting tool use', async count => {
+    FakeSdkCopilotClient.behavior.listServers = async () => ({
+      servers: [{ name: 'notes', status: 'connected' }],
+    });
+    FakeSdkCopilotClient.behavior.listTools = async () => ({
+      tools: count === 0 ? [] : [{ name: 'read' }, { name: 'search' }],
+    });
+    const client = await createClient();
+    const session = await client.createSession(sessionConfig({
+      availableTools: [],
+      resources: { mcpServers: { notes: notesServer }, skillDirectories: [] },
+    }));
+
+    expect(await session.checkMcpServer('notes')).toEqual({ phase: 'connected', toolCount: count });
+    expect(FakeSdkCopilotSession.instances.at(-1)?.optionUpdates).toEqual([]);
+    expect(FakeSdkCopilotSession.instances.at(-1)?.sentProfiles).toEqual([]);
+  });
+
+  it.each([
+    { status: 'needs-auth', expected: { phase: 'needs-auth' } },
+    { status: 'failed', expected: { phase: 'error' } },
+    { status: 'missing', expected: { phase: 'error' } },
+    { status: 'listing-failed', expected: { error: expect.stringContaining('tools/list refused') } },
+  ])(
+    'does not report $status as ready, even with remembered sign-ins',
+    async ({ status, expected }) => {
+      FakeSdkCopilotClient.behavior.listServers = async () => ({
+        servers: status === 'missing' ? [] : [{
+          name: 'notes', status: status === 'listing-failed' ? 'connected' : status,
+        }],
+      });
+      FakeSdkCopilotClient.behavior.listTools = async () => { throw new Error('tools/list refused'); };
+      const client = await createClient();
+      const session = await client.createSession(sessionConfig({
+        availableTools: [],
+        resources: {
+          mcpServers: { notes: notesServer }, skillDirectories: [],
+          mcpOAuthTokenStorage: 'persistent',
+        },
+      }));
+
+      const result = await session.checkMcpServer('notes').catch(error => ({ error: error.message }));
+      expect(result).toMatchObject(expected);
+      expect(FakeSdkCopilotSession.instances.at(-1)?.mcpSignInRequests).toEqual([]);
+      await expect(session.checkMcpServer('unselected')).rejects.toThrow(/not selected/);
+    },
+  );
+
   function resourceConfig(
     overrides: Partial<CopilotSdkSessionConfig['resources'] & object> = {},
   ): CopilotSdkSessionConfig {

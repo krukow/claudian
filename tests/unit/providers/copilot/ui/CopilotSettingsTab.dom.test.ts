@@ -190,19 +190,25 @@ import { screen, waitFor, within } from '@testing-library/dom';
 import { configureAxe } from 'jest-axe';
 import type { App } from 'obsidian';
 
+import { ProviderExecutionLifecycleRegistry } from '@/core/execution/ProviderExecutionLifecycleRegistry';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
 import { ProviderWorkspaceRegistry } from '@/core/providers/ProviderWorkspaceRegistry';
 import type { ProviderSettingsTabRendererContext } from '@/core/providers/types';
 import type { ClaudianSettings } from '@/core/types';
 import { registerBuiltInProviders } from '@/providers';
+import { CopilotMcpReadinessCoordinator } from '@/providers/copilot/app/CopilotMcpReadinessCoordinator';
+import { CopilotMcpSignInCoordinator } from '@/providers/copilot/app/CopilotMcpSignInCoordinator';
 import type { CopilotWorkspaceServices } from '@/providers/copilot/app/CopilotWorkspaceServices';
 import { getCopilotProviderSettings } from '@/providers/copilot/settings';
 import { copilotSettingsTabRenderer } from '@/providers/copilot/ui/CopilotSettingsTab';
+
+import { FakeCopilotSdkRuntime } from '../sdk/FakeCopilotSdkRuntime';
 
 const checkAccessibility = configureAxe({ rules: { region: { enabled: false } } });
 let workspace = '';
 let mockHomeDirectory = '';
 const renderedContainers: HTMLElement[] = [];
+const cleanups: Array<() => Promise<void>> = [];
 
 interface Harness {
   readonly container: HTMLElement;
@@ -244,12 +250,14 @@ function createHost(settings: Record<string, unknown>): ProviderHost {
     ProviderHost,
     'app'
     | 'applyProviderRuntimeSettings'
+    | 'executionLifecycleRegistry'
     | 'getEnvironmentVariablesForScope'
     | 'mutateSettings'
     | 'runProviderExecutionTransition'
     | 'settings'
   > = {
     app: { vault: { adapter: { basePath: path.join(workspace, 'vault') } } } as unknown as App,
+    executionLifecycleRegistry: new ProviderExecutionLifecycleRegistry(),
     applyProviderRuntimeSettings: async (_providerIds, mutation, onApplied) => {
       await applyMutation(mutation);
       await onApplied?.();
@@ -285,7 +293,8 @@ function renderSettingsTab(
   };
   const container = document.body.appendChild(document.createElement('div'));
   renderedContainers.push(container);
-  copilotSettingsTabRenderer.render(container, context);
+  const dispose = copilotSettingsTabRenderer.render(container, context);
+  cleanups.push(async () => { dispose?.(); });
   return { container, settings };
 }
 
@@ -295,11 +304,17 @@ async function settleCallbacks(): Promise<void> {
 }
 
 function createServices(plugin: ProviderHost): CopilotWorkspaceServices {
+  const runtime = new FakeCopilotSdkRuntime();
+  const mcpReadiness = new CopilotMcpReadinessCoordinator(plugin, { runtime });
+  const mcpSignIn = new CopilotMcpSignInCoordinator(plugin, { runtime });
+  cleanups.push(async () => { await mcpReadiness.dispose(); await mcpSignIn.dispose(); });
   return {
     cliResolver: { reset: () => {} },
     refreshModelCatalog: async () => ({ changed: false }),
     settingsTabRenderer: copilotSettingsTabRenderer,
     plugin,
+    mcpReadiness,
+    mcpSignIn,
   } as unknown as CopilotWorkspaceServices;
 }
 
@@ -322,6 +337,7 @@ describe('Copilot settings tab', () => {
       if (!refresh || refresh.disabled) throw new Error('Resource discovery has not finished.');
     })));
     renderedContainers.length = 0;
+    for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
     document.body.replaceChildren();
     ProviderWorkspaceRegistry.setServices('copilot', undefined);
     rmSync(workspace, { recursive: true, force: true });

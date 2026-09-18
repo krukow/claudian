@@ -140,6 +140,11 @@ export type CopilotSdkSystemMessage =
   | { readonly mode: 'replace'; readonly content: string }
   | { readonly mode: 'append'; readonly content: string };
 
+export type CopilotMcpReadiness =
+  | { readonly phase: 'connected'; readonly toolCount: number }
+  | { readonly phase: 'needs-auth' }
+  | { readonly phase: 'error'; readonly message: string };
+
 export interface CopilotSdkSession {
   readonly sessionId: string;
   /**
@@ -166,6 +171,8 @@ export interface CopilotSdkSession {
    * an empty result means cached credentials already reconnected the server.
    */
   signInMcpServer(serverName: string): Promise<{ authorizationUrl?: string }>;
+  /** Checks native connection and lists tools without granting or invoking any tool. */
+  checkMcpServer(serverName: string): Promise<CopilotMcpReadiness>;
   /**
    * Stops the running turn. Resolves once the runtime acknowledges the abort, and rejects
    * when it could not: the caller may only reuse the session in the first case.

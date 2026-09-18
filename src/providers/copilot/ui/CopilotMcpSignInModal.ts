@@ -36,7 +36,7 @@ export class CopilotMcpSignInModal extends Modal {
   private render(state: CopilotMcpSignInState): void {
     this.contentEl.empty();
     const message = state.phase === 'connected'
-      ? 'Signed in. Return to chat and retry your message to load this server with its tools.'
+      ? 'Signed in. Resources will check the connection and tool list. Retry your chat message to use this server.'
       : state.phase === 'waiting'
       ? 'Complete sign-in in your browser. This window will update when the server connects.'
       : state.phase === 'error'

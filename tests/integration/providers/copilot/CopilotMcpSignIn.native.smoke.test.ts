@@ -70,6 +70,7 @@ describeNative('Copilot native selected MCP sign-in', () => {
     };
     client = await copilotSdkRuntime.createClient(clientOptions);
     const session = await client.createSession(config);
+    expect(await session.checkMcpServer('protected-fixture')).toEqual({ phase: 'needs-auth' });
     const login = await session.signInMcpServer('protected-fixture');
     if (!login.authorizationUrl) throw new Error('The fresh fixture did not request authorization.');
     expect(connected).toBe(false);
@@ -80,12 +81,18 @@ describeNative('Copilot native selected MCP sign-in', () => {
     }
     expect(connected).toBe(true);
     expect(fixture.tokenExchanges).toBe(1);
+    expect(await session.checkMcpServer('protected-fixture')).toEqual({
+      phase: 'connected', toolCount: 1,
+    });
     await client.stop();
     client = undefined;
 
     client = await copilotSdkRuntime.createClient(clientOptions);
     const next = await client.createSession(config);
     expect(next.resourceDiagnostics).toEqual([]);
+    expect(await next.checkMcpServer('protected-fixture')).toEqual({
+      phase: 'connected', toolCount: 1,
+    });
     expect(await next.signInMcpServer('protected-fixture')).toEqual({});
     expect(fixture.tokenExchanges).toBe(1);
   });
