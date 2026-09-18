@@ -162,6 +162,8 @@ Claudian depends on `@github/copilot-sdk`, which declares `@github/copilot` and 
 
 **Browser sign-in fails or times out** — retry **Connect Copilot**, complete GitHub's approval, and check that the system credential store is available. Browser sign-in has a five-minute deadline. Claudian does not enable plaintext credential storage as a fallback.
 
+**Checking browser sign-in support fails or times out** — no browser sign-in was attempted. Check the installed CLI version and configured path; the `login --help` capability check has a ten-second deadline. A failed check does not by itself mean the CLI version is unsupported.
+
 **No models after clicking Discover** — the CLI answered but the account offers none. Check that the signed-in account has an active Copilot subscription and that your organization's policy does not disable every model.
 
 **"Could not load the Copilot model catalog"** — the CLI could not be started or did not answer. Check the CLI path, run `copilot --version` in a terminal, and confirm sign-in.

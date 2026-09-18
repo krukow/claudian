@@ -7,6 +7,8 @@ import type {
 } from '@/providers/copilot/sdk/CopilotSdkPort';
 import { parsePathEntries } from '@/utils/path';
 
+import { FakeCopilotSdkClient, FakeCopilotSdkRuntime } from './FakeCopilotSdkRuntime';
+
 const VAULT_PATH = '/vault';
 
 /** The two shapes the SDK launches: a native binary, and a script it starts through Node. */
@@ -150,6 +152,36 @@ const COLD_START_IDENTITY: CopilotClientIdentity = {
  * `~/.copilot` and change nothing here.
  */
 describe('CopilotClientFactory authentication gate', () => {
+  it('preserves the authentication diagnostic when shutting down the probe also fails', async () => {
+    const authFailure = new Error('Organization sign-in requires approval.');
+    const stopFailure = new Error('The probe did not shut down cleanly.');
+    const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
+      authStatusBehavior: async () => { throw authFailure; },
+      stopBehavior: async () => { throw stopFailure; },
+    }));
+    const factory = new CopilotClientFactory(createHost(NATIVE_CLI, {}), { runtime });
+    const result = factory.getAuthStatus(COLD_START_IDENTITY);
+
+    await expect(result).rejects.toMatchObject({
+      category: 'authentication',
+      cause: {
+        errors: [expect.objectContaining({ cause: authFailure }), stopFailure],
+      },
+      message: expect.stringContaining(authFailure.message),
+    });
+    await expect(result).rejects.toThrow(stopFailure.message);
+  });
+
+  it('reports failed shutdown even when the authentication probe succeeded', async () => {
+    const stopFailure = new Error('The probe did not shut down cleanly.');
+    const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
+      stopBehavior: async () => { throw stopFailure; },
+    }));
+    const factory = new CopilotClientFactory(createHost(NATIVE_CLI, {}), { runtime });
+
+    await expect(factory.getAuthStatus(COLD_START_IDENTITY)).rejects.toBe(stopFailure);
+  });
+
   it('checks a signed-out account for onboarding without handing back a live client', async () => {
     const client = new FakeStartedClient({ isAuthenticated: false });
     const factory = new CopilotClientFactory(createHost(NATIVE_CLI, {}), {
