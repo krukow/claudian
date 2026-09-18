@@ -3,6 +3,24 @@
  */
 
 jest.mock('obsidian', () => {
+  class MockButtonComponent {
+    buttonEl = document.createElement('button');
+
+    constructor(container: HTMLElement) {
+      container.appendChild(this.buttonEl);
+    }
+
+    setButtonText(text: string): this {
+      this.buttonEl.textContent = text;
+      return this;
+    }
+
+    onClick(callback: () => void): this {
+      this.buttonEl.addEventListener('click', callback);
+      return this;
+    }
+  }
+
   class MockToggleComponent {
     toggleEl = document.createElement('input');
     private callback: ((value: boolean) => Promise<void> | void) | null = null;
@@ -90,6 +108,11 @@ jest.mock('obsidian', () => {
     constructor(container: HTMLElement) {
       this.settingEl.append(this.nameEl, this.descEl, this.controlEl);
       container.appendChild(this.settingEl);
+    }
+
+    addButton(callback: (button: MockButtonComponent) => void): this {
+      callback(new MockButtonComponent(this.controlEl));
+      return this;
     }
 
     addTextArea(callback: (text: MockTextAreaComponent) => void): this {
@@ -300,9 +323,12 @@ describe('Copilot settings tab', () => {
     expect(description).not.toContain('NODE_EXTRA_CA_CERTS');
   });
 
-  it('offers discovery through the shared model picker', () => {
+  it('offers in-app connection and discovery through the shared model picker', () => {
     const { container } = renderSettingsTab();
 
+    expect(within(container).getByRole('button', { name: 'Connect Copilot' }).getAttribute('type'))
+      .toBe('button');
+    expect(container.textContent).toContain('Use Connect Copilot above to sign in and choose a model.');
     expect(within(container).getByRole('button', { name: 'Discover' })).toBeTruthy();
   });
 

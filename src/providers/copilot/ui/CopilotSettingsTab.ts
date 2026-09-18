@@ -28,6 +28,7 @@ import {
   normalizeCopilotVisibleModels,
   updateCopilotProviderSettings,
 } from '../settings';
+import { CopilotConnectionModal } from './CopilotConnectionModal';
 import { renderCopilotResourceSettings } from './CopilotResourceSettingsSection';
 
 const COPILOT_PROVIDER_ID = 'copilot' as const;
@@ -51,6 +52,23 @@ export const copilotSettingsTabRenderer: ProviderSettingsTabRenderer = {
     };
 
     new Setting(container).setName('Setup').setHeading();
+
+    new Setting(container)
+      .setName('Connect Copilot')
+      .setDesc('Sign in with GitHub in your browser, discover your models, and choose one to start. No terminal commands are needed.')
+      .addButton(button => {
+        button.setButtonText('Connect Copilot');
+        button.buttonEl.setAttribute('type', 'button');
+        button.onClick(() => {
+          new CopilotConnectionModal(context.plugin.app, workspace.connection, () => {
+            context.notifyProviderModelOptionsChanged(COPILOT_PROVIDER_ID);
+            if (container.isConnected) {
+              container.empty();
+              copilotSettingsTabRenderer.render(container, context);
+            }
+          }).open();
+        });
+      });
 
     renderProviderEnablementSetting({
       container,
@@ -154,8 +172,7 @@ export const copilotSettingsTabRenderer: ProviderSettingsTabRenderer = {
         + "which certificates it trusts come from this computer's own environment, "
         + 'because a vault syncs and can be shared. PATH and COPILOT_HOME are managed by '
         + "Claudian: PATH comes from this computer's own environment and the resolved "
-        + 'CLI, and COPILOT_HOME points outside the vault. Sign in by running the Copilot '
-        + 'CLI once with COPILOT_HOME set to that directory; these entries are stored in '
+        + 'CLI, and COPILOT_HOME points outside the vault. Use Connect Copilot above to sign in. These entries are stored in '
         + 'plain text in .claudian/claudian-settings.json, so never put a token or an API '
         + 'key here.',
       heading: 'Environment',
@@ -188,7 +205,7 @@ function renderCopilotModelPicker(
 
   renderProviderModelPicker({
     container,
-    emptyCatalogText: 'No Copilot models discovered yet. Sign in to this vault\'s own Copilot home once, by running the Copilot CLI with COPILOT_HOME set to the directory named in the sign-in error, then click Discover.',
+    emptyCatalogText: 'No Copilot models discovered yet. Use Connect Copilot above to sign in and choose a model.',
     failedCatalogText: 'Could not load the Copilot model catalog. Check the CLI path and that the CLI is signed in with an active Copilot subscription, then try again.',
     getState,
     initiallyOpen: getCopilotProviderSettings(settingsBag).discoveredModels.length === 0,

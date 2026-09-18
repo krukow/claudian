@@ -150,6 +150,18 @@ const COLD_START_IDENTITY: CopilotClientIdentity = {
  * `~/.copilot` and change nothing here.
  */
 describe('CopilotClientFactory authentication gate', () => {
+  it('checks a signed-out account for onboarding without handing back a live client', async () => {
+    const client = new FakeStartedClient({ isAuthenticated: false });
+    const factory = new CopilotClientFactory(createHost(NATIVE_CLI, {}), {
+      runtime: { createClient: async () => client as unknown as CopilotSdkClient },
+    });
+
+    const status = await factory.getAuthStatus(COLD_START_IDENTITY);
+
+    expect(status).toEqual({ isAuthenticated: false });
+    expect(client.stopped).toBe(1);
+  });
+
   async function refuseSignedOut(
     statusMessage?: string,
   ): Promise<{ error: Error; client: FakeStartedClient }> {
@@ -176,6 +188,7 @@ describe('CopilotClientFactory authentication gate', () => {
 
     expect(error.message).toContain('COPILOT_HOME');
     expect(error.message).toContain(COLD_START_IDENTITY.baseDirectory);
+    expect(error.message).toContain('Connect Copilot');
   });
 
   /** What the CLI did say is still reported: it may name an expiry or an SSO refusal. */

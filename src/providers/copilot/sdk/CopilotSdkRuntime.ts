@@ -866,8 +866,7 @@ function describeShutdownErrors(errors: readonly Error[]): CopilotRuntimeError |
  * itself is shared — the CLI keeps one per host in the OS keychain — but the record of
  * which account it belongs to lives in the home it was signed in with, and without that
  * record the CLI never opens the keychain. A home nobody has signed in to is therefore the
- * ordinary first failure, and a bare `copilot` would sign in to `~/.copilot` and change
- * nothing here, so the directory is named.
+ * ordinary first failure. The settings connection flow signs in to this same home.
  *
  * What the CLI said is kept rather than replaced: "Not authenticated" adds nothing, but an
  * expiry or a single-sign-on refusal is the whole answer.
@@ -882,10 +881,8 @@ export function assertAuthenticated(
   throw copilotAuthenticationError(
     `The Copilot CLI is not signed in for this vault${
       status.statusMessage ? ` (it reports: ${status.statusMessage})` : ''
-    }. Claudian runs the CLI with a \`COPILOT_HOME\` of this vault's own, at `
-    + `\`${baseDirectory}\`, so this vault's agent state and plugins stay out of your `
-    + 'shared Copilot install. Sign in to it once by running the Copilot CLI with '
-    + '`COPILOT_HOME` set to that directory and signing in there; signing in without it '
-    + 'signs in to the shared install instead and leaves this vault signed out.',
+    }. Open Settings > Claudian > Copilot and select Connect Copilot to sign in through `
+    + `your browser. This vault's private \`COPILOT_HOME\` is \`${baseDirectory}\`; `
+    + 'your shared Copilot configuration is unchanged.',
   );
 }

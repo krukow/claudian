@@ -8,7 +8,8 @@ The Copilot provider is disabled until you turn it on.
 
 - The GitHub Copilot CLI, installed by you. Claudian never bundles, downloads, or updates it.
 - CLI version 1.0.79 or newer. Claudian talks to the CLI through `@github/copilot-sdk` 1.0.11, which is built against `@github/copilot` 1.0.79, so an older CLI may not speak the protocol the SDK sends. The built-in tool list Claudian filters against was captured on CLI 1.0.83, and a newer CLI is recommended.
-- A GitHub account with an active Copilot subscription, signed in through the CLI.
+- A GitHub account with an active Copilot subscription. **Connect Copilot** handles sign-in.
+- In-app connection requires a CLI whose `login` command supports `--web-flow`. Claudian checks this capability before starting sign-in.
 - The same Obsidian and desktop requirements as the rest of Claudian.
 
 Install the CLI the way GitHub documents it. A global npm install works:
@@ -22,30 +23,23 @@ Claudian resolves an npm install down to the platform binary the launcher would 
 
 ## Sign-in
 
-Sign-in belongs to the CLI. Claudian owns no GitHub credential, offers nowhere to store one, and refuses token-shaped environment entries, so there is no API key to paste and no `gh` fallback to configure.
+Select **Connect Copilot** in Settings > Claudian > Providers > Copilot. Claudian checks existing sign-in, opens GitHub in your browser if needed, discovers your models, and asks you to confirm one. It enables Copilot after that confirmation. Once the CLI is installed, connection requires no terminal commands or API keys.
 
 Claudian runs the CLI with a `COPILOT_HOME` of this vault's own, so this vault's agent state, plugins, and configuration stay out of your shared Copilot install. The credential itself is shared — the CLI keeps one per host in the OS keychain — but the record of which account it belongs to lives in the home it was signed in with. A vault home nobody has signed in to therefore reports itself signed out, however recently you signed in elsewhere.
 
-Sign in to the vault's own home once. Claudian names the exact directory in the sign-in error it shows in chat; run the CLI with `COPILOT_HOME` set to that directory and sign in there:
+The CLI performs OAuth and stores credentials in the operating system's credential store. Claudian disables plaintext token storage in this vault's private CLI settings and never requests consent for a plaintext fallback. If secure storage is unavailable, connection fails instead of writing a token into the vault. Global Copilot configuration is not modified.
 
-```bash
-COPILOT_HOME="<the directory Claudian named>" copilot
-```
-
-```powershell
-$env:COPILOT_HOME = "<the directory Claudian named>"; copilot
-```
-
-Running a bare `copilot` signs in to the shared `~/.copilot` install instead and leaves the vault signed out.
+The browser still requires your GitHub approval and any organization SSO step. If it did not open automatically, use **Open GitHub sign-in** in the connection window. Closing the window or selecting **Cancel** stops the pending login; the browser tab itself is left open. You can retry if authorization expires or the connection is interrupted.
 
 ## Setting it up
 
-1. Open Settings → Claudian → Copilot.
-2. Turn **Enable Copilot** on.
-3. Leave **CLI path** empty to let Claudian find `copilot` on this computer's own PATH. Set it only when the CLI is installed somewhere PATH does not reach. A path that is set is the only one tried, so a moved or removed install fails with an error rather than silently running a different CLI. It must be absolute.
-4. Click **Discover** under Models. Claudian asks the CLI which models your account may use and lists them.
-5. Select the models you want in the chat model selector, and drag to order them. Only models you select are selectable, and the first one is the provider's default. With none selected, a Copilot turn fails rather than falling back to a model you never turned on.
-6. Optionally give a model an alias, and pick a reasoning effort for models that support one. The effort you pick is remembered per model.
+1. Open Settings > Claudian > Providers > Copilot and select **Connect Copilot**.
+2. Complete browser approval if asked.
+3. Choose a model and select **Use this model**. Copilot is enabled and the chosen model is used for new chats. Existing chats are unchanged.
+
+After setup, the **Models** section lets you discover additional models, enable them, and drag to order them. Only selected models appear in chat; the first is the provider's default. Existing selections are preserved when you connect again. You can give models aliases and choose supported reasoning efforts.
+
+Leave **CLI path** empty for automatic discovery. Set an absolute path only when the CLI is installed somewhere this computer's PATH does not reach. A configured path is the only one tried, so a moved or removed install fails rather than silently launching a different CLI.
 
 ## Using it
 
@@ -135,7 +129,9 @@ Claudian depends on `@github/copilot-sdk`, which declares `@github/copilot` and 
 
 **"The Copilot CLI could not be launched"** — the path in settings does not resolve, or nothing named `copilot` is on this computer's PATH. Fix the path, or clear it to let Claudian search. The path must be absolute; a relative one would be read against the vault. On Windows, point it at `copilot.exe` or at the npm install rather than at a `.cmd` launcher, and name a JavaScript entry with a lowercase `.js`.
 
-**"The Copilot CLI is not signed in for this vault"** — the vault's own `COPILOT_HOME` has never been signed in to. The error names the directory; sign in with `COPILOT_HOME` set to it, as above. If the message quotes something else from the CLI — an expired credential, a single-sign-on refusal — that is the CLI's own report and usually needs the same command.
+**"The Copilot CLI is not signed in for this vault"** — select **Connect Copilot** to sign in through your browser. A shared CLI login does not necessarily initialize this vault's private state. Expired credentials and organization SSO requirements may also need browser approval.
+
+**Browser sign-in fails or times out** — retry **Connect Copilot**, complete GitHub's approval, and check that the system credential store is available. Browser sign-in has a five-minute deadline. Claudian does not enable plaintext credential storage as a fallback.
 
 **No models after clicking Discover** — the CLI answered but the account offers none. Check that the signed-in account has an active Copilot subscription and that your organization's policy does not disable every model.
 

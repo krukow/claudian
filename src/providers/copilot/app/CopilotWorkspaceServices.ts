@@ -11,12 +11,14 @@ import { CopilotCommandCatalog } from '../commands/CopilotCommandCatalog';
 import { computeCopilotEnvironmentHash } from '../env/CopilotSettingsReconciler';
 import { sameCopilotDiscoveredModels } from '../models';
 import { getCopilotHostResources } from '../resources/CopilotHostResources';
+import { CopilotBrowserLogin } from '../runtime/CopilotBrowserLogin';
 import { CopilotCliResolver } from '../runtime/CopilotCliResolver';
 import { CopilotModelDiscoveryService } from '../runtime/CopilotModelDiscoveryService';
 import { getCopilotProviderSettings, updateCopilotProviderSettings } from '../settings';
 import { copilotSettingsTabRenderer } from '../ui/CopilotSettingsTab';
 import { CopilotCommandLoader } from './CopilotCommandLoader';
 import { CopilotCommandMetadataProbe } from './CopilotCommandMetadataProbe';
+import { CopilotConnectionCoordinator } from './CopilotConnectionCoordinator';
 
 const COPILOT_PROVIDER_ID = 'copilot' as const;
 
@@ -38,6 +40,7 @@ export interface CopilotWorkspaceServices extends ProviderWorkspaceServices {
   cliResolver: CopilotCliResolver;
   commandCatalog: ProviderCommandCatalog;
   commandLoader: CopilotCommandLoader;
+  connection: CopilotConnectionCoordinator;
   refreshModelCatalog(): Promise<ProviderModelCatalogRefreshResult>;
 }
 
@@ -55,13 +58,28 @@ export function createCopilotWorkspaceServices(
     ?? new CopilotModelDiscoveryService(plugin);
   const commandMetadataProbe = options.commandMetadataProbe
     ?? new CopilotCommandMetadataProbe(plugin);
+  const connection = new CopilotConnectionCoordinator(plugin, { login: new CopilotBrowserLogin() });
   let latestRefresh = 0;
 
   return {
     cliResolver,
     commandCatalog: new CopilotCommandCatalog(),
     commandLoader: new CopilotCommandLoader(commandMetadataProbe),
-    dispose: () => commandMetadataProbe.dispose(),
+    connection,
+    async dispose() {
+      const results = await Promise.allSettled([
+        commandMetadataProbe.dispose(), connection.dispose(),
+      ]);
+      const failures: unknown[] = [];
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          failures.push(result.reason);
+        }
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(failures, 'Could not dispose Copilot workspace services.');
+      }
+    },
     settingsTabRenderer: copilotSettingsTabRenderer,
     tabWarmupPolicy: copilotTabWarmupPolicy,
 

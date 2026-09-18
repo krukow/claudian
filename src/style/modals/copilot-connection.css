@@ -1,0 +1,46 @@
+.claudian-copilot-connect-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--size-4-2);
+  margin-top: var(--size-4-4);
+}
+
+.claudian-copilot-connect-model {
+  width: 100%;
+  min-width: 0;
+}
+
+.claudian-copilot-connect-button,
+.claudian-copilot-connect-button:hover,
+.claudian-copilot-connect-button:focus-visible,
+.claudian-copilot-connect-button:active {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+}
+
+.claudian-copilot-connect-button:hover,
+.claudian-copilot-connect-button:focus-visible,
+.claudian-copilot-connect-button:active {
+  color: var(--text-normal);
+}
+
+.claudian-copilot-connect-button--primary,
+.claudian-copilot-connect-button--primary:hover,
+.claudian-copilot-connect-button--primary:focus-visible,
+.claudian-copilot-connect-button--primary:active {
+  color: var(--text-accent);
+  font-weight: var(--font-semibold);
+}
+
+.claudian-copilot-connect-button:disabled,
+.claudian-copilot-connect-button:disabled:hover,
+.claudian-copilot-connect-button:disabled:focus-visible,
+.claudian-copilot-connect-button:disabled:active {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-faint);
+  cursor: default;
+}
