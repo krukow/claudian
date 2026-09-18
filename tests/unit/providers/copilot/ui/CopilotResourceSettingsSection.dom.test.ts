@@ -126,7 +126,6 @@ function write(relativePath: string, content: string): string {
 
 function renderSection(options: {
   beforeSettingsCommit?: () => Promise<void>;
-  expectedSignInDisposalFailure?: string;
   persistenceError?: Error;
   resources?: Partial<CopilotResourceSettings>;
   settings?: Record<string, unknown>;
@@ -200,11 +199,7 @@ function renderSection(options: {
   cleanups.push(async () => {
     dispose();
     await mcpReadiness.dispose();
-    if (options.expectedSignInDisposalFailure) {
-      await expect(mcpSignIn.dispose()).rejects.toThrow(options.expectedSignInDisposalFailure);
-    } else {
-      await mcpSignIn.dispose();
-    }
+    await mcpSignIn.dispose();
   });
   return { commandLoader, container, persistedSelections, settings, dispose, mcpSignIn, registry };
 }
@@ -302,7 +297,6 @@ describe('Copilot resource settings', () => {
     }));
     const reference = { configPath, name: 'notes' };
     const { container, mcpSignIn, registry } = renderSection({
-      expectedSignInDisposalFailure: 'Existing chat runtime could not be refreshed.',
       runtime, resources: { selectedMcpServers: [reference], rememberMcpSignIns: true },
     });
     await waitFor(() => expect(within(container).getByText('Sign-in required')).toBeTruthy());

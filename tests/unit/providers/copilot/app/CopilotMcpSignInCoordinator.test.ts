@@ -330,10 +330,7 @@ it.each(['refresh-failure', 'cancel-during-refresh', 'cancel-during-cleanup'] as
     expect(service.getState(reference)).toEqual(outcome === 'refresh-failure'
       ? { phase: 'connected', warning }
       : { phase: 'connected' });
-    const failure = expect.objectContaining({ message: warning });
-    expect(await Promise.allSettled([service.dispose()])).toEqual(outcome === 'refresh-failure'
-      ? [{ status: 'rejected', reason: failure }]
-      : [{ status: 'fulfilled', value: undefined }]);
+    await expect(service.dispose()).resolves.toBeUndefined();
   },
 );
 

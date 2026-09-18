@@ -23,7 +23,11 @@ export type CopilotMcpReadinessState = CopilotMcpReadiness
 /** One settings-scoped queue, with an isolated native lease for each selected server. */
 export class CopilotMcpReadinessCoordinator {
   private readonly factory: CopilotClientFactory;
-  private readonly states = new Map<string, { stamp: string; state: CopilotMcpReadinessState }>();
+  private readonly states = new Map<string, {
+    stamp: string;
+    generation?: number;
+    state: CopilotMcpReadinessState;
+  }>();
   private readonly listeners = new Set<() => void>();
   private readonly pending = new Map<string, CopilotMcpServerReference>();
   private readonly unregister: () => void;
@@ -40,10 +44,13 @@ export class CopilotMcpReadinessCoordinator {
         this.transitioning = true;
         await this.quiesce();
       },
-      afterTransition: () => {
+      afterTransition: ({ generation }) => {
         const stamp = this.stamp();
         for (const [id, entry] of this.states) {
-          if (entry.stamp !== stamp) this.states.delete(id);
+          if (entry.stamp !== stamp || (entry.generation !== undefined && entry.generation !== generation)) {
+            this.states.delete(id);
+            this.pending.delete(id);
+          }
         }
         this.transitioning = false;
         this.notify();
@@ -54,6 +61,8 @@ export class CopilotMcpReadinessCoordinator {
   getState(reference: CopilotMcpServerReference): CopilotMcpReadinessState {
     const entry = this.states.get(referenceId(reference));
     return this.selected(reference) && entry?.stamp === this.stamp()
+      && (entry.generation === undefined
+        || entry.generation === this.host.executionLifecycleRegistry.getProviderGeneration('copilot'))
       ? entry.state : { phase: 'unchecked' };
   }
 
@@ -248,7 +257,13 @@ export class CopilotMcpReadinessCoordinator {
 
   private publish(reference: CopilotMcpServerReference, stamp: string, state: CopilotMcpReadinessState): void {
     if (this.disposed || stamp !== this.stamp() || !this.selected(reference)) return;
-    this.states.set(referenceId(reference), { stamp, state });
+    this.states.set(referenceId(reference), {
+      stamp,
+      state,
+      ...(state.phase === 'queued' || state.phase === 'checking'
+        ? { generation: this.host.executionLifecycleRegistry.getProviderGeneration('copilot') }
+        : {}),
+    });
     this.notify();
   }
 
