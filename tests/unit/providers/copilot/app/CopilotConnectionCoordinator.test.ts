@@ -5,7 +5,10 @@ import { resolveNewConversationModel } from '@/core/providers/conversationModel'
 import type { ProviderHost } from '@/core/providers/ProviderHost';
 import type { ClaudianSettings } from '@/core/types';
 import { registerBuiltInProviders } from '@/providers';
-import { CopilotConnectionCoordinator } from '@/providers/copilot/app/CopilotConnectionCoordinator';
+import {
+  CopilotConnectionCoordinator,
+  type CopilotConnectionState,
+} from '@/providers/copilot/app/CopilotConnectionCoordinator';
 import { getCopilotProviderSettings, updateCopilotProviderSettings } from '@/providers/copilot/settings';
 
 import { createDeferred, FakeCopilotSdkClient, FakeCopilotSdkRuntime } from '../sdk/FakeCopilotSdkRuntime';
@@ -28,10 +31,7 @@ function createHost(onSave: (settings: ClaudianSettings) => void = () => {}): Pr
   return {
     app: { vault: { adapter: { basePath: '/vault' } } },
     chatModelSelection: new ChatModelSelectionCoordinator(coordinator),
-    applyProviderRuntimeSettings: async (
-      _providers: unknown,
-      mutation: (settings: ClaudianSettings) => void,
-    ) => coordinator.mutate(mutation),
+    mutateSettings: (mutation: (settings: ClaudianSettings) => void) => coordinator.mutate(mutation),
     executionLifecycleRegistry: registry,
     getResolvedProviderCliPath: async () => '/usr/local/bin/copilot',
     notifyProviderChatOptionsChanged: () => {},
@@ -245,5 +245,56 @@ describe('CopilotConnectionCoordinator', () => {
     expect(prompts).toEqual(['browser sign-in']);
     expect(connection.state.phase).toBe('idle');
     await connection.dispose();
+  });
+
+  it('reopens during catalog cleanup without exposing the completed browser login URL', async () => {
+    const entered = createDeferred();
+    const release = createDeferred();
+    let authenticated = false;
+    let heldCatalog = false;
+    const runtime = new FakeCopilotSdkRuntime(() => {
+      const client = new FakeCopilotSdkClient({
+        authStatus: { isAuthenticated: authenticated }, models: [MODEL],
+      });
+      client.listModels = async () => {
+        if (!heldCatalog) {
+          heldCatalog = true;
+          entered.resolve();
+          await release.promise;
+        }
+        return [MODEL];
+      };
+      return client;
+    });
+    const connection = new CopilotConnectionCoordinator(createHost(), {
+      login: {
+        signIn: async (_identity, _signal, onAuthorizationUrl) => {
+          onAuthorizationUrl?.('https://github.com/login/oauth/authorize?state=synthetic');
+          authenticated = true;
+        },
+      },
+      runtime,
+    });
+    const first = connection.connect();
+    await entered.promise;
+    const cancelling = connection.cancel();
+    const reopened = connection.connect();
+    const states: CopilotConnectionState[] = [];
+    const unsubscribe = connection.subscribe(state => { states.push(state); });
+    try {
+      expect(states).toEqual([{ phase: 'discovering' }]);
+      release.resolve();
+      await Promise.all([first, cancelling, reopened]);
+
+      expect(states.map(state => state.phase))
+        .toEqual(['discovering', 'idle', 'checking', 'discovering', 'choose-model']);
+      expect(states.some(state => 'authorizationUrl' in state)).toBe(false);
+      expect(connection.state).toMatchObject({ phase: 'choose-model' });
+      expect(runtime.clients.every(client => client.stopped === 1)).toBe(true);
+    } finally {
+      release.resolve();
+      unsubscribe();
+      await connection.dispose();
+    }
   });
 });
