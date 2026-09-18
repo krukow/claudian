@@ -1,10 +1,11 @@
 import * as os from 'node:os';
 
-import { Setting } from 'obsidian';
+import { Notice, setIcon, Setting } from 'obsidian';
 
 import type { ProviderSettingsTabRendererContext } from '../../../core/providers/types';
 import type { ClaudianSettings } from '../../../core/types';
 import { getVaultPath } from '../../../utils/path';
+import type { CopilotMcpReadinessState } from '../app/CopilotMcpReadinessCoordinator';
 import { getCopilotWorkspaceServices } from '../app/CopilotWorkspaceServices';
 import {
   getCopilotHostResources,
@@ -14,28 +15,52 @@ import {
   type CopilotDiscoveredMcpServer,
   type CopilotResourceInventory,
   discoverCopilotResources,
+  findCopilotDuplicateNames,
 } from '../resources/CopilotResourceInventory';
-import type { CopilotResourceSettings } from '../resources/CopilotResourceSettings';
+import {
+  type CopilotMcpServerReference,
+  type CopilotResourceSettings,
+  copilotSkillPathKey,
+  getEnabledCopilotSkillPaths,
+} from '../resources/CopilotResourceSettings';
 import { updateCopilotProviderSettings } from '../settings';
+import { CopilotMcpSignInModal } from './CopilotMcpSignInModal';
 
 const COPILOT_PROVIDER_ID = 'copilot' as const;
 
 const RESOURCES_DESCRIPTION = 'MCP servers and skills this computer offers, for the chat '
-  + 'in this vault. Nothing is selected until you select it, and a selection stays on '
-  + 'this computer: Claudian stores the file a server is declared in and its name, never '
+  + 'in this vault. Skills in the Git repository containing the vault are enabled by '
+  + 'default; turn off individual skills below. Other skills and MCP servers are opt-in. '
+  + 'Choices stay on this computer: Claudian stores the file a server is declared in and its name, never '
   + 'the definition, so a synced vault carries no commands, environment entries, or '
   + 'headers. Selections apply to chat only — the title, inline edit, and instruction '
-  + 'runs never start a server or load a skill.';
+  + 'runs never start a server or load a skill. Opening these settings checks enabled MCP '
+  + 'servers by connecting and listing tools; checks never invoke tools or open browser sign-in.';
 
 interface ResourceRow {
   readonly detail: string;
   readonly label: string;
   readonly missing: boolean;
   readonly selected: boolean;
+  readonly supportsSignIn: boolean;
+  readonly reference:
+    | { readonly kind: 'mcp'; readonly server: CopilotMcpServerReference }
+    | { readonly kind: 'skill'; readonly path: string; readonly repository: boolean };
   toggle(next: boolean): Promise<void>;
 }
 
+interface RenderedResourceRow {
+  readonly element: HTMLDivElement;
+  readonly checkbox: HTMLInputElement;
+  readonly name: HTMLElement;
+  readonly detail: HTMLElement;
+  signIn: HTMLButtonElement | null;
+  readiness: { element: HTMLElement; icon: HTMLElement; text: HTMLElement; check: HTMLButtonElement } | null;
+  row: ResourceRow;
+}
+
 type ResourceMutation = (current: CopilotResourceSettings) => Partial<CopilotResourceSettings>;
+type ResourceKindFilter = 'all' | ResourceRow['reference']['kind'];
 
 /**
  * The Copilot resource surface: discover what this computer offers, then choose from it.
@@ -49,13 +74,19 @@ type ResourceMutation = (current: CopilotResourceSettings) => Partial<CopilotRes
 export function renderCopilotResourceSettings(
   container: HTMLElement,
   context: ProviderSettingsTabRendererContext,
-): void {
+): () => void {
+  const workspace = getCopilotWorkspaceServices();
+  let disposed = false;
   const settingsBag = context.plugin.settings as unknown as Record<string, unknown>;
   let inventory: CopilotResourceInventory | null = null;
   let discoveryFailure: string | null = null;
   let saveFailure: string | null = null;
   let discovering = false;
   let filter = '';
+  let kindFilter: ResourceKindFilter = 'all';
+  let bulkStatus = '';
+  let saving = 0;
+  const renderedRows = new Map<string, RenderedResourceRow>();
 
   new Setting(container).setName('Resources').setHeading();
   container.createEl('p', {
@@ -64,6 +95,10 @@ export function renderCopilotResourceSettings(
   });
 
   const persist = async (mutate: ResourceMutation): Promise<void> => {
+    if (disposed) return;
+    saving += 1;
+    renderList();
+    renderStatus();
     try {
       await context.plugin.applyProviderRuntimeSettings(
         [COPILOT_PROVIDER_ID],
@@ -80,10 +115,26 @@ export function renderCopilotResourceSettings(
       saveFailure = null;
     } catch (error) {
       saveFailure = error instanceof Error ? error.message : String(error);
+    } finally {
+      saving -= 1;
     }
-    renderStatus();
     renderList();
+    renderStatus();
+    if (!disposed && !saveFailure) {
+      void workspace.mcpReadiness.ensureChecked().catch(reportReadinessFailure);
+    }
   };
+
+  const rememberSetting = new Setting(container)
+    .setName('Remember MCP sign-ins')
+    .setDesc('Use the Copilot CLI credential cache on this computer. It normally uses the OS keychain; if that fails, it may store tokens in local files outside the vault. Required for sign-in from settings.');
+  const remember = rememberSetting.controlEl.createEl('input');
+  remember.type = 'checkbox';
+  remember.setAttribute('aria-label', 'Remember MCP sign-ins');
+  remember.addEventListener('change', () => {
+    const selected = remember.checked;
+    void persist(() => ({ rememberMcpSignIns: selected }));
+  });
 
   renderPathListSetting({
     container,
@@ -114,6 +165,35 @@ export function renderCopilotResourceSettings(
   discoverButton.setAttribute('type', 'button');
   discoverButton.setAttribute('aria-label', 'Discover resources');
 
+  const enableAllButton = controlsEl.createEl('button', {
+    cls: 'claudian-copilot-resources-action', text: 'Enable all resources', attr: { type: 'button' },
+  });
+  const disableAllButton = controlsEl.createEl('button', {
+    cls: 'claudian-copilot-resources-action', text: 'Disable all resources', attr: { type: 'button' },
+  });
+  enableAllButton.addEventListener('click', () => { void setAll(true); });
+  disableAllButton.addEventListener('click', () => { void setAll(false); });
+
+  const kindsEl = controlsEl.createDiv({
+    cls: 'claudian-copilot-resources-kinds',
+    attr: { role: 'group', 'aria-label': 'Filter resource type' },
+  });
+  const kindButtons = new Map<ResourceKindFilter, HTMLButtonElement>();
+  for (const [kind, label] of [['all', 'All'], ['mcp', 'MCP servers'], ['skill', 'Skills']] as const) {
+    const button = kindsEl.createEl('button', {
+      cls: 'claudian-copilot-resources-action claudian-copilot-resources-kind',
+      text: label,
+      attr: { type: 'button', 'aria-pressed': String(kind === kindFilter) },
+    });
+    kindButtons.set(kind, button);
+    button.addEventListener('click', () => {
+      kindFilter = kind;
+      bulkStatus = '';
+      renderList();
+      renderStatus();
+    });
+  }
+
   const filterInput = controlsEl.createEl('input', {
     cls: 'claudian-copilot-resources-filter',
   });
@@ -122,7 +202,9 @@ export function renderCopilotResourceSettings(
   filterInput.placeholder = 'Filter by name, source, or path...';
   filterInput.addEventListener('input', () => {
     filter = filterInput.value.trim().toLowerCase();
+    bulkStatus = '';
     renderList();
+    renderStatus();
   });
 
   const statusEl = container.createDiv({ cls: 'claudian-copilot-resources-status' });
@@ -131,10 +213,64 @@ export function renderCopilotResourceSettings(
   const listEl = container.createDiv({ cls: 'claudian-copilot-resources-list' });
   const problemsEl = container.createDiv({ cls: 'claudian-copilot-resources-problems' });
 
+  const setAll = async (enabled: boolean): Promise<void> => {
+    const rows = buildRows(getCopilotHostResources(settingsBag), inventory, persist);
+    const duplicateNames = findCopilotDuplicateNames(rows.map(row => row.label.toLowerCase()));
+    let skipped = 0;
+    const targets = rows.filter(row => {
+      if (!matchesFilter(row, filter, kindFilter)) return false;
+      if (enabled && row.missing) return false;
+      if (enabled && !row.selected && duplicateNames.has(row.label.toLowerCase())) {
+        skipped += 1;
+        return false;
+      }
+      return true;
+    });
+    bulkStatus = skipped > 0
+      ? `Skipped ${skipped} resources with conflicting sources. Select a source individually.`
+      : '';
+    await persist(current => {
+      const servers = new Map(current.selectedMcpServers.map(ref => [
+        serverId(ref.configPath, ref.name), ref,
+      ]));
+      const skills = new Map(current.selectedSkillPaths.map(skillPath => [
+        copilotSkillPathKey(skillPath), skillPath,
+      ]));
+      const disabledRepositorySkills = new Map(current.disabledRepositorySkillPaths?.map(skillPath => [
+        copilotSkillPathKey(skillPath), skillPath,
+      ]));
+      for (const { reference } of targets) {
+        if (reference.kind === 'mcp') {
+          const ref = reference.server;
+          const id = serverId(ref.configPath, ref.name);
+          if (enabled) servers.set(id, ref);
+          else servers.delete(id);
+        } else {
+          const key = copilotSkillPathKey(reference.path);
+          if (enabled) {
+            disabledRepositorySkills.delete(key);
+            if (reference.repository) skills.delete(key);
+            else skills.set(key, reference.path);
+          } else {
+            skills.delete(key);
+            if (reference.repository) disabledRepositorySkills.set(key, reference.path);
+          }
+        }
+      }
+      return {
+        selectedMcpServers: [...servers.values()],
+        selectedSkillPaths: [...skills.values()],
+        disabledRepositorySkillPaths: [...disabledRepositorySkills.values()],
+      };
+    });
+  };
+
   const discover = async (): Promise<void> => {
+    if (disposed) return;
     const refreshing = inventory !== null;
     discovering = true;
     discoveryFailure = null;
+    bulkStatus = '';
     renderStatus();
     try {
       const selection = getCopilotHostResources(settingsBag);
@@ -144,16 +280,17 @@ export function renderCopilotResourceSettings(
         homeDirectory: os.homedir(),
         vaultDirectory: getVaultPath(context.plugin.app) ?? '',
       });
-      if (refreshing) {
+      if (refreshing && !disposed) {
         await persist(() => ({}));
       }
     } catch (error) {
       discoveryFailure = error instanceof Error ? error.message : String(error);
     } finally {
       discovering = false;
-      renderStatus();
       renderList();
+      renderStatus();
     }
+    if (!disposed && !discoveryFailure) check();
   };
 
   discoverButton.addEventListener('click', () => {
@@ -161,7 +298,24 @@ export function renderCopilotResourceSettings(
   });
 
   function renderStatus(): void {
-    discoverButton.disabled = discovering;
+    if (disposed) return;
+    remember.checked = getCopilotHostResources(settingsBag).rememberMcpSignIns === true;
+    remember.disabled = saving > 0;
+    discoverButton.disabled = discovering || saving > 0;
+    enableAllButton.disabled = discovering || saving > 0 || inventory === null;
+    disableAllButton.disabled = discovering || saving > 0 || inventory === null || renderedRows.size === 0;
+    const scope = filter
+      ? 'search results'
+      : kindFilter === 'skill'
+      ? 'all skills'
+      : kindFilter === 'mcp'
+      ? 'all MCP servers'
+      : 'all resources';
+    enableAllButton.setText(`Enable ${scope}`);
+    disableAllButton.setText(`Disable ${scope}`);
+    for (const [kind, button] of kindButtons) {
+      button.setAttribute('aria-pressed', String(kind === kindFilter));
+    }
     const action = discovering ? 'Discovering...' : inventory ? 'Refresh' : 'Discover';
     discoverButton.setText(action);
     discoverButton.setAttribute(
@@ -175,6 +329,8 @@ export function renderCopilotResourceSettings(
         ? 'Reading this computer\'s MCP configurations and skill folders...'
         : discoveryFailure
         ? `Discovery failed: ${discoveryFailure}. Your selections are unchanged.`
+        : bulkStatus
+        ? bulkStatus
         : inventory
         ? `${inventory.mcpServers.length} MCP ${plural(inventory.mcpServers.length, 'server')}`
           + ` and ${inventory.skills.length} ${plural(inventory.skills.length, 'skill')} found.`
@@ -183,10 +339,19 @@ export function renderCopilotResourceSettings(
   }
 
   function renderList(): void {
-    listEl.empty();
+    if (disposed) return;
     problemsEl.empty();
-    const rows = buildRows(getCopilotHostResources(settingsBag), inventory, persist)
-      .filter(row => matchesFilter(row, filter));
+    const selection = getCopilotHostResources(settingsBag);
+    const rows = buildRows(selection, inventory, persist)
+      .filter(row => matchesFilter(row, filter, kindFilter));
+    const ids = new Set(rows.map(resourceRowId));
+    for (const [id, rendered] of renderedRows) {
+      if (!ids.has(id)) {
+        rendered.element.remove();
+        renderedRows.delete(id);
+      }
+    }
+    listEl.querySelector('.claudian-copilot-resources-empty')?.remove();
     if (rows.length === 0) {
       listEl.createDiv({
         cls: 'claudian-copilot-resources-empty',
@@ -195,11 +360,74 @@ export function renderCopilotResourceSettings(
           : 'Nothing discovered yet.',
       });
     }
+    let previous: HTMLElement | null = null;
     for (const row of rows) {
-      renderRow(listEl, row, async (next) => {
-        await row.toggle(next);
-        renderList();
-      });
+      const id = resourceRowId(row);
+      let rendered = renderedRows.get(id);
+      if (!rendered) {
+        rendered = renderRow(listEl, row);
+        renderedRows.set(id, rendered);
+      }
+      rendered.row = row;
+      rendered.checkbox.checked = row.selected;
+      rendered.checkbox.disabled = row.reference.kind === 'skill' && inventory === null;
+      if (rendered.name.textContent !== row.label) rendered.name.setText(row.label);
+      const detail = row.missing ? `${row.detail} — not found on this computer` : row.detail;
+      if (rendered.detail.textContent !== detail) rendered.detail.setText(detail);
+      const readiness = row.reference.kind === 'mcp'
+        ? workspace.mcpReadiness.getState(row.reference.server) : null;
+      if (row.reference.kind === 'mcp' && readiness) {
+        if (!rendered.readiness) {
+          const reference = row.reference.server;
+          const element = rendered.element.createDiv({ cls: 'claudian-copilot-mcp-readiness', attr: { 'aria-live': 'polite' } });
+          const icon = element.createSpan({ attr: { 'aria-hidden': 'true' } });
+          const text = element.createSpan();
+          const checkButton = element.createEl('button', {
+            cls: 'claudian-copilot-resources-action', text: 'Check',
+            attr: { type: 'button', 'aria-label': `Check ${reference.name} connection` },
+          });
+          checkButton.addEventListener('click', () => check(reference));
+          rendered.readiness = { element, icon, text, check: checkButton };
+        }
+        const view = rendered.readiness;
+        const phase = row.selected ? readiness.phase : 'disabled';
+        const text = row.selected ? readinessText(readiness) : 'Disabled';
+        if (view.text.textContent !== text) view.text.setText(text);
+        if (view.element.dataset.phase !== phase) {
+          view.element.dataset.phase = phase;
+          setIcon(view.icon, phase === 'connected' ? 'check' : phase === 'needs-auth' || phase === 'error' ? 'triangle-alert' : 'circle');
+        }
+        const disabled = !row.selected || row.missing || saving > 0 || phase === 'checking' || phase === 'queued';
+        if (view.check.disabled !== disabled) view.check.disabled = disabled;
+      }
+      if (row.supportsSignIn && row.reference.kind === 'mcp'
+        && (readiness?.phase === 'unchecked' || readiness?.phase === 'needs-auth')) {
+        if (!rendered.signIn) {
+          const reference = row.reference.server;
+          rendered.signIn = rendered.element.createEl('button', {
+            cls: 'claudian-copilot-resources-action',
+            text: 'Sign in',
+            attr: { type: 'button', 'aria-label': `Sign in to ${reference.name}` },
+          });
+          rendered.signIn.addEventListener('click', () => {
+            if (!disposed) new CopilotMcpSignInModal(context.plugin.app, workspace.mcpSignIn, reference).open();
+          });
+        }
+        const disabled = saving > 0 || !row.selected || row.missing || selection.rememberMcpSignIns !== true;
+        if (rendered.signIn.disabled !== disabled) rendered.signIn.disabled = disabled;
+        const title = disabled
+          ? 'Select this server and enable Remember MCP sign-ins first.'
+          : 'Authenticate this server in your browser.';
+        if (rendered.signIn.title !== title) rendered.signIn.title = title;
+      } else if (rendered.signIn) {
+        rendered.signIn.remove();
+        rendered.signIn = null;
+      }
+      const next: Element | null = previous ? previous.nextElementSibling : listEl.firstElementChild;
+      if (next !== rendered.element) {
+        listEl.insertBefore(rendered.element, next);
+      }
+      previous = rendered.element;
     }
     for (const problem of inventory?.problems ?? []) {
       problemsEl.createDiv({
@@ -209,31 +437,83 @@ export function renderCopilotResourceSettings(
     }
   }
 
-  renderStatus();
+  function check(reference?: CopilotMcpServerReference): void {
+    if (disposed) return;
+    void workspace.mcpReadiness.check(reference).catch(reportReadinessFailure);
+  }
+
+  function reportReadinessFailure(error: unknown): void {
+    new Notice(`MCP readiness check failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const unsubscribeReadiness = workspace.mcpReadiness.subscribe(renderList);
+  const signInPhases = new Map(getCopilotHostResources(settingsBag).selectedMcpServers.map(reference => [
+    serverId(reference.configPath, reference.name), workspace.mcpSignIn.getState(reference).phase,
+  ]));
+  const unsubscribeSignIn = workspace.mcpSignIn.subscribe(() => {
+    for (const reference of getCopilotHostResources(settingsBag).selectedMcpServers) {
+      const id = serverId(reference.configPath, reference.name);
+      const phase = workspace.mcpSignIn.getState(reference).phase;
+      const previous = signInPhases.get(id);
+      signInPhases.set(id, phase);
+      if (phase === 'connected' && previous !== phase) check(reference);
+    }
+  });
   renderList();
+  void discover();
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    unsubscribeReadiness();
+    unsubscribeSignIn();
+    void workspace.mcpReadiness.cancel().catch(error => {
+      new Notice(`Could not close MCP readiness checks: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  };
+}
+
+function readinessText(state: CopilotMcpReadinessState): string {
+  switch (state.phase) {
+    case 'unchecked': return 'Not checked';
+    case 'queued': return 'Queued';
+    case 'checking': return 'Checking...';
+    case 'connected': return `Connected (${state.toolCount} ${plural(state.toolCount, 'tool')})`;
+    case 'needs-auth': return 'Sign-in required';
+    case 'error': return `Check failed: ${state.message.split('\n')[0].slice(0, 240)} Retry with Check.`;
+  }
 }
 
 function renderRow(
   listEl: HTMLElement,
   row: ResourceRow,
-  onToggle: (next: boolean) => Promise<void>,
-): void {
-  const rowEl = listEl.createEl('label', { cls: 'claudian-copilot-resources-row' });
-  const checkboxEl = rowEl.createEl('input');
+): RenderedResourceRow {
+  const rowEl = listEl.createDiv({ cls: 'claudian-copilot-resources-row' });
+  const label = rowEl.createEl('label', { cls: 'claudian-copilot-resources-row-label' });
+  const checkboxEl = label.createEl('input');
   checkboxEl.type = 'checkbox';
   checkboxEl.checked = row.selected;
-  checkboxEl.addEventListener('change', () => {
-    void onToggle(checkboxEl.checked);
-  });
-  const textEl = rowEl.createDiv({ cls: 'claudian-copilot-resources-row-text' });
-  textEl.createDiv({
+  const textEl = label.createDiv({ cls: 'claudian-copilot-resources-row-text' });
+  const name = textEl.createDiv({
     cls: 'claudian-copilot-resources-row-name',
     text: row.label,
   });
-  textEl.createDiv({
+  const detail = textEl.createDiv({
     cls: 'claudian-copilot-resources-row-detail',
     text: row.missing ? `${row.detail} — not found on this computer` : row.detail,
   });
+  const rendered: RenderedResourceRow = {
+    element: rowEl, checkbox: checkboxEl, name, detail, signIn: null, readiness: null, row,
+  };
+  checkboxEl.addEventListener('change', () => {
+    void rendered.row.toggle(checkboxEl.checked);
+  });
+  return rendered;
+}
+
+function resourceRowId(row: ResourceRow): string {
+  return row.reference.kind === 'mcp'
+    ? `mcp:${serverId(row.reference.server.configPath, row.reference.server.name)}`
+    : `skill:${copilotSkillPathKey(row.reference.path)}`;
 }
 
 /**
@@ -250,7 +530,10 @@ function buildRows(
   const selectedServers = new Set(
     selection.selectedMcpServers.map(reference => serverId(reference.configPath, reference.name)),
   );
-  const selectedSkills = new Set(selection.selectedSkillPaths);
+  const selectedSkills = new Set(getEnabledCopilotSkillPaths(
+    selection,
+    (inventory?.skills ?? []).filter(skill => skill.scope === 'repository').map(skill => skill.path),
+  ));
 
   const toggleServer = async (
     reference: { configPath: string; name: string },
@@ -263,10 +546,16 @@ function buildRows(
       return { selectedMcpServers: next ? [...remaining, reference] : remaining };
     });
   };
-  const toggleSkill = async (skillPath: string, next: boolean): Promise<void> => {
+  const toggleSkill = async (skillPath: string, next: boolean, repository = false): Promise<void> => {
     await persist((current) => {
-      const remaining = current.selectedSkillPaths.filter(entry => entry !== skillPath);
-      return { selectedSkillPaths: next ? [...remaining, skillPath] : remaining };
+      const key = copilotSkillPathKey(skillPath);
+      const remaining = current.selectedSkillPaths.filter(entry => copilotSkillPathKey(entry) !== key);
+      const disabled = (current.disabledRepositorySkillPaths ?? [])
+        .filter(entry => copilotSkillPathKey(entry) !== key);
+      return {
+        selectedSkillPaths: next && !repository ? [...remaining, skillPath] : remaining,
+        disabledRepositorySkillPaths: !next && repository ? [...disabled, skillPath] : disabled,
+      };
     });
   };
 
@@ -277,6 +566,8 @@ function buildRows(
       detail: describeServer(server),
       label: `MCP server: ${server.name}`,
       missing: false,
+      supportsSignIn: server.transport === 'http' || server.transport === 'sse',
+      reference: { kind: 'mcp', server: { configPath: server.configPath, name: server.name } },
       selected: selection.selectedMcpServers.some(entry => (
         serverId(entry.configPath, entry.name) === id
       )),
@@ -289,34 +580,40 @@ function buildRows(
       continue;
     }
     rows.push({
-      detail: reference.configPath,
+      detail: inventory ? reference.configPath : `${reference.configPath} | not checked yet`,
       label: `MCP server: ${reference.name}`,
-      missing: true,
+      missing: inventory !== null,
+      supportsSignIn: false,
+      reference: { kind: 'mcp', server: reference },
       selected: true,
       toggle: next => toggleServer(reference, next),
     });
   }
 
   for (const skill of inventory?.skills ?? []) {
-    selectedSkills.delete(skill.path);
+    const selected = selectedSkills.delete(copilotSkillPathKey(skill.path));
+    const source = skill.scope === 'repository'
+      ? 'repository skill (enabled by default)'
+      : `${skill.scope} skill`;
     rows.push({
-      detail: `${skill.scope} skill | ${skill.path}${
+      detail: `${source} | ${skill.path}${
         skill.description ? ` | ${skill.description}` : ''
       }`,
       label: `Skill: ${skill.commandName}`,
       missing: false,
-      selected: selection.selectedSkillPaths.includes(skill.path),
-      toggle: next => toggleSkill(skill.path, next),
+      supportsSignIn: false,
+      reference: { kind: 'skill', path: skill.path, repository: skill.scope === 'repository' },
+      selected,
+      toggle: next => toggleSkill(skill.path, next, skill.scope === 'repository'),
     });
   }
-  for (const skillPath of selection.selectedSkillPaths) {
-    if (!selectedSkills.has(skillPath)) {
-      continue;
-    }
+  for (const skillPath of selectedSkills) {
     rows.push({
-      detail: skillPath,
+      detail: inventory ? skillPath : `${skillPath} | not checked yet`,
       label: `Skill: ${skillPath.split(/[\\/]/).at(-2) ?? skillPath}`,
-      missing: true,
+      missing: inventory !== null,
+      supportsSignIn: false,
+      reference: { kind: 'skill', path: skillPath, repository: false },
       selected: true,
       toggle: next => toggleSkill(skillPath, next),
     });
@@ -331,11 +628,11 @@ function describeServer(server: CopilotDiscoveredMcpServer): string {
   return `${server.scope} ${server.transport} | ${server.configPath}${restriction}`;
 }
 
-function matchesFilter(row: ResourceRow, filter: string): boolean {
-  if (!filter) {
-    return true;
+function matchesFilter(row: ResourceRow, filter: string, kind: ResourceKindFilter): boolean {
+  if (kind !== 'all' && row.reference.kind !== kind) {
+    return false;
   }
-  return `${row.label} ${row.detail}`.toLowerCase().includes(filter);
+  return !filter || `${row.label} ${row.detail}`.toLowerCase().includes(filter);
 }
 
 function serverId(configPath: string, name: string): string {

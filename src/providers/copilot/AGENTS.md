@@ -5,8 +5,7 @@ a stdio JSON-RPC subprocess.
 
 The provider is reachable from `src/main.ts` and ships switched off. It streams text,
 reasoning, tools, approvals, and questions for chat and for the ephemeral title, inline
-edit, and instruction-refinement runs, and runs the MCP servers and skills this computer
-selected in persistent chat. Native history browsing, replay, rewind, fork, plan mode,
+edit, and instruction-refinement runs, and runs selected MCP servers and enabled skills in persistent chat. Native history browsing, replay, rewind, fork, plan mode,
 images, subagents, and plugins are absent, and `capabilities.ts` says so; do not describe
 them as pending here.
 
@@ -28,6 +27,9 @@ them as pending here.
 | `sdk/CopilotClientFactory` | CLI resolution, runtime environment, client identity, and the auth gate |
 | `sdk/CopilotRuntimeError` | Failure categorization onto `ProviderExecutionErrorCategory`, and what each category leaves unusable |
 | `runtime/CopilotCliResolver` | Discovering the user-installed `copilot` binary from settings and the host |
+| `runtime/CopilotBrowserLogin` | Supervised browser OAuth, secure-storage policy, and login cancellation |
+| `app/CopilotConnectionCoordinator` | Connect/check/login/discover/confirm state and explicit model publication |
+| `ui/CopilotConnectionModal` | In-app sign-in progress, cancellation, and model confirmation |
 | `runtime/CopilotAbsolutePath` | What counts as an absolute path for a CLI spawned in the vault, the canonical form of one, and whether one path lies inside another by spelling |
 | `runtime/CopilotCanonicalPath` | What the host filesystem calls a path that may not exist yet, and whether one path lies inside another through the links both are reached by |
 | `runtime/CopilotCliEntry` | Narrowing a discovered path to the executable the SDK is handed, and requiring it to be absolute |
@@ -94,8 +96,7 @@ them as pending here.
   where the filesystem identifies both spellings as one file, by device and inode:
   existence does not say that, since a case-sensitive filesystem can hold two different
   programs under the two names, and `realpath` resolves symlinks while leaving the
-  spelling as given, so on macOS it reports two paths for one file. Claudian never spawns
-  the CLI itself; the SDK owns `windowsHide`. That is enforced by the spawn gate in
+  spelling as given, so on macOS it reports two paths for one file. The SDK owns all agent-runtime launches. Browser login alone uses `ManagedStdioProcess` in `CopilotBrowserLogin`, because the pinned SDK cannot initiate OAuth. That exception is enforced by the spawn gate in
   `scripts/check-architecture-boundaries.test.mjs`, which reads the syntax tree rather
   than the name, so `pattern.exec(line)` passes and a real spawn does not. It reads every
   route to the module — import, re-export, `require`, dynamic `import`, and
@@ -111,7 +112,7 @@ them as pending here.
   so the link is followed before the name is read. A Copilot install with no platform
   package fails closed; a `npm-loader.js` belonging to another package is left alone,
   because this rule is about the CLI Claudian drives. Resolving the binary rather than
-  spawning it keeps process ownership with the SDK: do not add a provider-side spawn.
+  spawning it keeps agent-process ownership with the SDK. The supervised login exception must use this same resolved entry rather than the npm wrapper.
 - A launcher names its target relative to the directory it lives in, through `%~dp0`,
   `%dp0%` after a `SET dp0` line, `$basedir`, or `$PSScriptRoot`, and a launcher under
   `node_modules\.bin` points at the package beside it with a parent-relative path. All of
@@ -137,16 +138,15 @@ them as pending here.
   and configuration — and a relative one lands inside the notes.
 - Leaving empty mode gives up every default it supplied, so `sdk/CopilotSdkRuntime` states
   each of them on every session it creates or resumes, and never at a call site: session
-  telemetry, the shared on-disk embedding cache and embedding retrieval, keychain-backed
-  MCP OAuth storage, MCP apps, remote sessions and remote export, the built-in session
+  telemetry, the shared on-disk embedding cache and embedding retrieval,
+  MCP apps, remote sessions and remote export, the built-in session
   store, host git operations, memory, infinite sessions, scheduling, file hooks, plugin
   directories, custom instructions and their on-demand discovery, runtime configuration
-  discovery, experimental features, the commit co-author trailer, and the runtime's own
+  discovery, general experimental mode, the commit co-author trailer, and the runtime's own
   `environment_context` description of the host. MCP servers and skills are stated there
   too, from the caller's resources alone. Several of
   those default the other way outside empty mode, so an omission is not a smaller session
-  but a coding-agent one. The port exposes none of them: a caller chooses tools, a model,
-  directories, and handlers, and cannot weaken the floor.
+  but a coding-agent one. The port exposes none of them. MCP OAuth storage defaults to memory; only explicit resource settings may opt in to native persistence. LLM judge enables only the native `AUTO_APPROVAL` feature flag, not general experimental mode.
 - A session's installed plugins are the exception, and the reason `COPILOT_HOME` isolation
   is load-bearing rather than tidy. The SDK clears them only in empty mode, through the
   options patch it sends after create and resume, and exposes no session field for them;
@@ -235,16 +235,8 @@ them as pending here.
 - `COPILOT_HOME` is a per-vault directory under the OS application-state location, keyed
   by a hash of the vault path. Copilot session state is agent data, not vault content, so
   it must never live under the vault — including under `.claudian/`.
-- A per-vault `COPILOT_HOME` is a Copilot install the CLI has never been signed in to. The
-  credential itself is shared — the CLI keeps one per host in the OS keychain — but the
-  record of which account it belongs to lives in the home it was signed in with, and
-  without that record the CLI never opens the keychain at all. So the vault's own home is
-  signed in to once, by running the CLI with `COPILOT_HOME` set to it. The authentication
-  failure in `sdk/CopilotSdkRuntime` says exactly that and names the directory: it must
-  not tell the user to run a bare `copilot`, which signs in to the shared install and
-  leaves this vault signed out. What the CLI itself reported is quoted rather than
-  replaced — "Not authenticated" adds nothing, but an expiry or a single-sign-on refusal
-  is the whole answer — and never replaces the instruction.
+- The settings connection flow checks the vault's own `COPILOT_HOME`, launches browser sign-in only after a user action, then verifies authentication through SDK model discovery. Authentication errors direct users to Connect Copilot, never to a shell command.
+- Browser sign-in sets `storeTokenPlaintext: false` in the isolated CLI home's `settings.json`, preserving other keys, and uses pipes with closed stdin rather than a PTY so the CLI cannot obtain consent for plaintext fallback. Do not copy global account records/tokens or disable keychain. A successful process exit alone is not proof of authentication.
 - That directory is always absolute, by the same rule the CLI path is held to in
   `runtime/CopilotAbsolutePath`. Every host variable it is built from — `XDG_STATE_HOME`,
   `LOCALAPPDATA`, `HOME`, `USERPROFILE`, and the temporary-location variables — is
@@ -332,14 +324,24 @@ them as pending here.
   resources. Ephemeral title, inline-edit, and instruction-refinement runs, and every
   narrowed tool policy, are resource-free by construction in
   `allowsCopilotResources`.
-- Only references are persisted — a configuration file plus a server name, or a
-  `SKILL.md` path — and they are host-scoped, so a synced vault selects nothing on another
-  computer. Definitions are read again per turn and stay in memory. Nothing derived from
+- Explicit selections and repository-skill opt-outs are host-scoped references, never definitions. Repository defaults are discovered independently from each computer's filesystem. Definitions are read again per turn and stay in memory. Nothing derived from
   them may reach settings, a command fingerprint, or an error message: the session
   identity names them by digest for that reason.
+- Effective skills are explicit selections plus standard skill packages at the nearest containing Git root and vault-local packages inside that repository, minus per-skill opt-outs. `getEnabledCopilotSkillPaths` owns that merge. Both chat resolution and the isolated command probe must pass the vault directory to the resolver; auth and auxiliary sessions must not inherit defaults. Command availability and warmup must not use `selectedSkillPaths.length` as a gate, because repository defaults are not persisted selections.
+- Resolve the vault's physical directory before walking for a Git root; compare skill selections and opt-outs by canonical package directory, without rewriting stored references. Personal skill roots retain opt-in ownership when they alias repository sources or the home directory is a Git root.
+- Exclude opted-out packages before resolution reads their metadata; keep inventory diagnostics visible and do not suppress failures of enabled packages. Refuse all effective same-name skill candidates rather than relying on native listing order; use the shared package reader and duplicate-name rule across inventory and resolution.
+- Inventory discovery is filesystem-only and must not mutate settings or start a runtime. Keep saved references unverified and skill changes disabled until discovery finishes. Type and text filters jointly scope bulk actions; preserve hidden choices and skip ambiguous sources when enabling. Keep resource rows keyed and update their labels and descriptions only when text changes.
 - Resources are deliberately outside `computeCopilotEnvironmentHash`. Including them would
   clear the discovered model catalog and the conversation's native session on every
   toggle, neither of which a selection invalidates.
+- Remembered MCP sign-ins use the native cache only after explicit host-scoped opt-in; it may fall back to plaintext token files outside the vault. This is separate from GitHub login's plaintext-storage policy. Storage mode belongs in the resource digest so changing it cold-restarts the client.
+- `CopilotMcpSignInCoordinator` owns a temporary, tool-free session containing only the selected server. An authorization URL means waiting; success requires the native connected event or the documented cached-login result. Native OAuth owns token handling and reconnection; no token copying, global MCP edits, or model turns belong in this flow.
+- Sign-in has separate native-authentication and post-authentication runtime-publication lifetimes. Provider transition hooks may cancel and drain only native authentication; waiting for the encompassing sign-in flight would deadlock its own cache-refresh transition. Revalidate consent and provider generation before each native acquisition or OAuth initiation. Confirmed authentication survives cancellation and follow-up failures, but publication still waits for owned cleanup; cancellation and disposal must propagate teardown failures even after the dialog closes. A queued reopen belongs to its cancellation revision, not the cancelled flight.
+- Refresh/fencing warnings belong to one sign-in attempt. Closing captures that attempt's failure and authentication outcome rather than reading a newer attempt's state; disposal retains only actual owned-release failures, not historical refresh warnings. A later clean attempt must not erase unresolved teardown evidence or repeat unrelated warnings.
+- `CopilotMcpReadinessCoordinator`, retained by workspace services, serializes isolated checks of selected MCP servers. Readiness comes from the typed SDK boundary: explicit native connection plus successful tools/list, including an empty list; never parse diagnostics or infer readiness from cached credentials. Each probe has no skills or available tools and respects the existing native cache selection. Settings-view disposal cancels the queue; the settings shell owns the renderer disposer. Filters/rerenders must not create probes, and selection, runtime generation, configuration, and client identity fence late results.
+- Completed readiness is a view-lifetime snapshot of MCP selection, cache choice, and runtime configuration, not skill settings or generic execution generation. Transitions still quiesce active probes and generation-fence their results, while skill-only updates reuse completed checks. Explicit Check, Refresh, and completed OAuth force fresh probes. Failed native quiescence remains a visible transition failure; do not bypass the registry's settings-commit gate.
+- Queued/checking readiness entries and their queued requests remain generation-bound. Retire stale unfinished work in the after-transition hook even when a failed chat-lease release skipped the before-transition hook; completed snapshots retain their separate reuse identity.
+- Once a cancelled readiness probe has positively observed all owned releases succeed, its stale metadata/session-operation error must not veto the new settings mutation. Keep uncancelled operation errors visible and preserve the primary failure alongside any release failure. Factory acquisition failures do not certify cleanup and remain conservative; do not infer release success from their exception.
 - A selection that changes while a client is alive ends that client and resumes the same
   native session on a fresh one. An exclusion list applies where the runtime starts
   servers — a create or a cold resume — and cannot stop what the resident process is
@@ -439,6 +441,9 @@ them as pending here.
   that fails is retried through the next client and reported when no next client can exist.
 - Approvals, questions, and events all carry the identity of the live session they came
   from, so a session Claudian dropped can never answer for the run that replaced it.
+- Permission modes are host-scoped and apply only to persistent chat with a `provider-default` or `unrestricted` tool policy. `CopilotExecutionSession` snapshots the effective mode before asynchronous acquisition and includes it in session identity; auxiliary and restricted turns always use Ask. Approval modes never widen available or excluded tools.
+- Before publishing a created or resumed session, the SDK boundary calls `session.rpc.options.update({ featureFlags: { AUTO_APPROVAL: mode === 'judge' } })`, then `session.rpc.commands.invoke({ name: 'permissions', input })`, where input is `default`, `assisted`, or `allow-all`. SDK 1.0.11 exposes generated `setAllowAll`/`getAllowAll` methods that CLI 1.0.86-2 rejects with `Unhandled method`; do not substitute them or enable general experimental mode.
+- Assisted approvals have one event-aware response owner: the SDK invokes its ordinary callback before public events and omits prompt metadata. Only while that owner is attached in judge mode does the callback return `no-result`. Normalize native `assistedApproval` and SDK `autoApproval`; only an affirmative recommendation without a managed-human requirement may approve once. Keep request, turn, cancellation, and disposal fences, and never attribute an AI or standing approval with `approvedInteractively`.
 - Input the provider cannot carry is reported on the turn rather than dropped. An image
   reaches nothing — the CLI receives a text prompt and `capabilities.ts` advertises no
   image support — so the turn says which attachments were not sent.
@@ -446,6 +451,7 @@ them as pending here.
 
 ## Model and Settings Rules
 
+- Connection confirmation persists catalog, enablement, and model choices through `ProviderHost.mutateSettings`, then commits the future-chat seed through the app-owned `chatModelSelection` port. These writes do not change runtime inputs and must not quiesce existing execution leases. CLI and environment edits retain the runtime-settings transition boundary.
 - `COPILOT_REASONING_EFFORTS` mirrors the SDK's `ReasoningEffort` union exactly. Persisted
   and discovered efforts are validated against it so an unknown value never reaches
   `setModel`.

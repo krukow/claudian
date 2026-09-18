@@ -454,7 +454,8 @@ export interface ProviderSettingsTabRendererContext {
 }
 
 export interface ProviderSettingsTabRenderer {
-  render(container: HTMLElement, context: ProviderSettingsTabRendererContext): void;
+  /** Disposable views are released when hidden or closed and rendered afresh on return. */
+  render(container: HTMLElement, context: ProviderSettingsTabRendererContext): void | (() => void);
 }
 
 export interface ProviderWorkspaceInitContext {

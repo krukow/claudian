@@ -108,7 +108,7 @@ describe('copilotProviderRegistration', () => {
 
   it('scopes the CLI path and resource selections to each computer', () => {
     expect(copilotProviderRegistration.settingsStorage.hostScopedFields)
-      .toEqual(['cliPathsByHost', 'resourcesByHost']);
+      .toEqual(['cliPathsByHost', 'resourcesByHost', 'permissionModesByHost']);
   });
 
   it('reports normalization only when the stored bag actually changed', () => {

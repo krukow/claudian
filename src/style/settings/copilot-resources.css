@@ -20,16 +20,36 @@
 }
 
 .claudian-copilot-resources-action:hover:not(:disabled),
-.claudian-copilot-resources-action:focus-visible:not(:disabled) {
+.claudian-copilot-resources-action:focus-visible:not(:disabled),
+.claudian-copilot-resources-action:active:not(:disabled) {
   color: var(--text-normal);
   background: transparent;
   border: 0;
   box-shadow: none;
 }
 
-.claudian-copilot-resources-action:disabled {
+.claudian-copilot-resources-action:disabled,
+.claudian-copilot-resources-action:disabled:hover,
+.claudian-copilot-resources-action:disabled:focus-visible,
+.claudian-copilot-resources-action:disabled:active {
   color: var(--text-faint);
+  background: transparent;
+  border: 0;
+  box-shadow: none;
   cursor: default;
+}
+
+.claudian-copilot-resources-kinds {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.claudian-copilot-resources-kind[aria-pressed="true"]:not(:disabled) {
+  color: var(--text-normal);
+  text-decoration: underline;
+  text-decoration-color: var(--interactive-accent);
+  text-underline-offset: 5px;
 }
 
 .claudian-copilot-resources-filter {
@@ -76,7 +96,19 @@
   gap: 10px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.claudian-copilot-resources-row-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
   cursor: pointer;
+}
+
+.claudian-copilot-resources-row-text {
+  min-width: 0;
 }
 
 .claudian-copilot-resources-row:last-child {
@@ -103,4 +135,29 @@
 
 .claudian-copilot-resources-problems {
   margin: 0 12px;
+}
+
+.claudian-copilot-mcp-readiness {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 45%;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.claudian-copilot-mcp-readiness svg {
+  width: 14px;
+  height: 14px;
+}
+
+.claudian-copilot-mcp-readiness[data-phase="connected"] {
+  color: var(--text-success);
+}
+
+.claudian-copilot-mcp-readiness[data-phase="needs-auth"],
+.claudian-copilot-mcp-readiness[data-phase="error"] {
+  color: var(--text-warning);
 }

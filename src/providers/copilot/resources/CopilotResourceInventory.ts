@@ -1,11 +1,14 @@
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { parseFrontmatter } from '../../../utils/frontmatter';
 import { isAbsoluteCopilotPath } from '../runtime/CopilotAbsolutePath';
+import { canonicalizeCopilotHostPath } from '../runtime/CopilotCanonicalPath';
+import { copilotSkillPathKey } from './CopilotResourceSettings';
 
 /** Where a configuration file or skill root was found. */
-export type CopilotResourceScope = 'personal' | 'vault' | 'custom';
+export type CopilotResourceScope = 'personal' | 'vault' | 'repository' | 'custom';
 
 export interface CopilotDiscoveredMcpServer {
   readonly configPath: string;
@@ -16,12 +19,15 @@ export interface CopilotDiscoveredMcpServer {
   readonly transport: string;
 }
 
-export interface CopilotDiscoveredSkill {
+export interface CopilotSkillPackage {
   readonly commandName: string;
   readonly description?: string;
   /** The package directory holding `SKILL.md`, which is what the CLI is pointed at. */
   readonly directory: string;
   readonly path: string;
+}
+
+export interface CopilotDiscoveredSkill extends CopilotSkillPackage {
   readonly scope: CopilotResourceScope;
 }
 
@@ -54,16 +60,87 @@ export async function discoverCopilotResources(
 ): Promise<CopilotResourceInventory> {
   const problems: string[] = [];
   const mcpServers = await discoverMcpServers(options, problems);
-  const skills = await discoverSkills(options, problems);
+  const sources = new Map<string, CopilotResourceSource>();
+  for (const source of [
+    ...listSkillRootSources(options, problems),
+    ...await listRepositorySkillSources(options.vaultDirectory, options.homeDirectory, problems),
+  ]) {
+    const key = skillSourceKey(source);
+    if (sources.get(key)?.scope !== 'personal') {
+      sources.set(key, source);
+    }
+  }
+  const discovered = await discoverSkillsFromSources([...sources.values()], problems);
+  const skillsByPath = new Map<string, CopilotDiscoveredSkill>();
+  for (const skill of discovered) {
+    const key = copilotSkillPathKey(skill.path);
+    if (skill.scope === 'repository' || !skillsByPath.has(key)) {
+      skillsByPath.set(key, skill);
+    }
+  }
+  const skills = [...skillsByPath.values()];
   return {
     mcpServers,
     problems: [
       ...problems,
       ...describeDuplicates(mcpServers.map(server => server.name), 'MCP server'),
-      ...describeDuplicates(skills.map(skill => skill.commandName), 'skill command'),
+      ...describeDuplicates(skills.map(skill => skill.commandName.toLowerCase()), 'skill command'),
     ],
     skills,
   };
+}
+
+export async function discoverCopilotRepositorySkills(
+  vaultDirectory: string,
+  disabledSkillPaths: readonly string[] = [],
+): Promise<Pick<CopilotResourceInventory, 'skills' | 'problems'>> {
+  const problems: string[] = [];
+  const sources = await listRepositorySkillSources(vaultDirectory, os.homedir(), problems);
+  const excluded = new Set(disabledSkillPaths.map(copilotSkillPathKey));
+  return { skills: await discoverSkillsFromSources(sources, problems, excluded), problems };
+}
+
+async function listRepositorySkillSources(
+  vaultDirectory: string,
+  homeDirectory: string,
+  problems: string[],
+): Promise<CopilotResourceSource[]> {
+  if (!path.isAbsolute(vaultDirectory)) return [];
+  let physicalVault: string;
+  try {
+    physicalVault = await fs.realpath(vaultDirectory);
+  } catch (error) {
+    if (!isMissing(error)) {
+      problems.push(`Could not inspect the vault at ${vaultDirectory}: ${describeFailure(error)}`);
+    }
+    return [];
+  }
+  const repositoryRoot = await findRepositoryRoot(physicalVault, problems);
+  if (!repositoryRoot) return [];
+  const personalRoots = new Set(personalSkillSources(homeDirectory)
+    .map(skillSourceKey));
+  return [...new Set([repositoryRoot, physicalVault])].flatMap(directory => (
+    standardSkillSources(directory, 'repository')
+  )).filter(source => !personalRoots.has(skillSourceKey(source)));
+}
+
+async function findRepositoryRoot(vaultDirectory: string, problems: string[]): Promise<string | null> {
+  let directory = vaultDirectory;
+  while (true) {
+    const marker = path.join(directory, '.git');
+    try {
+      const entry = await fs.stat(marker);
+      if (entry.isDirectory() || entry.isFile()) return directory;
+    } catch (error) {
+      if (!isMissing(error)) {
+        problems.push(`Could not inspect the repository at ${marker}: ${describeFailure(error)}`);
+        return null;
+      }
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) return null;
+    directory = parent;
+  }
 }
 
 async function discoverMcpServers(
@@ -106,13 +183,15 @@ async function discoverMcpServers(
   return servers;
 }
 
-async function discoverSkills(
-  options: CopilotResourceDiscoveryOptions,
+async function discoverSkillsFromSources(
+  sources: readonly CopilotResourceSource[],
   problems: string[],
+  excluded: ReadonlySet<string> = new Set(),
 ): Promise<CopilotDiscoveredSkill[]> {
   const skills: CopilotDiscoveredSkill[] = [];
-  for (const source of listSkillRootSources(options, problems)) {
-    const rootPackage = await readSkillPackage(source.path, source.scope);
+  for (const source of sources) {
+    if (excluded.has(copilotSkillPathKey(path.join(source.path, SKILL_FILE)))) continue;
+    const rootPackage = await readSkillPackage(source.path, source.scope, problems);
     if (rootPackage) {
       skills.push(rootPackage);
       continue;
@@ -129,7 +208,9 @@ async function discoverSkills(
       continue;
     }
     for (const name of entries.names) {
-      const skill = await readSkillPackage(path.join(source.path, name), source.scope);
+      const directory = path.join(source.path, name);
+      if (excluded.has(copilotSkillPathKey(path.join(directory, SKILL_FILE)))) continue;
+      const skill = await readSkillPackage(directory, source.scope, problems);
       if (skill) {
         skills.push(skill);
       }
@@ -141,6 +222,10 @@ async function discoverSkills(
 interface CopilotResourceSource {
   readonly path: string;
   readonly scope: CopilotResourceScope;
+}
+
+function skillSourceKey(source: CopilotResourceSource): string {
+  return canonicalizeCopilotHostPath(source.path, process.platform) ?? source.path;
 }
 
 function listMcpConfigSources(
@@ -166,16 +251,24 @@ function listSkillRootSources(
   problems: string[],
 ): CopilotResourceSource[] {
   return [
-    { path: path.join(options.homeDirectory, '.copilot', 'skills'), scope: 'personal' as const },
-    { path: path.join(options.homeDirectory, '.agents', 'skills'), scope: 'personal' as const },
-    {
-      path: path.join(options.vaultDirectory, '.github', 'skills'),
-      scope: 'vault' as const,
-    },
-    { path: path.join(options.vaultDirectory, '.agents', 'skills'), scope: 'vault' as const },
-    { path: path.join(options.vaultDirectory, '.claude', 'skills'), scope: 'vault' as const },
+    ...personalSkillSources(options.homeDirectory),
+    ...standardSkillSources(options.vaultDirectory, 'vault'),
     ...toCustomSources(options.additionalSkillRoots, 'skill root', problems),
   ];
+}
+
+function personalSkillSources(homeDirectory: string): CopilotResourceSource[] {
+  return ['.copilot', '.agents', '.claude'].map(folder => ({
+    path: path.join(homeDirectory, folder, 'skills'),
+    scope: 'personal',
+  }));
+}
+
+function standardSkillSources(directory: string, scope: CopilotResourceScope): CopilotResourceSource[] {
+  return ['.github', '.agents', '.claude'].map(folder => ({
+    path: path.join(directory, folder, 'skills'),
+    scope,
+  }));
 }
 
 /**
@@ -202,35 +295,57 @@ function toCustomSources(
 async function readSkillPackage(
   directory: string,
   scope: CopilotResourceScope,
+  problems: string[],
 ): Promise<CopilotDiscoveredSkill | null> {
-  const skillPath = path.join(directory, SKILL_FILE);
-  const content = await readTextFile(skillPath);
-  if (content === null) {
+  const result = await readCopilotSkillPackage(directory);
+  if (result.kind === 'unreadable') {
+    problems.push(`Could not read the skill at ${path.join(directory, SKILL_FILE)}: ${result.reason}`);
     return null;
   }
-  const frontmatter = parseFrontmatter(content)?.frontmatter ?? {};
+  if (result.kind === 'absent') {
+    return null;
+  }
+  return { ...result.skill, scope };
+}
+
+type CopilotSkillPackageRead =
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'read'; readonly skill: CopilotSkillPackage }
+  | { readonly kind: 'unreadable'; readonly reason: string };
+
+export async function readCopilotSkillPackage(directory: string): Promise<CopilotSkillPackageRead> {
+  const skillPath = path.join(directory, SKILL_FILE);
+  const content = await readTextFile(skillPath);
+  if (content.kind !== 'read') return content;
+  const frontmatter = parseFrontmatter(content.text)?.frontmatter ?? {};
   const name = readNonEmptyString(frontmatter.name) ?? path.basename(directory);
   const description = readNonEmptyString(frontmatter.description);
   return {
-    commandName: name,
-    ...(description ? { description } : {}),
-    directory,
-    path: skillPath,
-    scope,
+    kind: 'read',
+    skill: {
+      commandName: name,
+      ...(description ? { description } : {}),
+      directory,
+      path: skillPath,
+    },
   };
 }
 
-function describeDuplicates(names: readonly string[], label: string): string[] {
-  const counts = new Map<string, number>();
+export function findCopilotDuplicateNames(names: readonly string[]): ReadonlySet<string> {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
   for (const name of names) {
-    counts.set(name, (counts.get(name) ?? 0) + 1);
+    if (seen.has(name)) duplicates.add(name);
+    else seen.add(name);
   }
-  return [...counts]
-    .filter(([, count]) => count > 1)
-    .map(([name]) => (
-      `More than one ${label} is named ${name}. Selecting one of them does not select `
-      + 'the other; the Copilot CLI can only run one of two identical names.'
-    ));
+  return duplicates;
+}
+
+function describeDuplicates(names: readonly string[], label: string): string[] {
+  return [...findCopilotDuplicateNames(names)].map(name => (
+    `More than one ${label} is named ${name}. Disable competing sources to choose one; `
+    + 'the Copilot CLI can only run one of two identical names.'
+  ));
 }
 
 type JsonRead =
@@ -240,11 +355,9 @@ type JsonRead =
 
 async function readJsonFile(filePath: string): Promise<JsonRead> {
   const content = await readTextFile(filePath);
-  if (content === null) {
-    return { kind: 'absent' };
-  }
+  if (content.kind !== 'read') return content;
   try {
-    return { kind: 'parsed', value: JSON.parse(content) };
+    return { kind: 'parsed', value: JSON.parse(content.text) };
   } catch {
     return { kind: 'unreadable', reason: 'invalid JSON' };
   }
@@ -272,11 +385,18 @@ async function readDirectory(directory: string): Promise<DirectoryRead> {
   }
 }
 
-async function readTextFile(filePath: string): Promise<string | null> {
+type TextRead =
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'read'; readonly text: string }
+  | { readonly kind: 'unreadable'; readonly reason: string };
+
+async function readTextFile(filePath: string): Promise<TextRead> {
   try {
-    return await fs.readFile(filePath, 'utf8');
-  } catch {
-    return null;
+    return { kind: 'read', text: await fs.readFile(filePath, 'utf8') };
+  } catch (error) {
+    return isMissing(error)
+      ? { kind: 'absent' }
+      : { kind: 'unreadable', reason: describeFailure(error) };
   }
 }
 

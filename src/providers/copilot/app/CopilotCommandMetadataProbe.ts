@@ -59,8 +59,10 @@ export class CopilotCommandMetadataProbe {
   }
 
   private async loadCommands(signal?: AbortSignal): Promise<SlashCommand[]> {
+    const vaultDirectory = getVaultPath(this.host.app);
     const resolution = await resolveCopilotSelectedResources(
       { ...getCopilotHostResources(this.host.settings), selectedMcpServers: [] },
+      vaultDirectory ?? undefined,
     );
     if (resolution.problems.length > 0) {
       throw copilotConfigurationError(resolution.problems.join('\n'));
@@ -77,7 +79,7 @@ export class CopilotCommandMetadataProbe {
         'Enable a Copilot model before loading the skills it can run.',
       );
     }
-    const workingDirectory = getVaultPath(this.host.app) ?? process.cwd();
+    const workingDirectory = vaultDirectory ?? process.cwd();
     const client = await this.clientFactory.createClient(
       await this.clientFactory.resolveIdentity(workingDirectory),
     );

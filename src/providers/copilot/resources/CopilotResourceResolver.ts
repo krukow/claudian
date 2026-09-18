@@ -3,13 +3,20 @@ import * as path from 'node:path';
 
 import { isAbsoluteCopilotPath } from '../runtime/CopilotAbsolutePath';
 import type { CopilotSdkMcpServerConfig } from '../sdk/CopilotSdkPort';
-import type { CopilotResourceSettings } from './CopilotResourceSettings';
+import {
+  type CopilotSkillPackage,
+  discoverCopilotRepositorySkills,
+  findCopilotDuplicateNames,
+  readCopilotSkillPackage,
+} from './CopilotResourceInventory';
+import { type CopilotResourceSettings, getEnabledCopilotSkillPaths } from './CopilotResourceSettings';
 
 export interface CopilotResolvedResources {
   readonly mcpServers: Readonly<Record<string, CopilotSdkMcpServerConfig>>;
   /** Package directories, because pointing the CLI at a parent root loads its siblings. */
   readonly skillDirectories: readonly string[];
   readonly skillPaths: readonly string[];
+  readonly mcpOAuthTokenStorage?: 'persistent';
 }
 
 export interface CopilotResourceResolution {
@@ -33,16 +40,26 @@ export interface CopilotResourceResolution {
  */
 export async function resolveCopilotSelectedResources(
   selection: CopilotResourceSettings,
+  vaultDirectory?: string,
 ): Promise<CopilotResourceResolution> {
-  const problems: string[] = [];
+  const repository = await discoverCopilotRepositorySkills(
+    vaultDirectory ?? '', selection.disabledRepositorySkillPaths,
+  );
+  const problems: string[] = [...repository.problems];
   const mcpServers = await resolveMcpServers(selection, problems);
-  const skills = await resolveSkills(selection, problems);
+  const skills = await resolveSkills(
+    getEnabledCopilotSkillPaths(selection, repository.skills.map(skill => skill.path)),
+    problems,
+  );
   const hasResources = Object.keys(mcpServers).length > 0 || skills.directories.length > 0;
   return {
     problems,
     resources: hasResources
       ? {
         mcpServers,
+        ...(selection.rememberMcpSignIns && Object.keys(mcpServers).length > 0
+          ? { mcpOAuthTokenStorage: 'persistent' as const }
+          : {}),
         skillDirectories: skills.directories,
         skillPaths: skills.paths,
       }
@@ -215,12 +232,11 @@ function decodeMcpServer(
 }
 
 async function resolveSkills(
-  selection: CopilotResourceSettings,
+  selectedSkillPaths: readonly string[],
   problems: string[],
 ): Promise<{ directories: string[]; paths: string[] }> {
-  const directories: string[] = [];
-  const paths: string[] = [];
-  for (const skillPath of selection.selectedSkillPaths) {
+  const skills: CopilotSkillPackage[] = [];
+  for (const skillPath of selectedSkillPaths) {
     if (!isAbsoluteCopilotPath(skillPath)) {
       problems.push(`The selected skill at ${skillPath} must use an absolute path.`);
       continue;
@@ -229,25 +245,26 @@ async function resolveSkills(
       problems.push(`The selected skill at ${skillPath} must name its SKILL.md file.`);
       continue;
     }
-    if (!await isReadableFile(skillPath)) {
-      problems.push(`The selected skill at ${skillPath} could not be read.`);
+    const result = await readCopilotSkillPackage(path.dirname(skillPath));
+    if (result.kind !== 'read') {
+      problems.push(`The selected skill at ${skillPath} could not be read${
+        result.kind === 'unreadable' ? `: ${result.reason}` : '.'
+      }`);
       continue;
     }
-    const directory = path.dirname(skillPath);
-    if (!directories.includes(directory)) {
-      directories.push(directory);
-    }
-    paths.push(skillPath);
+    skills.push(result.skill);
   }
-  return { directories, paths };
-}
-
-async function isReadableFile(filePath: string): Promise<boolean> {
-  try {
-    return (await fs.stat(filePath)).isFile();
-  } catch {
-    return false;
+  const duplicates = findCopilotDuplicateNames(skills.map(skill => skill.commandName.toLowerCase()));
+  for (const name of duplicates) {
+    const sources = skills.filter(skill => skill.commandName.toLowerCase() === name)
+      .map(skill => skill.path);
+    problems.push(
+      `More than one enabled skill command is named ${name}: ${sources.join(', ')}. `
+      + 'None of these packages is loaded. Disable competing sources under Resources.',
+    );
   }
+  const unique = skills.filter(skill => !duplicates.has(skill.commandName.toLowerCase()));
+  return { directories: unique.map(skill => skill.directory), paths: unique.map(skill => skill.path) };
 }
 
 function readString(value: unknown): string | undefined {

@@ -1,3 +1,7 @@
+import * as path from 'node:path';
+
+import { canonicalizeCopilotHostPath } from '../runtime/CopilotCanonicalPath';
+
 export interface CopilotMcpServerReference {
   readonly configPath: string;
   readonly name: string;
@@ -7,7 +11,10 @@ export interface CopilotResourceSettings {
   additionalMcpConfigPaths: string[];
   additionalSkillRoots: string[];
   selectedMcpServers: CopilotMcpServerReference[];
+  /** Explicit choices; repository defaults are merged when resources are resolved. */
   selectedSkillPaths: string[];
+  readonly disabledRepositorySkillPaths?: string[];
+  readonly rememberMcpSignIns?: boolean;
 }
 
 export type CopilotResourcesByHost = Record<string, CopilotResourceSettings>;
@@ -28,12 +35,34 @@ export function normalizeCopilotResourcesByHost(value: unknown): CopilotResource
 
 export function normalizeCopilotResourceSettings(value: unknown): CopilotResourceSettings {
   const record = isRecord(value) ? value : {};
+  const disabledRepositorySkillPaths = normalizeStringList(record.disabledRepositorySkillPaths);
   return {
+    ...(disabledRepositorySkillPaths.length > 0 ? { disabledRepositorySkillPaths } : {}),
+    ...(record.rememberMcpSignIns === true ? { rememberMcpSignIns: true } : {}),
     additionalMcpConfigPaths: normalizeStringList(record.additionalMcpConfigPaths),
     additionalSkillRoots: normalizeStringList(record.additionalSkillRoots),
     selectedMcpServers: normalizeMcpReferences(record.selectedMcpServers),
     selectedSkillPaths: normalizeStringList(record.selectedSkillPaths),
   };
+}
+
+export function getEnabledCopilotSkillPaths(
+  selection: CopilotResourceSettings,
+  repositorySkillPaths: readonly string[],
+): string[] {
+  const selected = new Set(selection.selectedSkillPaths.map(copilotSkillPathKey));
+  for (const skillPath of repositorySkillPaths) {
+    selected.add(copilotSkillPathKey(skillPath));
+  }
+  for (const skillPath of selection.disabledRepositorySkillPaths ?? []) {
+    selected.delete(copilotSkillPathKey(skillPath));
+  }
+  return [...selected];
+}
+
+export function copilotSkillPathKey(skillPath: string): string {
+  const directory = canonicalizeCopilotHostPath(path.dirname(skillPath), process.platform);
+  return directory === null ? skillPath : path.join(directory, path.basename(skillPath));
 }
 
 function normalizeMcpReferences(value: unknown): CopilotMcpServerReference[] {

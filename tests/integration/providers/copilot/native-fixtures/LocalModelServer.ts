@@ -3,11 +3,16 @@ import { createServer } from 'node:http';
 export interface LocalModelServer {
   readonly baseUrl: string;
   readonly completionRequests: readonly string[];
+  queueToolCall(name: string): void;
   close(): Promise<void>;
 }
 
-export async function startLocalModelServer(toolCallName?: string): Promise<LocalModelServer> {
+export async function startLocalModelServer(
+  toolCallName?: string,
+  judgeReply = 'Synthetic invalid judge recommendation.',
+): Promise<LocalModelServer> {
   const completionRequests: string[] = [];
+  const toolCalls = toolCallName === undefined ? [] : [toolCallName];
   const server = createServer((request, response) => {
     let body = '';
     request.setEncoding('utf8');
@@ -16,6 +21,20 @@ export async function startLocalModelServer(toolCallName?: string): Promise<Loca
       response.setHeader('content-type', 'application/json');
       if (request.method === 'POST' && request.url === '/v1/chat/completions') {
         completionRequests.push(body);
+        const payload: { stream?: boolean } = JSON.parse(body);
+        if (payload.stream !== true) {
+          response.end(JSON.stringify({
+            id: 'chatcmpl-claudian-judge-fixture',
+            object: 'chat.completion',
+            created: 0,
+            model: 'gpt-4o',
+            choices: [{
+              index: 0, message: { role: 'assistant', content: judgeReply }, finish_reason: 'stop',
+            }],
+            usage: { completion_tokens: 1, prompt_tokens: 1, total_tokens: 2 },
+          }));
+          return;
+        }
         response.setHeader('content-type', 'text/event-stream');
         const chunk = {
           created: 0,
@@ -23,7 +42,8 @@ export async function startLocalModelServer(toolCallName?: string): Promise<Loca
           model: 'gpt-4o',
           object: 'chat.completion.chunk',
         };
-        const invokeTool = toolCallName !== undefined && completionRequests.length === 1;
+        const nextToolCall = toolCalls.shift();
+        const invokeTool = nextToolCall !== undefined;
         response.write(`data: ${JSON.stringify({
           ...chunk,
           choices: [{
@@ -31,8 +51,8 @@ export async function startLocalModelServer(toolCallName?: string): Promise<Loca
               ? {
                 role: 'assistant',
                 tool_calls: [{
-                  function: { arguments: '{}', name: toolCallName },
-                  id: 'fixture-tool-call',
+                  function: { arguments: '{}', name: nextToolCall },
+                  id: `fixture-tool-call-${completionRequests.length}`,
                   index: 0,
                   type: 'function',
                 }],
@@ -72,6 +92,9 @@ export async function startLocalModelServer(toolCallName?: string): Promise<Loca
   return {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     completionRequests,
+    queueToolCall(name) {
+      toolCalls.push(name);
+    },
     close() {
       const closing = new Promise<void>((resolve, reject) => {
         server.close(error => error ? reject(error) : resolve());
