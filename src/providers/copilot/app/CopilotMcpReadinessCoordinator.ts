@@ -191,7 +191,7 @@ export class CopilotMcpReadinessCoordinator {
     const client = await this.factory.createClient(identity);
     let session: CopilotSdkSession | undefined;
     let outcome: { result: CopilotMcpReadiness } | { error: unknown };
-    const errors: Error[] = [];
+    const releaseErrors: Error[] = [];
     try {
       signal.throwIfAborted();
       session = await client.createSession({
@@ -207,7 +207,6 @@ export class CopilotMcpReadinessCoordinator {
       outcome = { result: await session.checkMcpServer(reference.name) };
     } catch (error) {
       outcome = { error };
-      if (error !== signal.reason) errors.push(new Error(describeError(error), { cause: error }));
     }
     if (session) {
       const acquired = session;
@@ -216,12 +215,17 @@ export class CopilotMcpReadinessCoordinator {
         ['deleting the temporary MCP check', () => client.deleteSession(acquired.sessionId)],
       ] as const) {
         const outcome = await settleNativeWithin((async () => { await release(); })());
-        if (outcome.kind === 'rejected') errors.push(new Error(describeError(outcome.error), { cause: outcome.error }));
-        if (outcome.kind === 'timed-out') errors.push(copilotNativeSilenceError(step));
+        if (outcome.kind === 'rejected') releaseErrors.push(new Error(describeError(outcome.error), { cause: outcome.error }));
+        if (outcome.kind === 'timed-out') releaseErrors.push(copilotNativeSilenceError(step));
       }
     }
-    try { await client.stop(); } catch (error) { errors.push(new Error(describeError(error), { cause: error })); }
-    if (errors.length) throw new Error(errors.map(describeError).join('; '), { cause: new AggregateError(errors) });
+    try { await client.stop(); } catch (error) { releaseErrors.push(new Error(describeError(error), { cause: error })); }
+    if (releaseErrors.length) {
+      const failures = 'error' in outcome && outcome.error !== signal.reason
+        ? [new Error(describeError(outcome.error), { cause: outcome.error }), ...releaseErrors]
+        : releaseErrors;
+      throw new Error(failures.map(describeError).join('; '), { cause: new AggregateError(failures) });
+    }
     signal.throwIfAborted();
     if ('error' in outcome) throw new Error(describeError(outcome.error), { cause: outcome.error });
     return outcome.result;
