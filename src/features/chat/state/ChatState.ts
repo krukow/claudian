@@ -122,6 +122,7 @@ export class ChatState {
 
   set cancelRequested(value: boolean) {
     this.state.cancelRequested = value;
+    this._callbacks.onCancellationChanged?.();
   }
 
   get streamGeneration(): number {
@@ -476,6 +477,7 @@ export class ChatState {
     this.state.currentThinkingState = null;
     this.state.isStreaming = false;
     this.state.cancelRequested = false;
+    this._callbacks.onCancellationChanged?.();
     // Clear thinking indicator timeout
     this.clearThinkingIndicatorTimeout();
     // Clear response timer

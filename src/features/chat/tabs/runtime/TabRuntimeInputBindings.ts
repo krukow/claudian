@@ -19,6 +19,12 @@ export function buildTabRuntimeInputBindings(
 ): TabInputBindings {
   const { dom, state } = shell;
   const { plugin } = options;
+  const stopResponse = (): void => controllers.inputController.cancelStreaming();
+  ui.stopResponseButton.addEventListener('click', stopResponse);
+  options.registerCleanup(
+    'tab stop response binding',
+    () => ui.stopResponseButton.removeEventListener('click', stopResponse),
+  );
 
   let wasBangBashActive = ui.bangBashModeManager?.isActive() ?? false;
   const syncBangBashSuppression = (): void => {

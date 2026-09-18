@@ -35,6 +35,8 @@ Open the chat sidebar from the ribbon icon or command palette. Select text and u
 
 **Tabs & Session Management** — Use multiple tabs in single-panel mode or a persistent session manager beside the chat in dual-pane mode.
 
+**Stop a Response** — Select **Stop** in the running chat's composer or press **Esc**. Only that tab's response is cancelled; the conversation and queued or draft input are preserved. **Stopping...** stays disabled until cancellation settles. Rewind is not interrupted by this control.
+
 **Collab Mode** (Experimental) — Collaborate on shared projects with other Claudian users. [Learn more](https://claudian.md/docs/collab-mode/).
 
 ## Requirements
@@ -53,7 +55,9 @@ Open the chat sidebar from the ribbon icon or command palette. Select text and u
 
 ## Installation
 
-### From Obsidian Community Plugins (recommended)
+### From Obsidian Community Plugins (upstream)
+
+Community Plugins installs upstream Claudian, not this fork's Copilot integration. To install this fork, use the [from-source guide](docs/copilot-provider.md#install-this-fork-from-source-on-a-new-computer).
 
 1. Open Obsidian → Settings → Community plugins → Browse
 2. Search for "Claudian" and click Install
@@ -61,23 +65,9 @@ Open the chat sidebar from the ribbon icon or command palette. Select text and u
 
 Or install directly from the [community plugin page](https://community.obsidian.md/plugins/realclaudian).
 
-### From source (development)
+### From source (this fork)
 
-1. Clone this repository into your vault's plugins folder:
-   ```bash
-   cd /path/to/vault/.obsidian/plugins
-   git clone https://github.com/YishenTu/claudian.git
-   cd claudian
-   ```
-
-2. Install dependencies and build:
-   ```bash
-   npm install
-   npm run build
-   ```
-
-3. Enable the plugin in Obsidian:
-   - Settings → Community plugins → Enable "Claudian"
+Follow [Install this fork from source on a new computer](docs/copilot-provider.md#install-this-fork-from-source-on-a-new-computer) for [krukow/claudian](https://github.com/krukow/claudian) on `main`. Use Node.js 24.16.0 and `npm ci`, build outside the vault with auto-copy disabled, and copy only `main.js`, `manifest.json`, and `styles.css` into `<vault>/.obsidian/plugins/realclaudian`. The Copilot CLI is a separate user-installed prerequisite.
 
 ### Development
 
