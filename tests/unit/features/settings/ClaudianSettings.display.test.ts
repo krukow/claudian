@@ -262,7 +262,7 @@ function renderSettingsTab(
     throw new Error('Expected a declarative settings renderer');
   }
 
-  definition.render(
+  container.dispose = definition.render(
     { settingEl: container } as never,
     {} as never,
   );
@@ -530,5 +530,71 @@ describe('ClaudianSettingTab display settings', () => {
     expect(ensureInitialized).toHaveBeenCalledTimes(2);
     expect(ensureInitialized.mock.calls.map(([, providerId]) => providerId))
       .toEqual(['claude', 'codex']);
+  });
+
+  it('releases disposable provider views on tab switches, rebuild, and close', async () => {
+    jest.spyOn(ProviderRegistry, 'getRegisteredProviderIds').mockReturnValue(['claude', 'codex']);
+    jest.spyOn(ProviderRegistry, 'getProviderDisplayName').mockImplementation(id => id.toUpperCase());
+    jest.spyOn(ProviderRegistry, 'getTitleGenerationModelOptions').mockReturnValue([]);
+    jest.spyOn(ProviderWorkspaceRegistry, 'ensureInitialized').mockResolvedValue(undefined);
+    jest.spyOn(ProviderWorkspaceRegistry, 'prepareSettings').mockResolvedValue(undefined);
+    const leases = new Set<object>();
+    jest.spyOn(ProviderWorkspaceRegistry, 'getSettingsTabRenderer').mockReturnValue({
+      render() {
+        const lease = {};
+        leases.add(lease);
+        return () => { leases.delete(lease); };
+      },
+    });
+    const { tab } = createTab(true);
+    (tab as any).activeTab = 'providers';
+    const container = renderSettingsTab(tab);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(leases.size).toBe(1);
+    findContainer(container, 'CODEX')!.click();
+    expect(leases.size).toBe(0);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(leases.size).toBe(1);
+    findContainer(container, t('settings.tabs.general'))!.click();
+    expect(leases.size).toBe(0);
+    findContainer(container, t('settings.tabs.providers'))!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(leases.size).toBe(1);
+    const rebuilt = renderSettingsTab(tab);
+    expect(leases.size).toBe(0);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(leases.size).toBe(1);
+    container.dispose();
+    expect(leases.size).toBe(1);
+    rebuilt.dispose();
+    expect(leases.size).toBe(0);
+  });
+
+  it('does not acquire a provider view after navigating away during initialization', async () => {
+    jest.spyOn(ProviderRegistry, 'getRegisteredProviderIds').mockReturnValue(['claude']);
+    jest.spyOn(ProviderRegistry, 'getProviderDisplayName').mockReturnValue('CLAUDE');
+    jest.spyOn(ProviderRegistry, 'getTitleGenerationModelOptions').mockReturnValue([]);
+    let finish!: () => void;
+    jest.spyOn(ProviderWorkspaceRegistry, 'ensureInitialized').mockImplementation(
+      () => new Promise(resolve => { finish = resolve; }),
+    );
+    jest.spyOn(ProviderWorkspaceRegistry, 'prepareSettings').mockResolvedValue(undefined);
+    let acquired = false;
+    jest.spyOn(ProviderWorkspaceRegistry, 'getSettingsTabRenderer').mockReturnValue({
+      render() { acquired = true; return () => { acquired = false; }; },
+    });
+    const { tab } = createTab(true);
+    (tab as any).activeTab = 'providers';
+    const container = renderSettingsTab(tab);
+    findContainer(container, t('settings.tabs.general'))!.click();
+    finish();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(acquired).toBe(false);
+    container.dispose();
   });
 });
