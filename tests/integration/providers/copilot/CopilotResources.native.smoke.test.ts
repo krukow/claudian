@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -22,6 +22,12 @@ import { copilotSdkRuntime } from '@/providers/copilot/sdk/CopilotSdkRuntime';
 import { type LocalModelServer, startLocalModelServer } from './native-fixtures/LocalModelServer';
 
 let mockModelProvider: CopilotSdk.SessionConfig['provider'];
+let mockHomeDirectory = '/synthetic-copilot-home';
+
+jest.mock('node:os', () => ({
+  ...jest.requireActual<typeof os>('node:os'),
+  homedir: () => mockHomeDirectory,
+}));
 
 // Only the external model endpoint is replaced; SDK transport and native sessions stay real.
 jest.mock('@github/copilot-sdk', () => {
@@ -65,11 +71,12 @@ describeWithCli('Copilot native resource isolation', () => {
       throw new Error('The configured Copilot smoke CLI could not be resolved.');
     }
     nativeCliPath = cliPath;
-    root = mkdtempSync(path.join(os.tmpdir(), 'claudian-resource-smoke-'));
+    root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'claudian-resource-smoke-')));
     vault = path.join(root, 'vault');
     home = path.join(root, 'home');
     mkdirSync(vault);
     mkdirSync(home);
+    mockHomeDirectory = home;
   });
 
   async function startClient(): Promise<CopilotSdkClient> {
@@ -121,6 +128,7 @@ describeWithCli('Copilot native resource isolation', () => {
       rmSync(root, { recursive: true, force: true });
       root = '';
     }
+    mockHomeDirectory = '/synthetic-copilot-home';
   });
 
   it('starts only the selected server, not home or workspace MCP definitions', async () => {
@@ -348,6 +356,33 @@ describeWithCli('Copilot native resource isolation', () => {
     });
   });
 
+  it('requires an explicit opt-out before a duplicate repository skill can reach the native runtime', async () => {
+    mkdirSync(path.join(root, '.git'));
+    const first = writeSkillPackage(path.join(root, '.github', 'skills'), 'resource-duplicate');
+    const second = writeSkillPackage(path.join(vault, '.agents', 'skills'), 'duplicate-copy');
+    writeFileSync(first, '---\nname: resource-duplicate\ndescription: First synthetic definition.\n---\nFIRST_DEFINITION\n');
+    writeFileSync(second, '---\nname: resource-duplicate\ndescription: Second synthetic definition.\n---\nSECOND_DEFINITION\n');
+    const ambiguous = await resolveCopilotSelectedResources(normalizeCopilotResourceSettings({}), vault);
+    expect(ambiguous.resources).toBeNull();
+    expect(ambiguous.problems).toEqual([expect.stringContaining('resource-duplicate')]);
+    const started = await startClient();
+    for (const [disabled, expected] of [[second, 'FIRST_DEFINITION'], [first, 'SECOND_DEFINITION']]) {
+      const resolution = await resolveCopilotSelectedResources(normalizeCopilotResourceSettings({
+        disabledRepositorySkillPaths: [disabled],
+      }), vault);
+      expect(resolution.problems).toEqual([]);
+      if (!resolution.resources) throw new Error('The chosen repository skill was not resolved.');
+      const session = await started.createSession({
+        ...sessionConfig(vault), resources: resolution.resources,
+      });
+      const commands = await session.listSkillCommands();
+      const invocation = await session.invokeSkillCommand('resource-duplicate', 'synthetic');
+      await session.disconnect();
+      expect(commands.map(command => command.name)).toEqual(['resource-duplicate']);
+      expect(invocation).toMatchObject({ kind: 'prompt', prompt: expect.stringContaining(expected) });
+    }
+  });
+
   it('allows a selected tool without a prompt only when native allow-all was explicitly chosen', async () => {
     await useLocalModel('selected-write_note');
     const marker = path.join(root, 'allowed.started');
@@ -372,6 +407,59 @@ describeWithCli('Copilot native resource isolation', () => {
     expect(requested).toEqual([]);
     expect(readFileSync(marker, 'utf8')).toBe('started\nwrite_note\n');
   });
+
+  it.each(['resident-client', 'cold-client'] as const)(
+    'restores Ask on %s resume after native Allow all',
+    async resumeKind => {
+      const localModel = await useLocalModel('selected-write_note');
+      const marker = path.join(root, 'downgrade.started');
+      const requested: CopilotSdkPermissionRequest[] = [];
+      const config: CopilotSdkSessionConfig = {
+        ...sessionConfig(vault),
+        availableTools: ['builtin:view'],
+        model: 'gpt-4o',
+        onPermissionRequest: async request => {
+          requested.push(request);
+          return { kind: 'reject' };
+        },
+        resources: {
+          mcpServers: { selected: { ...fixtureServer(marker, vault), tools: ['write_note'] } },
+          skillDirectories: [],
+        },
+      };
+      const started = await startClient();
+      const allowed = await started.createSession({ ...config, permissionMode: 'allow-all' });
+
+      await allowed.send('Update the synthetic note with the selected tool.');
+
+      expect(requested).toEqual([]);
+      expect(readFileSync(marker, 'utf8')).toBe('started\nwrite_note\n');
+      await allowed.disconnect();
+      let resuming = started;
+      if (resumeKind === 'cold-client') {
+        await started.stop();
+        client = undefined;
+        resuming = await startClient();
+      }
+      const resumed = await resuming.resumeSession(allowed.sessionId, {
+        ...config,
+        permissionMode: 'ask',
+      });
+      const beforeDeniedAction = readFileSync(marker, 'utf8');
+      localModel.queueToolCall('selected-write_note');
+
+      await resumed.send('Update the synthetic note again with the selected tool.');
+
+      expect(resumed.sessionId).toBe(allowed.sessionId);
+      expect(resumed.resourceDiagnostics).toEqual([]);
+      expect(requested).toEqual([
+        expect.objectContaining({
+          kind: 'mcp', serverName: 'selected', toolName: 'selected-write_note',
+        }),
+      ]);
+      expect(readFileSync(marker, 'utf8')).toBe(beforeDeniedAction);
+    },
+  );
 
   it('keeps a native judge exclusion or failure on the human-approval path', async () => {
     await useLocalModel('selected-write_note');

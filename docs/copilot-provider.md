@@ -44,7 +44,7 @@ Leave **CLI path** empty for automatic discovery. Set an absolute path only when
 ## Using it
 
 - **Chat**: pick a Copilot model in the chat model selector and send a message. Text and reasoning stream as they arrive, tool calls appear as they start and finish, and usage is reported against the model's context window.
-- **Tools**: Copilot runs its own built-in tools inside your vault. Claudian narrows them to the ones it can render, and the background-agent and factory families are never available.
+- **Tools**: Copilot runs its own built-in tools with the vault as its working directory, not a filesystem sandbox. Claudian narrows them to the ones it can render, and the background-agent and factory families are never available.
 - **Approvals**: use the single **Tool approvals** dropdown to choose **Ask**, **LLM judge**, or **Allow all** under Copilot's permission settings. The choice applies to chat on this computer, not auxiliary or restricted turns. Requests without a live owning turn are refused.
 - **Questions**: when the CLI asks a question, Claudian shows it with the choices the CLI offered.
 - **Context**: the note a message was sent from, the editor selection, and any browser or canvas selection travel with the prompt. Directories you have added as external context are opened to the session alongside the vault.
@@ -77,7 +77,7 @@ Unsupported capabilities are not offered in Claudian's UI.
 ## Permission modes
 
 - **Ask** keeps the ordinary CLI approval prompts.
-- **Allow all** uses the CLI's native permission mode for tools, file paths, and URLs. It does not enable additional tools or MCP servers.
+- **Allow all** uses the CLI's native permission mode to let available tools run commands, read or change files including paths outside the vault, and access unrestricted network destinations and URLs without asking. It does not enable additional tools or MCP servers.
 - **LLM judge** uses the native CLI's assisted approval: an affirmative recommendation may approve a request, while uncertain, excluded, failed, or managed-human-approval requests still ask you. The native judge can make additional model requests and uses its own model selection.
 
 These preferences apply only to persistent Copilot chat with a provider-default or unrestricted tool policy on this computer. They do not change global Copilot CLI configuration or another computer's choice. Titles, inline edits, instruction refinement, and restricted tool policies always use Ask.
@@ -92,7 +92,7 @@ Copilot chat can use MCP servers and skills that already exist on this computer.
 
 1. Open Settings > Claudian > Providers > Copilot > **Resources**.
 2. Optionally add absolute paths under **Additional MCP configuration files** or **Additional skill folders**, for sources outside the standard locations.
-3. The list loads automatically. Use **All**, **MCP servers**, or **Skills**, together with the text search, to narrow the list by kind, name, source, or path. Discovery reads files; it does not connect to servers or start a model turn. **Refresh** reads the sources again.
+3. The list loads automatically. Use **All**, **MCP servers**, or **Skills**, together with the text search, to narrow the list by kind, name, source, or path. Discovery reads files; it does not connect to servers or start a model turn. Saved skills cannot be changed until discovery establishes their scope. **Refresh** reads the sources again.
 4. Turn on the servers and personal/custom skills you want. Repository skills are marked as enabled by default; uncheck one to disable it on this computer. Choices take effect on the next chat turn: the Copilot CLI is restarted when its effective resources change, and the conversation keeps its Copilot session.
 
 Bulk buttons name their scope: **Enable all skills / Disable all skills**, **Enable all MCP servers / Disable all MCP servers**, or **Enable all resources / Disable all resources**. While searching, they become **Enable search results / Disable search results**. They apply only to the current list and leave hidden choices unchanged. Bulk enable skips conflicting duplicate names so you can choose the intended source individually. Disabling repository skills records opt-outs; re-enabling removes them. Newly added repository skills follow the default-on policy, while newly discovered MCP servers and personal/custom skills remain off.
@@ -105,7 +105,7 @@ Changing only skills preserves completed MCP checks instead of reconnecting ever
 
 After editing a skill in place, click **Refresh** to reload its native command metadata and rebuild the chat runtime without changing your selections.
 
-Repository detection uses the nearest containing `.git` directory or worktree `.git` file, including when the vault is a subdirectory such as `repo/content`. Claudian does not scan the entire repository or inherit skills from a surrounding outer repository. The automatic defaults apply without visiting settings first. A vault outside a Git repository keeps its local skills opt-in.
+Repository detection follows filesystem links and uses the nearest containing `.git` directory or worktree `.git` file at the vault's physical location, including when the vault is a subdirectory such as `repo/content`. Skill selections and opt-outs identify the same package through directory aliases. Claudian does not scan the entire repository or inherit skills from a surrounding outer repository. The automatic defaults apply without visiting settings first. A vault outside a Git repository keeps its local skills opt-in. Personal skill roots remain opt-in even if the home directory is a Git repository or a repository source links to a personal root.
 
 ### MCP sign-in
 
@@ -124,7 +124,7 @@ Sign-in is unavailable while resource choices are being saved, and runtime-setti
 | Kind | Standard locations |
 | --- | --- |
 | MCP configuration | `~/.copilot/mcp-config.json`, `<vault>/.mcp.json`, `<vault>/.github/mcp.json` |
-| Personal skills | `~/.copilot/skills/`, `~/.agents/skills/` |
+| Personal skills | `~/.copilot/skills/`, `~/.agents/skills/`, `~/.claude/skills/` |
 | Vault skills | `<vault>/.github/skills/`, `<vault>/.agents/skills/`, `<vault>/.claude/skills/` |
 | Repository skills | `<repo>/.github/skills/`, `<repo>/.agents/skills/`, `<repo>/.claude/skills/` at the nearest containing Git root |
 
@@ -139,6 +139,8 @@ An MCP configuration file is the format the Copilot CLI uses: a JSON document wi
 **Limits worth knowing**
 
 - Selecting a server permits connecting to it, independently of tool permissions. A session with no tools receives none of the server's tools. The skill-command discovery session uses the same effective skills as chat, with no MCP servers, tools, or model turn. It starts no CLI when no skills are enabled.
+- Two enabled skill packages with the same command name are ambiguous, including repository defaults. Neither is loaded; disable competing sources under **Resources** to choose one. Chat reports the conflict, and command discovery reports an error rather than silently choosing whichever package the CLI lists first.
+- An opted-out skill does not block command discovery when its file becomes unreadable. Its inventory diagnostic remains visible. An actually enabled skill that cannot be read still produces a chat warning and a command-discovery error; fix its file before refreshing commands.
 - Outside isolated MCP connection checks and sign-in, resources reach chat only, and only while the turn's tools are not restricted. A read-only or otherwise narrowed turn, and every title, inline edit, and instruction-refinement run, starts no server and loads no skill.
 - Environment entries and headers are passed to the CLI exactly as your configuration file spells them. There is no variable substitution or credential lookup, so a server that needs a secret needs it written literally in the file it is declared in — keep such a file outside the vault and select it as an additional source.
 - URL-discovered OAuth is supported through **Sign in**. Inline `auth`, `oauth`, `oidc`, `clientId`, `clientSecret`, and `deferTools` configuration fields are not supported; Claudian reports them rather than silently dropping them.
@@ -167,6 +169,8 @@ Claudian depends on `@github/copilot-sdk`, which declares `@github/copilot` and 
 
 **Browser sign-in fails or times out** — retry **Connect Copilot**, complete GitHub's approval, and check that the system credential store is available. Browser sign-in has a five-minute deadline. Claudian does not enable plaintext credential storage as a fallback.
 
+**Checking browser sign-in support fails or times out** — no browser sign-in was attempted. Check the installed CLI version and configured path; the `login --help` capability check has a ten-second deadline. A failed check does not by itself mean the CLI version is unsupported.
+
 **No models after clicking Discover** — the CLI answered but the account offers none. Check that the signed-in account has an active Copilot subscription and that your organization's policy does not disable every model.
 
 **"Could not load the Copilot model catalog"** — the CLI could not be started or did not answer. Check the CLI path, run `copilot --version` in a terminal, and confirm sign-in.
@@ -185,7 +189,7 @@ Contributors can exercise the real SDK and installed CLI against synthetic skill
 CLAUDIAN_COPILOT_RESOURCE_SMOKE_CLI_PATH="/absolute/path/to/copilot" npm run check:copilot-resources -- --runInBand
 ```
 
-This opt-in smoke uses temporary state homes and no real account credentials or model endpoint. It covers resource isolation, automatic parent-repository skills with per-skill opt-outs and personal-skill exclusion, cold resume, MCP approval decisions, native allow-all, affirmative and failed native judge recommendations, and native skill expansion; it does not deploy the plugin or exercise the Obsidian UI.
+This opt-in smoke uses temporary state homes and no real account credentials or model endpoint. It covers resource isolation, automatic parent-repository skills with per-skill opt-outs and personal-skill exclusion, cold resume, MCP approval decisions, native allow-all, Allow all to Ask downgrades on resident and cold-client resumes, affirmative and failed native judge recommendations, and native skill expansion; it does not deploy the plugin or exercise the Obsidian UI.
 
 The separate native OAuth check uses a loopback authorization server, synthetic tokens, and a temporary native credential cache:
 

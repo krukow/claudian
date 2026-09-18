@@ -15,10 +15,12 @@ import {
   type CopilotDiscoveredMcpServer,
   type CopilotResourceInventory,
   discoverCopilotResources,
+  findCopilotDuplicateNames,
 } from '../resources/CopilotResourceInventory';
 import {
   type CopilotMcpServerReference,
   type CopilotResourceSettings,
+  copilotSkillPathKey,
   getEnabledCopilotSkillPaths,
 } from '../resources/CopilotResourceSettings';
 import { updateCopilotProviderSettings } from '../settings';
@@ -213,16 +215,12 @@ export function renderCopilotResourceSettings(
 
   const setAll = async (enabled: boolean): Promise<void> => {
     const rows = buildRows(getCopilotHostResources(settingsBag), inventory, persist);
-    const nameCounts = new Map<string, number>();
-    for (const row of rows) {
-      const name = row.label.toLowerCase();
-      nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
-    }
+    const duplicateNames = findCopilotDuplicateNames(rows.map(row => row.label.toLowerCase()));
     let skipped = 0;
     const targets = rows.filter(row => {
       if (!matchesFilter(row, filter, kindFilter)) return false;
       if (enabled && row.missing) return false;
-      if (enabled && !row.selected && (nameCounts.get(row.label.toLowerCase()) ?? 0) > 1) {
+      if (enabled && !row.selected && duplicateNames.has(row.label.toLowerCase())) {
         skipped += 1;
         return false;
       }
@@ -235,28 +233,34 @@ export function renderCopilotResourceSettings(
       const servers = new Map(current.selectedMcpServers.map(ref => [
         serverId(ref.configPath, ref.name), ref,
       ]));
-      const skills = new Set(current.selectedSkillPaths);
-      const disabledRepositorySkills = new Set(current.disabledRepositorySkillPaths);
+      const skills = new Map(current.selectedSkillPaths.map(skillPath => [
+        copilotSkillPathKey(skillPath), skillPath,
+      ]));
+      const disabledRepositorySkills = new Map(current.disabledRepositorySkillPaths?.map(skillPath => [
+        copilotSkillPathKey(skillPath), skillPath,
+      ]));
       for (const { reference } of targets) {
         if (reference.kind === 'mcp') {
           const ref = reference.server;
           const id = serverId(ref.configPath, ref.name);
           if (enabled) servers.set(id, ref);
           else servers.delete(id);
-        } else if (reference.repository) {
-          skills.delete(reference.path);
-          if (enabled) disabledRepositorySkills.delete(reference.path);
-          else disabledRepositorySkills.add(reference.path);
-        } else if (enabled) {
-          skills.add(reference.path);
         } else {
-          skills.delete(reference.path);
+          const key = copilotSkillPathKey(reference.path);
+          if (enabled) {
+            disabledRepositorySkills.delete(key);
+            if (reference.repository) skills.delete(key);
+            else skills.set(key, reference.path);
+          } else {
+            skills.delete(key);
+            if (reference.repository) disabledRepositorySkills.set(key, reference.path);
+          }
         }
       }
       return {
         selectedMcpServers: [...servers.values()],
-        selectedSkillPaths: [...skills],
-        disabledRepositorySkillPaths: [...disabledRepositorySkills],
+        selectedSkillPaths: [...skills.values()],
+        disabledRepositorySkillPaths: [...disabledRepositorySkills.values()],
       };
     });
   };
@@ -299,7 +303,7 @@ export function renderCopilotResourceSettings(
     remember.disabled = saving > 0;
     discoverButton.disabled = discovering || saving > 0;
     enableAllButton.disabled = discovering || saving > 0 || inventory === null;
-    disableAllButton.disabled = discovering || saving > 0 || renderedRows.size === 0;
+    disableAllButton.disabled = discovering || saving > 0 || inventory === null || renderedRows.size === 0;
     const scope = filter
       ? 'search results'
       : kindFilter === 'skill'
@@ -366,6 +370,7 @@ export function renderCopilotResourceSettings(
       }
       rendered.row = row;
       rendered.checkbox.checked = row.selected;
+      rendered.checkbox.disabled = row.reference.kind === 'skill' && inventory === null;
       if (rendered.name.textContent !== row.label) rendered.name.setText(row.label);
       const detail = row.missing ? `${row.detail} — not found on this computer` : row.detail;
       if (rendered.detail.textContent !== detail) rendered.detail.setText(detail);
@@ -508,7 +513,7 @@ function renderRow(
 function resourceRowId(row: ResourceRow): string {
   return row.reference.kind === 'mcp'
     ? `mcp:${serverId(row.reference.server.configPath, row.reference.server.name)}`
-    : `skill:${row.reference.path}`;
+    : `skill:${copilotSkillPathKey(row.reference.path)}`;
 }
 
 /**
@@ -543,14 +548,14 @@ function buildRows(
   };
   const toggleSkill = async (skillPath: string, next: boolean, repository = false): Promise<void> => {
     await persist((current) => {
-      const remaining = current.selectedSkillPaths.filter(entry => entry !== skillPath);
-      if (repository) {
-        const disabled = new Set(current.disabledRepositorySkillPaths);
-        if (next) disabled.delete(skillPath);
-        else disabled.add(skillPath);
-        return { selectedSkillPaths: remaining, disabledRepositorySkillPaths: [...disabled] };
-      }
-      return { selectedSkillPaths: next ? [...remaining, skillPath] : remaining };
+      const key = copilotSkillPathKey(skillPath);
+      const remaining = current.selectedSkillPaths.filter(entry => copilotSkillPathKey(entry) !== key);
+      const disabled = (current.disabledRepositorySkillPaths ?? [])
+        .filter(entry => copilotSkillPathKey(entry) !== key);
+      return {
+        selectedSkillPaths: next && !repository ? [...remaining, skillPath] : remaining,
+        disabledRepositorySkillPaths: !next && repository ? [...disabled, skillPath] : disabled,
+      };
     });
   };
 
@@ -586,7 +591,7 @@ function buildRows(
   }
 
   for (const skill of inventory?.skills ?? []) {
-    const selected = selectedSkills.delete(skill.path);
+    const selected = selectedSkills.delete(copilotSkillPathKey(skill.path));
     const source = skill.scope === 'repository'
       ? 'repository skill (enabled by default)'
       : `${skill.scope} skill`;
@@ -602,10 +607,7 @@ function buildRows(
       toggle: next => toggleSkill(skill.path, next, skill.scope === 'repository'),
     });
   }
-  for (const skillPath of selection.selectedSkillPaths) {
-    if (!selectedSkills.has(skillPath)) {
-      continue;
-    }
+  for (const skillPath of selectedSkills) {
     rows.push({
       detail: inventory ? skillPath : `${skillPath} | not checked yet`,
       label: `Skill: ${skillPath.split(/[\\/]/).at(-2) ?? skillPath}`,

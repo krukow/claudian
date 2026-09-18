@@ -106,6 +106,14 @@ describe('Copilot permission settings', () => {
     expect((await checkAccessibility(container)).violations).toEqual([]);
   });
 
+  it('makes the scope of Allow all explicit before selection', () => {
+    render();
+    const consent = screen.getByText(/Allow all permits available tools/);
+
+    expect(consent.textContent).toContain('paths outside the vault');
+    expect(consent.textContent).toContain('unrestricted network destinations and URLs');
+  });
+
   it.each<CopilotPermissionMode>(['ask', 'allow-all', 'judge'])(
     'saves %s for this computer through the runtime transition',
     async (mode) => {

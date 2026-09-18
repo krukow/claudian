@@ -328,7 +328,9 @@ them as pending here.
   them may reach settings, a command fingerprint, or an error message: the session
   identity names them by digest for that reason.
 - Effective skills are explicit selections plus standard skill packages at the nearest containing Git root and vault-local packages inside that repository, minus per-skill opt-outs. `getEnabledCopilotSkillPaths` owns that merge. Both chat resolution and the isolated command probe must pass the vault directory to the resolver; auth and auxiliary sessions must not inherit defaults. Command availability and warmup must not use `selectedSkillPaths.length` as a gate, because repository defaults are not persisted selections.
-- Inventory discovery is filesystem-only and must not mutate settings or start a runtime. Keep saved references unverified until discovery finishes. Type and text filters jointly scope bulk actions; preserve hidden choices and skip ambiguous sources when enabling. Keep resource rows keyed and update their labels and descriptions only when text changes.
+- Resolve the vault's physical directory before walking for a Git root; compare skill selections and opt-outs by canonical package directory, without rewriting stored references. Personal skill roots retain opt-in ownership when they alias repository sources or the home directory is a Git root.
+- Exclude opted-out packages before resolution reads their metadata; keep inventory diagnostics visible and do not suppress failures of enabled packages. Refuse all effective same-name skill candidates rather than relying on native listing order; use the shared package reader and duplicate-name rule across inventory and resolution.
+- Inventory discovery is filesystem-only and must not mutate settings or start a runtime. Keep saved references unverified and skill changes disabled until discovery finishes. Type and text filters jointly scope bulk actions; preserve hidden choices and skip ambiguous sources when enabling. Keep resource rows keyed and update their labels and descriptions only when text changes.
 - Resources are deliberately outside `computeCopilotEnvironmentHash`. Including them would
   clear the discovered model catalog and the conversation's native session on every
   toggle, neither of which a selection invalidates.
@@ -446,6 +448,7 @@ them as pending here.
 
 ## Model and Settings Rules
 
+- Connection confirmation persists catalog, enablement, and model choices through `ProviderHost.mutateSettings`, then commits the future-chat seed through the app-owned `chatModelSelection` port. These writes do not change runtime inputs and must not quiesce existing execution leases. CLI and environment edits retain the runtime-settings transition boundary.
 - `COPILOT_REASONING_EFFORTS` mirrors the SDK's `ReasoningEffort` union exactly. Persisted
   and discovered efforts are validated against it so an unknown value never reaches
   `setModel`.
