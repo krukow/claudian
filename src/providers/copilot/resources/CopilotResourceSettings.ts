@@ -1,3 +1,7 @@
+import * as path from 'node:path';
+
+import { canonicalizeCopilotHostPath } from '../runtime/CopilotCanonicalPath';
+
 export interface CopilotMcpServerReference {
   readonly configPath: string;
   readonly name: string;
@@ -46,13 +50,19 @@ export function getEnabledCopilotSkillPaths(
   selection: CopilotResourceSettings,
   repositorySkillPaths: readonly string[],
 ): string[] {
-  const selected = new Set(selection.selectedSkillPaths);
-  const disabled = new Set(selection.disabledRepositorySkillPaths);
+  const selected = new Set(selection.selectedSkillPaths.map(copilotSkillPathKey));
   for (const skillPath of repositorySkillPaths) {
-    if (disabled.has(skillPath)) selected.delete(skillPath);
-    else selected.add(skillPath);
+    selected.add(copilotSkillPathKey(skillPath));
+  }
+  for (const skillPath of selection.disabledRepositorySkillPaths ?? []) {
+    selected.delete(copilotSkillPathKey(skillPath));
   }
   return [...selected];
+}
+
+export function copilotSkillPathKey(skillPath: string): string {
+  const directory = canonicalizeCopilotHostPath(path.dirname(skillPath), process.platform);
+  return directory === null ? skillPath : path.join(directory, path.basename(skillPath));
 }
 
 function normalizeMcpReferences(value: unknown): CopilotMcpServerReference[] {

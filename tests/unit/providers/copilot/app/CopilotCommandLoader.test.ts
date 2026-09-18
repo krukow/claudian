@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -8,6 +8,8 @@ import type { ProviderCommandLoaderContext } from '@/core/providers/types';
 import { CopilotCommandLoader } from '@/providers/copilot/app/CopilotCommandLoader';
 import { CopilotCommandMetadataProbe } from '@/providers/copilot/app/CopilotCommandMetadataProbe';
 import { createCopilotWorkspaceServices } from '@/providers/copilot/app/CopilotWorkspaceServices';
+import { updateCopilotHostResources } from '@/providers/copilot/resources/CopilotHostResources';
+import { discoverCopilotResources } from '@/providers/copilot/resources/CopilotResourceInventory';
 import { updateCopilotProviderSettings } from '@/providers/copilot/settings';
 import { getHostnameKey } from '@/utils/env';
 
@@ -21,8 +23,13 @@ const VAULT_PATH = '/vault';
 
 let skillRoot = '';
 
+jest.mock('node:os', () => ({
+  ...jest.requireActual<typeof os>('node:os'),
+  homedir: () => path.join(skillRoot, 'home'),
+}));
+
 beforeEach(async () => {
-  skillRoot = await mkdtemp(path.join(os.tmpdir(), 'copilot-command-loader-'));
+  skillRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), 'copilot-command-loader-')));
 });
 
 afterEach(async () => {
@@ -232,6 +239,98 @@ describe('CopilotCommandLoader', () => {
 
     expect(result.status).toBe('error');
     expect(runtime.clients).toEqual([]);
+  });
+
+  it.each([false, true])('ignores an opted-out unreadable repository package without hiding its inventory diagnostic (explicit: %s)', async (explicit) => {
+    const vault = path.join(skillRoot, 'content');
+    const broken = path.join(skillRoot, '.github', 'skills', 'disabled', 'SKILL.md');
+    await mkdir(vault);
+    await mkdir(path.join(skillRoot, '.git'));
+    await mkdir(broken, { recursive: true });
+    const healthy = await writeSkill('healthy');
+    const host = createHost(explicit ? [healthy, broken] : [healthy], vault);
+    updateCopilotProviderSettings(host.settings, {
+      resourcesByHost: updateCopilotHostResources(host.settings, {
+        disabledRepositorySkillPaths: [broken],
+      }),
+    });
+    const client = new FakeCopilotSdkClient({
+      onSessionCreated: session => { session.skillCommands = [{ name: 'healthy' }]; },
+    });
+    const loader = new CopilotCommandLoader(new CopilotCommandMetadataProbe(host, {
+      runtime: new FakeCopilotSdkRuntime(() => client),
+    }));
+
+    const result = await loader.loadCommands(loaderContext());
+    const inventory = await discoverCopilotResources({
+      homeDirectory: path.join(skillRoot, 'home'), vaultDirectory: vault,
+      additionalMcpConfigPaths: [], additionalSkillRoots: [path.dirname(healthy)],
+    });
+
+    expect(result).toEqual({
+      status: 'ready',
+      items: [{
+        content: '', id: 'copilot-skill-healthy', kind: 'skill', name: 'healthy',
+        source: 'sdk', userInvocable: true,
+      }],
+    });
+    expect(client.lastSession?.config.resources).toEqual({
+      mcpServers: {}, skillDirectories: [path.dirname(healthy)],
+    });
+    expect(inventory.problems).toEqual([expect.stringContaining(broken)]);
+  });
+
+  it('keeps enabled repository read failures actionable instead of reporting ready command metadata', async () => {
+    const vault = path.join(skillRoot, 'content');
+    const broken = path.join(skillRoot, '.github', 'skills', 'enabled', 'SKILL.md');
+    await mkdir(vault);
+    await mkdir(path.join(skillRoot, '.git'));
+    await mkdir(broken, { recursive: true });
+    const runtime = new FakeCopilotSdkRuntime();
+    const loader = new CopilotCommandLoader(new CopilotCommandMetadataProbe(
+      createHost([await writeSkill('healthy')], vault), { runtime },
+    ));
+
+    const result = await loader.loadCommands(loaderContext());
+
+    expect(result.status).toBe('error');
+    expect(runtime.clients).toEqual([]);
+  });
+
+  it('reports conflicting repository commands until a competing package is opted out', async () => {
+    const vault = path.join(skillRoot, 'content');
+    const first = path.join(skillRoot, '.github', 'skills', 'first', 'SKILL.md');
+    const second = path.join(vault, '.agents', 'skills', 'second', 'SKILL.md');
+    await mkdir(path.join(skillRoot, '.git'));
+    for (const skillPath of [first, second]) {
+      await mkdir(path.dirname(skillPath), { recursive: true });
+      await writeFile(skillPath, '---\nname: repo-review\n---\nReview notes.\n');
+    }
+    const host = createHost([], vault);
+    const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
+      onSessionCreated: session => { session.skillCommands = [{ name: 'repo-review' }]; },
+    }));
+    const loader = new CopilotCommandLoader(new CopilotCommandMetadataProbe(host, { runtime }));
+
+    expect((await loader.loadCommands(loaderContext())).status).toBe('error');
+    expect(runtime.clients).toEqual([]);
+    updateCopilotProviderSettings(host.settings, {
+      resourcesByHost: updateCopilotHostResources(host.settings, {
+        disabledRepositorySkillPaths: [second],
+      }),
+    });
+    const resolved = await loader.loadCommands(loaderContext());
+
+    expect(resolved).toEqual({
+      status: 'ready',
+      items: [{
+        content: '', id: 'copilot-skill-repo-review', kind: 'skill', name: 'repo-review',
+        source: 'sdk', userInvocable: true,
+      }],
+    });
+    expect(runtime.lastClient?.lastSession?.config.resources).toEqual({
+      mcpServers: {}, skillDirectories: [path.dirname(first)],
+    });
   });
 
   it('starts no runtime when nothing is selected', async () => {

@@ -83,7 +83,7 @@ Copilot chat can use MCP servers and skills that already exist on this computer.
 
 1. Open Settings > Claudian > Providers > Copilot > **Resources**.
 2. Optionally add absolute paths under **Additional MCP configuration files** or **Additional skill folders**, for sources outside the standard locations.
-3. The list loads automatically. Use **All**, **MCP servers**, or **Skills**, together with the text search, to narrow the list by kind, name, source, or path. Discovery reads files; it does not connect to servers or start a model turn. **Refresh** reads the sources again.
+3. The list loads automatically. Use **All**, **MCP servers**, or **Skills**, together with the text search, to narrow the list by kind, name, source, or path. Discovery reads files; it does not connect to servers or start a model turn. Saved skills cannot be changed until discovery establishes their scope. **Refresh** reads the sources again.
 4. Turn on the servers and personal/custom skills you want. Repository skills are marked as enabled by default; uncheck one to disable it on this computer. Choices take effect on the next chat turn: the Copilot CLI is restarted when its effective resources change, and the conversation keeps its Copilot session.
 
 Bulk buttons name their scope: **Enable all skills / Disable all skills**, **Enable all MCP servers / Disable all MCP servers**, or **Enable all resources / Disable all resources**. While searching, they become **Enable search results / Disable search results**. They apply only to the current list and leave hidden choices unchanged. Bulk enable skips conflicting duplicate names so you can choose the intended source individually. Disabling repository skills records opt-outs; re-enabling removes them. Newly added repository skills follow the default-on policy, while newly discovered MCP servers and personal/custom skills remain off.
@@ -94,7 +94,7 @@ Each MCP row separately shows **Not checked**, **Queued**, **Checking...**, **Co
 
 After editing a skill in place, click **Refresh** to reload its native command metadata and rebuild the chat runtime without changing your selections.
 
-Repository detection uses the nearest containing `.git` directory or worktree `.git` file, including when the vault is a subdirectory such as `repo/content`. Claudian does not scan the entire repository or inherit skills from a surrounding outer repository. The automatic defaults apply without visiting settings first. A vault outside a Git repository keeps its local skills opt-in.
+Repository detection follows filesystem links and uses the nearest containing `.git` directory or worktree `.git` file at the vault's physical location, including when the vault is a subdirectory such as `repo/content`. Skill selections and opt-outs identify the same package through directory aliases. Claudian does not scan the entire repository or inherit skills from a surrounding outer repository. The automatic defaults apply without visiting settings first. A vault outside a Git repository keeps its local skills opt-in. Personal skill roots remain opt-in even if the home directory is a Git repository or a repository source links to a personal root.
 
 ### MCP sign-in
 
@@ -119,7 +119,7 @@ These are chat preferences, not changes to the global Copilot CLI configuration.
 | Kind | Standard locations |
 | --- | --- |
 | MCP configuration | `~/.copilot/mcp-config.json`, `<vault>/.mcp.json`, `<vault>/.github/mcp.json` |
-| Personal skills | `~/.copilot/skills/`, `~/.agents/skills/` |
+| Personal skills | `~/.copilot/skills/`, `~/.agents/skills/`, `~/.claude/skills/` |
 | Vault skills | `<vault>/.github/skills/`, `<vault>/.agents/skills/`, `<vault>/.claude/skills/` |
 | Repository skills | `<repo>/.github/skills/`, `<repo>/.agents/skills/`, `<repo>/.claude/skills/` at the nearest containing Git root |
 
@@ -133,7 +133,9 @@ An MCP configuration file is the format the Copilot CLI uses: a JSON document wi
 
 **Limits worth knowing**
 
-- Selecting a server permits connecting to it, independently of tool permissions. A session with no tools receives none of the server's tools. The skill-command discovery session loads only selected skills and does not connect to selected MCP servers.
+- Selecting a server permits connecting to it, independently of tool permissions. A session with no tools receives none of the server's tools. The skill-command discovery session uses the same effective skills as chat, with no MCP servers, tools, or model turn. It starts no CLI when no skills are enabled.
+- Two enabled skill packages with the same command name are ambiguous, including repository defaults. Neither is loaded; disable competing sources under **Resources** to choose one. Chat reports the conflict, and command discovery reports an error rather than silently choosing whichever package the CLI lists first.
+- An opted-out skill does not block command discovery when its file becomes unreadable. Its inventory diagnostic remains visible. An actually enabled skill that cannot be read still produces a chat warning and a command-discovery error; fix its file before refreshing commands.
 - Outside isolated MCP connection checks and sign-in, resources reach chat only, and only while the turn's tools are not restricted. A read-only or otherwise narrowed turn, and every title, inline edit, and instruction-refinement run, starts no server and loads no skill.
 - Environment entries and headers are passed to the CLI exactly as your configuration file spells them. There is no variable substitution or credential lookup, so a server that needs a secret needs it written literally in the file it is declared in — keep such a file outside the vault and select it as an additional source.
 - URL-discovered OAuth is supported through **Sign in**. Inline `auth`, `oauth`, `oidc`, `clientId`, `clientSecret`, and `deferTools` configuration fields are not supported; Claudian reports them rather than silently dropping them.
