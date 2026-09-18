@@ -44,7 +44,7 @@ Leave **CLI path** empty for automatic discovery. Set an absolute path only when
 ## Using it
 
 - **Chat**: pick a Copilot model in the chat model selector and send a message. Text and reasoning stream as they arrive, tool calls appear as they start and finish, and usage is reported against the model's context window.
-- **Tools**: Copilot runs its own built-in tools inside your vault. Claudian narrows them to the ones it can render, and the background-agent and factory families are never available.
+- **Tools**: Copilot runs its own built-in tools with the vault as its working directory, not a filesystem sandbox. Claudian narrows them to the ones it can render, and the background-agent and factory families are never available.
 - **Approvals**: use the single **Tool approvals** dropdown to choose **Ask**, **LLM judge**, or **Allow all** under Copilot's permission settings. The choice applies to chat on this computer, not auxiliary or restricted turns. Requests without a live owning turn are refused.
 - **Questions**: when the CLI asks a question, Claudian shows it with the choices the CLI offered.
 - **Context**: the note a message was sent from, the editor selection, and any browser or canvas selection travel with the prompt. Directories you have added as external context are opened to the session alongside the vault.
@@ -77,7 +77,7 @@ Unsupported capabilities are not offered in Claudian's UI.
 ## Permission modes
 
 - **Ask** keeps the ordinary CLI approval prompts.
-- **Allow all** uses the CLI's native permission mode for tools, file paths, and URLs. It does not enable additional tools or MCP servers.
+- **Allow all** uses the CLI's native permission mode to let available tools run commands, read or change files including paths outside the vault, and access unrestricted network destinations and URLs without asking. It does not enable additional tools or MCP servers.
 - **LLM judge** uses the native CLI's assisted approval: an affirmative recommendation may approve a request, while uncertain, excluded, failed, or managed-human-approval requests still ask you. The native judge can make additional model requests and uses its own model selection.
 
 These preferences apply only to persistent Copilot chat with a provider-default or unrestricted tool policy on this computer. They do not change global Copilot CLI configuration or another computer's choice. Titles, inline edits, instruction refinement, and restricted tool policies always use Ask.
@@ -161,4 +161,4 @@ Contributors can exercise the real SDK and installed CLI against synthetic skill
 CLAUDIAN_COPILOT_RESOURCE_SMOKE_CLI_PATH="/absolute/path/to/copilot" npm run check:copilot-resources -- --runInBand
 ```
 
-This opt-in smoke uses temporary state homes and no real account credentials or model endpoint. It covers resource isolation, cold resume, MCP approval decisions, native allow-all, affirmative and failed native judge recommendations, and native skill expansion; it does not deploy the plugin or exercise the Obsidian UI.
+This opt-in smoke uses temporary state homes and no real account credentials or model endpoint. It covers resource isolation, cold resume, MCP approval decisions, native allow-all, Allow all to Ask downgrades on resident and cold-client resumes, affirmative and failed native judge recommendations, and native skill expansion; it does not deploy the plugin or exercise the Obsidian UI.
