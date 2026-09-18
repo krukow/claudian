@@ -15,8 +15,9 @@ export function renderCopilotPermissionSettings(
   const setting = new Setting(container)
     .setName('Tool approvals')
     .setDesc('Applies only to persistent Copilot chat on this computer. Allow all permits '
-      + 'available tools to run commands, change files, and access the network without '
-      + 'asking. LLM judge uses the native CLI safety model for approval checks, which '
+      + 'available tools to run commands, read or change files (including paths outside the '
+      + 'vault), and access unrestricted network destinations and URLs without asking. '
+      + 'LLM judge uses the native CLI safety model for approval checks, which '
       + 'can make additional model requests; uncertain or failed checks ask you. Managed '
       + 'approvals always ask. Auxiliary and restricted turns always use Ask. MCP sign-in '
       + 'is separate.');

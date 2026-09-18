@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 export interface LocalModelServer {
   readonly baseUrl: string;
   readonly completionRequests: readonly string[];
+  queueToolCall(name: string): void;
   close(): Promise<void>;
 }
 
@@ -11,6 +12,7 @@ export async function startLocalModelServer(
   judgeReply = 'Synthetic invalid judge recommendation.',
 ): Promise<LocalModelServer> {
   const completionRequests: string[] = [];
+  const toolCalls = toolCallName === undefined ? [] : [toolCallName];
   const server = createServer((request, response) => {
     let body = '';
     request.setEncoding('utf8');
@@ -40,7 +42,8 @@ export async function startLocalModelServer(
           model: 'gpt-4o',
           object: 'chat.completion.chunk',
         };
-        const invokeTool = toolCallName !== undefined && completionRequests.length === 1;
+        const nextToolCall = toolCalls.shift();
+        const invokeTool = nextToolCall !== undefined;
         response.write(`data: ${JSON.stringify({
           ...chunk,
           choices: [{
@@ -48,8 +51,8 @@ export async function startLocalModelServer(
               ? {
                 role: 'assistant',
                 tool_calls: [{
-                  function: { arguments: '{}', name: toolCallName },
-                  id: 'fixture-tool-call',
+                  function: { arguments: '{}', name: nextToolCall },
+                  id: `fixture-tool-call-${completionRequests.length}`,
                   index: 0,
                   type: 'function',
                 }],
@@ -89,6 +92,9 @@ export async function startLocalModelServer(
   return {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     completionRequests,
+    queueToolCall(name) {
+      toolCalls.push(name);
+    },
     close() {
       const closing = new Promise<void>((resolve, reject) => {
         server.close(error => error ? reject(error) : resolve());
