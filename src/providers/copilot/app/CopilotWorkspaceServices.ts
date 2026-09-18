@@ -10,25 +10,27 @@ import type {
 import { CopilotCommandCatalog } from '../commands/CopilotCommandCatalog';
 import { computeCopilotEnvironmentHash } from '../env/CopilotSettingsReconciler';
 import { sameCopilotDiscoveredModels } from '../models';
-import { getCopilotHostResources } from '../resources/CopilotHostResources';
+import { CopilotBrowserLogin } from '../runtime/CopilotBrowserLogin';
 import { CopilotCliResolver } from '../runtime/CopilotCliResolver';
 import { CopilotModelDiscoveryService } from '../runtime/CopilotModelDiscoveryService';
 import { getCopilotProviderSettings, updateCopilotProviderSettings } from '../settings';
 import { copilotSettingsTabRenderer } from '../ui/CopilotSettingsTab';
 import { CopilotCommandLoader } from './CopilotCommandLoader';
 import { CopilotCommandMetadataProbe } from './CopilotCommandMetadataProbe';
+import { CopilotConnectionCoordinator } from './CopilotConnectionCoordinator';
+import { CopilotMcpReadinessCoordinator } from './CopilotMcpReadinessCoordinator';
+import { CopilotMcpSignInCoordinator } from './CopilotMcpSignInCoordinator';
 
 const COPILOT_PROVIDER_ID = 'copilot' as const;
 
 /**
- * Listing skill commands costs a CLI start, so a tab only warms one when there is
- * something to list: the provider is on and this computer selected at least one skill.
+ * Repository skills are discovered before the metadata probe starts a CLI, so an
+ * enabled provider checks for commands even without an explicit personal selection.
  */
 const copilotTabWarmupPolicy: ProviderTabWarmupPolicy = {
   resolveMode(context) {
     const settings = context.plugin.settings as unknown as Record<string, unknown>;
     return getCopilotProviderSettings(settings).enabled
-      && getCopilotHostResources(settings).selectedSkillPaths.length > 0
       ? 'commands'
       : 'none';
   },
@@ -38,6 +40,9 @@ export interface CopilotWorkspaceServices extends ProviderWorkspaceServices {
   cliResolver: CopilotCliResolver;
   commandCatalog: ProviderCommandCatalog;
   commandLoader: CopilotCommandLoader;
+  connection: CopilotConnectionCoordinator;
+  mcpSignIn: CopilotMcpSignInCoordinator;
+  mcpReadiness: CopilotMcpReadinessCoordinator;
   refreshModelCatalog(): Promise<ProviderModelCatalogRefreshResult>;
 }
 
@@ -55,13 +60,32 @@ export function createCopilotWorkspaceServices(
     ?? new CopilotModelDiscoveryService(plugin);
   const commandMetadataProbe = options.commandMetadataProbe
     ?? new CopilotCommandMetadataProbe(plugin);
+  const connection = new CopilotConnectionCoordinator(plugin, { login: new CopilotBrowserLogin() });
+  const mcpSignIn = new CopilotMcpSignInCoordinator(plugin);
+  const mcpReadiness = new CopilotMcpReadinessCoordinator(plugin);
   let latestRefresh = 0;
 
   return {
     cliResolver,
     commandCatalog: new CopilotCommandCatalog(),
     commandLoader: new CopilotCommandLoader(commandMetadataProbe),
-    dispose: () => commandMetadataProbe.dispose(),
+    connection,
+    mcpSignIn,
+    mcpReadiness,
+    async dispose() {
+      const results = await Promise.allSettled([
+        commandMetadataProbe.dispose(), connection.dispose(), mcpSignIn.dispose(), mcpReadiness.dispose(),
+      ]);
+      const failures: unknown[] = [];
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          failures.push(result.reason);
+        }
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(failures, 'Could not dispose Copilot workspace services.');
+      }
+    },
     settingsTabRenderer: copilotSettingsTabRenderer,
     tabWarmupPolicy: copilotTabWarmupPolicy,
 

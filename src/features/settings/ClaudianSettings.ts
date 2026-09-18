@@ -146,6 +146,7 @@ export class ClaudianSettingTab extends PluginSettingTab {
   private activeProviderTab: ProviderId | null = null;
   private refreshTitleModelOptions: (() => void) | null = null;
   private renderGeneration = 0;
+  private disposeRender: (() => void) | null = null;
   private readonly agentSkillCoordinator: AgentSkillManagementCoordinator;
 
   constructor(app: App, plugin: FeatureHost & Plugin) {
@@ -166,6 +167,7 @@ export class ClaudianSettingTab extends PluginSettingTab {
   }
 
   private renderSettings(containerEl: HTMLElement): () => void {
+    this.disposeRender?.();
     const renderGeneration = ++this.renderGeneration;
     this.agentSkillCoordinator.resetSubscriptions();
     containerEl.empty();
@@ -199,13 +201,30 @@ export class ClaudianSettingTab extends PluginSettingTab {
     const providerButtons = new Map<ProviderId, HTMLButtonElement>();
     const providerContents = new Map<ProviderId, HTMLDivElement>();
     const renderedProviderIds = new Set<ProviderId>();
+    const pendingProviderRenders = new Map<ProviderId, symbol>();
+    const providerDisposers = new Map<ProviderId, () => void>();
     let activateCollabTab: (() => void) | null = null;
+
+    const releaseProvider = (providerId: ProviderId): void => {
+      const pending = pendingProviderRenders.delete(providerId);
+      const dispose = providerDisposers.get(providerId);
+      providerDisposers.delete(providerId);
+      if (pending || dispose) {
+        renderedProviderIds.delete(providerId);
+        dispose?.();
+        providerContents.get(providerId)?.empty();
+      }
+    };
 
     const renderProviderTab = async (providerId: ProviderId): Promise<void> => {
       if (renderedProviderIds.has(providerId)) return;
       const providerContent = providerContents.get(providerId);
       if (!providerContent) return;
       renderedProviderIds.add(providerId);
+      const ticket = Symbol();
+      pendingProviderRenders.set(providerId, ticket);
+      const current = () => renderGeneration === this.renderGeneration
+        && pendingProviderRenders.get(providerId) === ticket;
       providerContent.empty();
       providerContent.createDiv({
         cls: 'claudian-settings-provider-loading',
@@ -218,15 +237,16 @@ export class ClaudianSettingTab extends PluginSettingTab {
           providerId,
           'settings-tab',
         );
+        if (!current()) return;
         await ProviderWorkspaceRegistry.prepareSettings(providerId);
-        if (renderGeneration !== this.renderGeneration) return;
+        if (!current()) return;
         providerContent.empty();
         const renderer = ProviderWorkspaceRegistry.getSettingsTabRenderer(providerId);
         if (!renderer) {
           providerContent.createDiv({ text: 'Provider settings are unavailable.' });
           return;
         }
-        renderer.render(providerContent, {
+        const dispose = renderer.render(providerContent, {
           plugin: this.plugin.providerHost,
           renderAgentSkillSettings: (target, _targetProviderId) => {
             new AgentSkillSettings(target, this.agentSkillCoordinator, this.app);
@@ -243,8 +263,9 @@ export class ClaudianSettingTab extends PluginSettingTab {
             this.renderCustomContextLimits(target, targetProviderId)
           ),
         });
+        if (dispose) providerDisposers.set(providerId, dispose);
       } catch (error) {
-        if (renderGeneration !== this.renderGeneration) return;
+        if (!current()) return;
         renderedProviderIds.delete(providerId);
         providerContent.empty();
         const message = error instanceof Error ? error.message : 'Unknown error';
@@ -252,6 +273,8 @@ export class ClaudianSettingTab extends PluginSettingTab {
           cls: 'claudian-setting-validation claudian-setting-validation-error',
           text: `Could not load provider settings: ${message}`,
         });
+      } finally {
+        if (pendingProviderRenders.get(providerId) === ticket) pendingProviderRenders.delete(providerId);
       }
     };
 
@@ -260,8 +283,12 @@ export class ClaudianSettingTab extends PluginSettingTab {
       const button = tabBar.createEl('button', {
         cls: `claudian-settings-tab${id === this.activeTab ? ' claudian-settings-tab--active' : ''}`,
         text: label,
+        attr: { type: 'button' },
       });
       button.addEventListener('click', () => {
+        if (this.activeTab === 'providers' && id !== 'providers' && this.activeProviderTab) {
+          releaseProvider(this.activeProviderTab);
+        }
         this.activeTab = id;
         for (const tabId of tabIds) {
           tabButtons.get(tabId)?.toggleClass('claudian-settings-tab--active', tabId === id);
@@ -295,8 +322,12 @@ export class ClaudianSettingTab extends PluginSettingTab {
       const button = providerTabBar.createEl('button', {
         cls: `claudian-settings-provider-tab${providerId === this.activeProviderTab ? ' claudian-settings-provider-tab--active' : ''}`,
         text: ProviderRegistry.getProviderDisplayName(providerId),
+        attr: { type: 'button' },
       });
       button.addEventListener('click', () => {
+        if (this.activeProviderTab && this.activeProviderTab !== providerId) {
+          releaseProvider(this.activeProviderTab);
+        }
         this.activeProviderTab = providerId;
         for (const candidate of providerTabs) {
           providerButtons.get(candidate)?.toggleClass(
@@ -320,12 +351,16 @@ export class ClaudianSettingTab extends PluginSettingTab {
       activateCollabTab();
     }
 
-    return () => {
+    const dispose = () => {
       if (renderGeneration !== this.renderGeneration) return;
       this.renderGeneration += 1;
+      for (const providerId of providerTabs) releaseProvider(providerId);
+      this.disposeRender = null;
       this.agentSkillCoordinator.resetSubscriptions();
       this.refreshTitleModelOptions = null;
     };
+    this.disposeRender = dispose;
+    return dispose;
   }
 
   private renderGeneralTab(container: HTMLElement): void {

@@ -28,147 +28,181 @@ import {
   normalizeCopilotVisibleModels,
   updateCopilotProviderSettings,
 } from '../settings';
+import { CopilotConnectionModal } from './CopilotConnectionModal';
+import { renderCopilotPermissionSettings } from './CopilotPermissionSettings';
 import { renderCopilotResourceSettings } from './CopilotResourceSettingsSection';
 
 const COPILOT_PROVIDER_ID = 'copilot' as const;
 
 export const copilotSettingsTabRenderer: ProviderSettingsTabRenderer = {
   render(container, context) {
-    const settingsBag = context.plugin.settings as unknown as Record<string, unknown>;
-    const hostnameKey = getHostnameKey();
-    const workspace = getCopilotWorkspaceServices();
-
-    const refreshModelCatalog = async (): Promise<'empty' | 'failed' | 'loaded'> => {
-      const result = await workspace.refreshModelCatalog();
-      if (result.diagnostics) {
-        new Notice(`Copilot model discovery failed: ${result.diagnostics}`);
-        return 'failed';
-      }
-      modelWarning.context.notifyProviderModelOptionsChanged(COPILOT_PROVIDER_ID);
-      return getCopilotProviderSettings(settingsBag).discoveredModels.length > 0
-        ? 'loaded'
-        : 'empty';
+    let closed = false;
+    let dispose: () => void;
+    const rerender = () => {
+      if (closed) return;
+      dispose();
+      container.empty();
+      dispose = renderCopilotSettings(container, context, rerender);
     };
-
-    new Setting(container).setName('Setup').setHeading();
-
-    renderProviderEnablementSetting({
-      container,
-      description: t('settings.providerEnablement.desc', { provider: 'Copilot' }),
-      getValue: () => getCopilotProviderSettings(settingsBag).enabled,
-      name: t('settings.providerEnablement.name', { provider: 'Copilot' }),
-      onChange: async (enabled) => {
-        if (!ProviderSettingsCoordinator.canApplyProviderEnablement(
-          settingsBag,
-          COPILOT_PROVIDER_ID,
-          enabled,
-        )) {
-          lastProviderWarning.showFor();
-          return;
-        }
-
-        let accepted = true;
-        await context.plugin.runProviderExecutionTransition(
-          [COPILOT_PROVIDER_ID],
-          async () => context.plugin.mutateSettings((settings) => {
-            accepted = ProviderSettingsCoordinator.applyProviderEnablement(
-              settings,
-              COPILOT_PROVIDER_ID,
-              enabled,
-            );
-          }),
-        );
-        if (accepted) {
-          lastProviderWarning.hide();
-        } else {
-          lastProviderWarning.showFor();
-        }
-        modelWarning.context.notifyProviderModelOptionsChanged(COPILOT_PROVIDER_ID);
-      },
-    });
-
-    const lastProviderWarning = renderLastEnabledProviderWarning(container);
-
-    const modelWarning = renderProviderModelEnablementWarning(container, context, {
-      getHasEnabledModels: () => (
-        getCopilotProviderSettings(settingsBag).visibleModels.length > 0
-      ),
-      getIsEnabled: () => getCopilotProviderSettings(settingsBag).enabled,
-      providerId: COPILOT_PROVIDER_ID,
-      providerName: 'Copilot',
-    });
-
-    renderHostnameCliPathSetting({
-      container,
-      description: 'Optional absolute path to the Copilot CLI for this computer. Leave empty to look for `copilot` on this computer\'s own PATH; a PATH entry set under Environment below is never used to find or run the CLI. Claudian never bundles or downloads the CLI.',
-      getValue: () => {
-        const current = getCopilotProviderSettings(settingsBag);
-        return current.cliPathsByHost[hostnameKey] ?? current.cliPath;
-      },
-      name: 'CLI path',
-      onChange: async (value) => {
-        const cliPathsByHost = {
-          ...getCopilotProviderSettings(settingsBag).cliPathsByHost,
-        };
-        if (value) {
-          cliPathsByHost[hostnameKey] = value;
-        } else {
-          delete cliPathsByHost[hostnameKey];
-        }
-        const mutation = (settings: ClaudianSettings): void => {
-          updateCopilotProviderSettings(settings, {
-            cliPath: '',
-            cliPathsByHost,
-            discoveredModels: [],
-          });
-        };
-        await context.plugin.applyProviderRuntimeSettings(
-          [COPILOT_PROVIDER_ID],
-          mutation,
-          () => workspace.cliResolver.reset(),
-        );
-        modelWarning.context.notifyProviderModelOptionsChanged(COPILOT_PROVIDER_ID);
-      },
-      placeholder: process.platform === 'win32'
-        ? 'C:\\Users\\you\\AppData\\Roaming\\npm\\copilot.exe'
-        : '/usr/local/bin/copilot',
-    });
-
-    new Setting(container).setName('Models').setHeading();
-    renderCopilotModelPicker(
-      container,
-      modelWarning.context,
-      settingsBag,
-      refreshModelCatalog,
-    );
-
-    renderCopilotResourceSettings(container, context);
-
-    renderEnvironmentSettingsSection({
-      container,
-      desc: 'Environment variables passed only to Copilot. Claudian forwards a minimal '
-        + 'host environment plus these entries, and accepts only '
-        + `${[...COPILOT_CONFIGURABLE_ENVIRONMENT_KEYS].sort().join(', ')} — every other `
-        + 'entry is ignored, including PATH, the proxy and certificate settings, and the '
-        + 'CLI switches that would let it act without asking. Where the CLI connects and '
-        + "which certificates it trusts come from this computer's own environment, "
-        + 'because a vault syncs and can be shared. PATH and COPILOT_HOME are managed by '
-        + "Claudian: PATH comes from this computer's own environment and the resolved "
-        + 'CLI, and COPILOT_HOME points outside the vault. Sign in by running the Copilot '
-        + 'CLI once with COPILOT_HOME set to that directory; these entries are stored in '
-        + 'plain text in .claudian/claudian-settings.json, so never put a token or an API '
-        + 'key here.',
-      heading: 'Environment',
-      name: 'Copilot environment variables',
-      placeholder: 'LANG=en_US.UTF-8',
-      plugin: context.plugin,
-      renderCustomContextLimits: target => (
-        context.renderCustomContextLimits(target, COPILOT_PROVIDER_ID)
-      ),
-      scope: 'provider:copilot',
-    });
+    dispose = renderCopilotSettings(container, context, rerender);
+    return () => { closed = true; dispose(); };
   },
 };
+
+function renderCopilotSettings(
+  container: HTMLElement,
+  context: ProviderSettingsTabRendererContext,
+  rerender: () => void,
+): () => void {
+  const settingsBag = context.plugin.settings as unknown as Record<string, unknown>;
+  const hostnameKey = getHostnameKey();
+  const workspace = getCopilotWorkspaceServices();
+
+  const refreshModelCatalog = async (): Promise<'empty' | 'failed' | 'loaded'> => {
+    const result = await workspace.refreshModelCatalog();
+    if (result.diagnostics) {
+      new Notice(`Copilot model discovery failed: ${result.diagnostics}`);
+      return 'failed';
+    }
+    modelWarning.context.notifyProviderModelOptionsChanged(COPILOT_PROVIDER_ID);
+    return getCopilotProviderSettings(settingsBag).discoveredModels.length > 0
+      ? 'loaded'
+      : 'empty';
+  };
+
+  new Setting(container).setName('Setup').setHeading();
+
+  new Setting(container)
+    .setName('Connect Copilot')
+    .setDesc('Sign in with GitHub in your browser, discover your models, and choose one to start. No terminal commands are needed.')
+    .addButton(button => {
+      button.setButtonText('Connect Copilot');
+      button.buttonEl.setAttribute('type', 'button');
+      button.onClick(() => {
+        new CopilotConnectionModal(context.plugin.app, workspace.connection, () => {
+          context.notifyProviderModelOptionsChanged(COPILOT_PROVIDER_ID);
+          rerender();
+        }).open();
+      });
+    });
+
+  renderProviderEnablementSetting({
+    container,
+    description: t('settings.providerEnablement.desc', { provider: 'Copilot' }),
+    getValue: () => getCopilotProviderSettings(settingsBag).enabled,
+    name: t('settings.providerEnablement.name', { provider: 'Copilot' }),
+    onChange: async (enabled) => {
+      if (!ProviderSettingsCoordinator.canApplyProviderEnablement(
+        settingsBag,
+        COPILOT_PROVIDER_ID,
+        enabled,
+      )) {
+        lastProviderWarning.showFor();
+        return;
+      }
+
+      let accepted = true;
+      await context.plugin.runProviderExecutionTransition(
+        [COPILOT_PROVIDER_ID],
+        async () => context.plugin.mutateSettings((settings) => {
+          accepted = ProviderSettingsCoordinator.applyProviderEnablement(
+            settings,
+            COPILOT_PROVIDER_ID,
+            enabled,
+          );
+        }),
+      );
+      if (accepted) {
+        lastProviderWarning.hide();
+      } else {
+        lastProviderWarning.showFor();
+      }
+      modelWarning.context.notifyProviderModelOptionsChanged(COPILOT_PROVIDER_ID);
+    },
+  });
+
+  const lastProviderWarning = renderLastEnabledProviderWarning(container);
+
+  const modelWarning = renderProviderModelEnablementWarning(container, context, {
+    getHasEnabledModels: () => (
+      getCopilotProviderSettings(settingsBag).visibleModels.length > 0
+    ),
+    getIsEnabled: () => getCopilotProviderSettings(settingsBag).enabled,
+    providerId: COPILOT_PROVIDER_ID,
+    providerName: 'Copilot',
+  });
+
+  renderHostnameCliPathSetting({
+    container,
+    description: 'Optional absolute path to the Copilot CLI for this computer. Leave empty to look for `copilot` on this computer\'s own PATH; a PATH entry set under Environment below is never used to find or run the CLI. Claudian never bundles or downloads the CLI.',
+    getValue: () => {
+      const current = getCopilotProviderSettings(settingsBag);
+      return current.cliPathsByHost[hostnameKey] ?? current.cliPath;
+    },
+    name: 'CLI path',
+    onChange: async (value) => {
+      const cliPathsByHost = {
+        ...getCopilotProviderSettings(settingsBag).cliPathsByHost,
+      };
+      if (value) {
+        cliPathsByHost[hostnameKey] = value;
+      } else {
+        delete cliPathsByHost[hostnameKey];
+      }
+      const mutation = (settings: ClaudianSettings): void => {
+        updateCopilotProviderSettings(settings, {
+          cliPath: '',
+          cliPathsByHost,
+          discoveredModels: [],
+        });
+      };
+      await context.plugin.applyProviderRuntimeSettings(
+        [COPILOT_PROVIDER_ID],
+        mutation,
+        () => workspace.cliResolver.reset(),
+      );
+      modelWarning.context.notifyProviderModelOptionsChanged(COPILOT_PROVIDER_ID);
+    },
+    placeholder: process.platform === 'win32'
+      ? 'C:\\Users\\you\\AppData\\Roaming\\npm\\copilot.exe'
+      : '/usr/local/bin/copilot',
+  });
+
+  new Setting(container).setName('Models').setHeading();
+  renderCopilotModelPicker(
+    container,
+    modelWarning.context,
+    settingsBag,
+    refreshModelCatalog,
+  );
+
+  renderCopilotPermissionSettings(container, context);
+  const disposeResources = renderCopilotResourceSettings(container, context);
+
+  renderEnvironmentSettingsSection({
+    container,
+    desc: 'Environment variables passed only to Copilot. Claudian forwards a minimal '
+      + 'host environment plus these entries, and accepts only '
+      + `${[...COPILOT_CONFIGURABLE_ENVIRONMENT_KEYS].sort().join(', ')} — every other `
+      + 'entry is ignored, including PATH, the proxy and certificate settings, and the '
+      + 'CLI switches that would let it act without asking. Where the CLI connects and '
+      + "which certificates it trusts come from this computer's own environment, "
+      + 'because a vault syncs and can be shared. PATH and COPILOT_HOME are managed by '
+      + "Claudian: PATH comes from this computer's own environment and the resolved "
+      + 'CLI, and COPILOT_HOME points outside the vault. Use Connect Copilot above to sign in. These entries are stored in '
+      + 'plain text in .claudian/claudian-settings.json, so never put a token or an API '
+      + 'key here.',
+    heading: 'Environment',
+    name: 'Copilot environment variables',
+    placeholder: 'LANG=en_US.UTF-8',
+    plugin: context.plugin,
+    renderCustomContextLimits: target => (
+      context.renderCustomContextLimits(target, COPILOT_PROVIDER_ID)
+    ),
+    scope: 'provider:copilot',
+  });
+  return disposeResources;
+}
 
 function renderCopilotModelPicker(
   container: HTMLElement,
@@ -188,7 +222,7 @@ function renderCopilotModelPicker(
 
   renderProviderModelPicker({
     container,
-    emptyCatalogText: 'No Copilot models discovered yet. Sign in to this vault\'s own Copilot home once, by running the Copilot CLI with COPILOT_HOME set to the directory named in the sign-in error, then click Discover.',
+    emptyCatalogText: 'No Copilot models discovered yet. Use Connect Copilot above to sign in and choose a model.',
     failedCatalogText: 'Could not load the Copilot model catalog. Check the CLI path and that the CLI is signed in with an active Copilot subscription, then try again.',
     getState,
     initiallyOpen: getCopilotProviderSettings(settingsBag).discoveredModels.length === 0,

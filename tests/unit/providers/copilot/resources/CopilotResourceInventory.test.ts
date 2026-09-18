@@ -2,12 +2,17 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { discoverCopilotResources } from '@/providers/copilot/resources/CopilotResourceInventory';
+import { discoverCopilotRepositorySkills, discoverCopilotResources } from '@/providers/copilot/resources/CopilotResourceInventory';
 
 let workspace: string;
 
+jest.mock('node:os', () => ({
+  ...jest.requireActual<typeof os>('node:os'),
+  homedir: () => path.join(workspace, 'home'),
+}));
+
 beforeEach(async () => {
-  workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'copilot-resources-'));
+  workspace = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'copilot-resources-')));
 });
 
 afterEach(async () => {
@@ -32,12 +37,14 @@ function vaultDirectory(): string {
 function discover(overrides: {
   additionalMcpConfigPaths?: string[];
   additionalSkillRoots?: string[];
+  homeDirectory?: string;
+  vaultDirectory?: string;
 } = {}) {
   return discoverCopilotResources({
     additionalMcpConfigPaths: overrides.additionalMcpConfigPaths ?? [],
     additionalSkillRoots: overrides.additionalSkillRoots ?? [],
-    homeDirectory: homeDirectory(),
-    vaultDirectory: vaultDirectory(),
+    homeDirectory: overrides.homeDirectory ?? homeDirectory(),
+    vaultDirectory: overrides.vaultDirectory ?? vaultDirectory(),
   });
 }
 
@@ -185,5 +192,86 @@ describe('discoverCopilotResources', () => {
 
     expect(inventory.skills).toHaveLength(2);
     expect(inventory.problems).toEqual([expect.stringContaining('review')]);
+  });
+
+  it('marks repository skills as automatic without duplicating root-vault or custom discoveries', async () => {
+    await fs.mkdir(path.join(vaultDirectory(), '.git'), { recursive: true });
+    const skillPath = await writeFile('vault/.github/skills/review/SKILL.md', '---\nname: review\n---\n');
+
+    const inventory = await discover({
+      additionalSkillRoots: [path.join(vaultDirectory(), '.github', 'skills')],
+    });
+
+    expect(inventory.skills).toEqual([{
+      commandName: 'review',
+      directory: path.dirname(skillPath),
+      path: skillPath,
+      scope: 'repository',
+    }]);
+    expect(inventory.problems).toEqual([]);
+  });
+
+  it('uses the nearest Git root and does not inherit a surrounding repository', async () => {
+    await fs.mkdir(path.join(workspace, '.git'));
+    await writeFile('.github/skills/outer/SKILL.md', '---\nname: outer\n---\n');
+    await writeFile('vault/.git', 'gitdir: /synthetic/worktrees/vault\n');
+    const skillPath = await writeFile('vault/.claude/skills/inner/SKILL.md', '---\nname: inner\n---\n');
+    const nestedVault = path.join(vaultDirectory(), 'content');
+    await fs.mkdir(nestedVault);
+
+    const discovered = await discoverCopilotRepositorySkills(nestedVault);
+
+    expect(discovered.skills.map(skill => skill.path)).toEqual([skillPath]);
+    expect(discovered.problems).toEqual([]);
+  });
+
+  it('does not automatically enable skills for a non-repository vault', async () => {
+    await writeFile('vault/.agents/skills/local/SKILL.md', '---\nname: local\n---\n');
+
+    const discovered = await discoverCopilotRepositorySkills(vaultDirectory());
+    const inventory = await discover();
+
+    expect(discovered).toEqual({ skills: [], problems: [] });
+    expect(inventory.skills[0].scope).toBe('vault');
+  });
+
+  it('reports an unreadable repository skill instead of silently omitting it', async () => {
+    await fs.mkdir(path.join(vaultDirectory(), '.git'), { recursive: true });
+    const skillPath = path.join(vaultDirectory(), '.github', 'skills', 'broken', 'SKILL.md');
+    await fs.mkdir(skillPath, { recursive: true });
+
+    const discovered = await discoverCopilotRepositorySkills(vaultDirectory());
+    const inventory = await discover();
+
+    expect(discovered.skills).toEqual([]);
+    expect(discovered.problems).toEqual([expect.stringContaining(skillPath)]);
+    expect(inventory.problems).toEqual([expect.stringContaining(skillPath)]);
+  });
+
+  it('keeps home packages personal even when the home directory is the Git root', async () => {
+    await fs.mkdir(path.join(homeDirectory(), '.git'), { recursive: true });
+    const agent = await writeFile('home/.agents/skills/global-agent/SKILL.md', '---\nname: global-agent\n---\n');
+    const claude = await writeFile('home/.claude/skills/global-claude/SKILL.md', '---\nname: global-claude\n---\n');
+    const vault = path.join(homeDirectory(), 'content');
+    await fs.mkdir(vault);
+
+    const inventory = await discover({ vaultDirectory: vault });
+
+    expect(inventory.problems).toEqual([]);
+    expect(inventory.skills.map(skill => ({ path: skill.path, scope: skill.scope }))).toEqual([
+      { path: agent, scope: 'personal' }, { path: claude, scope: 'personal' },
+    ]);
+  });
+
+  it('classifies aliased personal skill roots before assigning repository defaults', async () => {
+    await fs.mkdir(path.join(vaultDirectory(), '.git'), { recursive: true });
+    await fs.mkdir(path.join(vaultDirectory(), '.agents'));
+    const personal = await writeFile('home/.claude/skills/global/SKILL.md', '---\nname: global\n---\n');
+    await fs.symlink(path.join(homeDirectory(), '.claude', 'skills'), path.join(vaultDirectory(), '.agents', 'skills'), 'junction');
+
+    const inventory = await discover();
+
+    expect(inventory.problems).toEqual([]);
+    expect(inventory.skills).toEqual([expect.objectContaining({ path: personal, scope: 'personal' })]);
   });
 });
