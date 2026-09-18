@@ -12,7 +12,7 @@ The Copilot provider is disabled until you turn it on.
 - In-app connection requires a CLI whose `login` command supports `--web-flow`. Claudian checks this capability before starting sign-in.
 - The same Obsidian and desktop requirements as the rest of Claudian.
 
-Install the CLI the way GitHub documents it. A global npm install works:
+Install the CLI using [GitHub's installation instructions](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli). A global npm install works:
 
 ```bash
 npm install -g @github/copilot
@@ -20,6 +20,47 @@ copilot --version
 ```
 
 Claudian resolves an npm install down to the platform binary the launcher would have started, so an npm install needs its `@github/copilot-<platform>-<arch>` package present. Reinstall the CLI if that package is missing.
+
+## Install this fork from source on a new computer
+
+Use [krukow/claudian](https://github.com/krukow/claudian) on `main`, not the upstream repository or Community Plugins release. Install Git, desktop Obsidian 1.13.0 or newer, Node.js 24.16.0 (the version in `.node-version`; the package requires Node 24), and the separate Copilot CLI described above. The commands below use Bash, including Git Bash on Windows.
+
+Clone into a source directory **outside your vault**, activate Node 24.16.0, and install the exact lockfile dependencies:
+
+```bash
+git clone --branch main --single-branch https://github.com/krukow/claudian.git claudian
+cd claudian
+node --version # Must report v24.16.0.
+npm ci
+```
+
+The install script creates `.env.local` from a commented example unless running in CI. Leave it commented: do not populate a real vault path. The build's existing-vault auto-copy targets `plugins/claudian`, not the manifest ID `realclaudian`. Explicitly override any inherited `OBSIDIAN_VAULT` with a verified-nonexistent path, and confirm the build leaves it absent:
+
+```bash
+(
+  set -eu
+  no_vault="$PWD/.context/absent-obsidian-vault"
+  if [ -e "$no_vault" ] || [ -L "$no_vault" ]; then
+    printf 'Choose a nonexistent build guard path: %s\n' "$no_vault" >&2
+    exit 1
+  fi
+  OBSIDIAN_VAULT="$no_vault" npm run build
+  test ! -e "$no_vault" && test ! -L "$no_vault"
+)
+```
+
+After a successful build, open the intended vault once so its `.obsidian` directory exists, then close Obsidian. Replace the placeholder below with that vault's absolute path and copy **only these three files**; do not copy the source checkout, `node_modules`, or `.env.local`:
+
+```bash
+vault="/absolute/path/to/vault"
+test -d "$vault/.obsidian" &&
+  mkdir -p "$vault/.obsidian/plugins/realclaudian" &&
+  cp main.js manifest.json styles.css "$vault/.obsidian/plugins/realclaudian/"
+```
+
+Reopen Obsidian and enable **Claudian** under Settings > Community plugins. Open Settings > Claudian > Providers > Copilot, select **Connect Copilot**, complete browser approval if requested, and explicitly choose **Use this model**. Copying the plugin files does not connect an account or enable a model. For updates, rebuild from this fork's `main`; a Community Plugins update can replace it with upstream.
+
+On the new computer, install or recreate only the MCP definitions and personal/custom skills you want, then reselect them under **Resources**. They stay opt-in, and selections and repository-skill opt-outs are machine-local. Repository skills are rediscovered from the nearest Git root at the vault's physical location, not from the plugin's source checkout. Do not copy credentials, keys, or native CLI session homes from another computer; use the sign-in flows on this one. No global MCP configuration is required.
 
 ## Sign-in
 
