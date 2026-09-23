@@ -511,6 +511,7 @@ describe('Copilot tab warmup', () => {
         [getHostnameKey()]: {
           additionalMcpConfigPaths: [],
           additionalSkillRoots: [],
+          rememberMcpSignIns: true,
           selectedMcpServers: [],
           selectedSkillPaths: ['/skills/review/SKILL.md'],
         },

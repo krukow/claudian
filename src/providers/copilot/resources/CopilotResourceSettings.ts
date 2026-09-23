@@ -14,7 +14,7 @@ export interface CopilotResourceSettings {
   /** Explicit choices; repository defaults are merged when resources are resolved. */
   selectedSkillPaths: string[];
   readonly disabledRepositorySkillPaths?: string[];
-  readonly rememberMcpSignIns?: boolean;
+  readonly rememberMcpSignIns: boolean;
 }
 
 export type CopilotResourcesByHost = Record<string, CopilotResourceSettings>;
@@ -26,21 +26,25 @@ export function normalizeCopilotResourcesByHost(value: unknown): CopilotResource
   const entries: Array<[string, CopilotResourceSettings]> = [];
   for (const [rawKey, resources] of Object.entries(value)) {
     const key = rawKey.trim();
-    if (key && isRecord(resources)) {
-      entries.push([key, normalizeCopilotResourceSettings(resources)]);
+    if (key) {
+      entries.push([key, normalizeCopilotResourceSettings(isRecord(resources) ? resources : null)]);
     }
   }
   return Object.fromEntries(entries);
 }
 
 export function normalizeCopilotResourceSettings(value: unknown): CopilotResourceSettings {
-  const record = isRecord(value) ? value : {};
+  const hasSettings = isRecord(value);
+  const record = hasSettings ? value : {};
   const disabledRepositorySkillPaths = normalizeStringList(record.disabledRepositorySkillPaths);
+  const rememberMcpSignIns = hasSettings
+    ? record.rememberMcpSignIns === undefined || record.rememberMcpSignIns === true
+    : value === undefined;
   return {
     ...(disabledRepositorySkillPaths.length > 0 ? { disabledRepositorySkillPaths } : {}),
-    ...(record.rememberMcpSignIns === true ? { rememberMcpSignIns: true } : {}),
     additionalMcpConfigPaths: normalizeStringList(record.additionalMcpConfigPaths),
     additionalSkillRoots: normalizeStringList(record.additionalSkillRoots),
+    rememberMcpSignIns,
     selectedMcpServers: normalizeMcpReferences(record.selectedMcpServers),
     selectedSkillPaths: normalizeStringList(record.selectedSkillPaths),
   };

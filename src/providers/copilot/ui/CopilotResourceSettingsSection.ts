@@ -34,8 +34,9 @@ const RESOURCES_DESCRIPTION = 'MCP servers and skills this computer offers, for 
   + 'Choices stay on this computer: Claudian stores the file a server is declared in and its name, never '
   + 'the definition, so a synced vault carries no commands, environment entries, or '
   + 'headers. Selections apply to chat only — the title, inline edit, and instruction '
-  + 'runs never start a server or load a skill. Opening these settings checks enabled MCP '
-  + 'servers by connecting and listing tools; checks never invoke tools or open browser sign-in.';
+  + 'runs never start a server or load a skill. Selecting a server does not sign in to it. '
+  + 'Opening these settings checks enabled MCP servers by connecting and listing tools; '
+  + 'checks never invoke tools or open browser sign-in.';
 
 interface ResourceRow {
   readonly detail: string;
@@ -125,17 +126,6 @@ export function renderCopilotResourceSettings(
     }
   };
 
-  const rememberSetting = new Setting(container)
-    .setName('Remember MCP sign-ins')
-    .setDesc('Use the Copilot CLI credential cache on this computer. It normally uses the OS keychain; if that fails, it may store tokens in local files outside the vault. Required for sign-in from settings.');
-  const remember = rememberSetting.controlEl.createEl('input');
-  remember.type = 'checkbox';
-  remember.setAttribute('aria-label', 'Remember MCP sign-ins');
-  remember.addEventListener('change', () => {
-    const selected = remember.checked;
-    void persist(() => ({ rememberMcpSignIns: selected }));
-  });
-
   renderPathListSetting({
     container,
     description: 'Absolute paths to MCP configuration files outside the standard '
@@ -205,6 +195,20 @@ export function renderCopilotResourceSettings(
     bulkStatus = '';
     renderList();
     renderStatus();
+  });
+
+  const rememberSetting = new Setting(container)
+    .setName('Remember MCP sign-ins')
+    .setDesc('On by default for selected HTTP/SSE servers; turn off to prevent future MCP '
+      + 'sign-ins from being saved. The Copilot CLI normally uses the OS keychain; if '
+      + 'unavailable, it may store plaintext token files outside the vault. Turning this on '
+      + 'does not sign in any server by itself, and turning it off does not delete cached tokens.');
+  const remember = rememberSetting.controlEl.createEl('input');
+  remember.type = 'checkbox';
+  remember.setAttribute('aria-label', 'Remember MCP sign-ins');
+  remember.addEventListener('change', () => {
+    const selected = remember.checked;
+    void persist(() => ({ rememberMcpSignIns: selected }));
   });
 
   const statusEl = container.createDiv({ cls: 'claudian-copilot-resources-status' });
@@ -299,7 +303,8 @@ export function renderCopilotResourceSettings(
 
   function renderStatus(): void {
     if (disposed) return;
-    remember.checked = getCopilotHostResources(settingsBag).rememberMcpSignIns === true;
+    const selection = getCopilotHostResources(settingsBag);
+    remember.checked = selection.rememberMcpSignIns === true;
     remember.disabled = saving > 0;
     discoverButton.disabled = discovering || saving > 0;
     enableAllButton.disabled = discovering || saving > 0 || inventory === null;
@@ -322,20 +327,47 @@ export function renderCopilotResourceSettings(
       'aria-label',
       `${discovering ? 'Discovering' : action} resources`,
     );
-    statusEl.setText(
-      saveFailure
-        ? `Could not save resource settings: ${saveFailure}`
-        : discovering
-        ? 'Reading this computer\'s MCP configurations and skill folders...'
-        : discoveryFailure
-        ? `Discovery failed: ${discoveryFailure}. Your selections are unchanged.`
-        : bulkStatus
-        ? bulkStatus
-        : inventory
-        ? `${inventory.mcpServers.length} MCP ${plural(inventory.mcpServers.length, 'server')}`
-          + ` and ${inventory.skills.length} ${plural(inventory.skills.length, 'skill')} found.`
-        : 'Select Discover to see what this computer offers.',
-    );
+    const status = saveFailure
+      ? `Could not save resource settings: ${saveFailure}`
+      : discovering
+      ? 'Reading this computer\'s MCP configurations and skill folders...'
+      : discoveryFailure
+      ? `Discovery failed: ${discoveryFailure}. Your selections are unchanged.`
+      : bulkStatus
+      ? bulkStatus
+      : inventory
+      ? `${inventory.mcpServers.length} MCP ${plural(inventory.mcpServers.length, 'server')}`
+        + ` and ${inventory.skills.length} ${plural(inventory.skills.length, 'skill')} found.`
+      : 'Select Discover to see what this computer offers.';
+    const transportById = new Map((inventory?.mcpServers ?? [])
+      .map(server => [serverId(server.configPath, server.name), server.transport]));
+    let signInRequired = 0;
+    let localAuthRequired = 0;
+    for (const reference of selection.selectedMcpServers) {
+      const transport = transportById.get(serverId(reference.configPath, reference.name));
+      if (!transport || workspace.mcpReadiness.getState(reference).phase !== 'needs-auth') continue;
+      if (transport === 'http' || transport === 'sse') signInRequired += 1;
+      else localAuthRequired += 1;
+    }
+    const authGuidance: string[] = [];
+    if (signInRequired > 0) {
+      authGuidance.push(
+        `${signInRequired} selected MCP ${plural(signInRequired, 'server')} `
+        + `${signInRequired === 1 ? 'needs' : 'need'} sign-in. `
+        + (selection.rememberMcpSignIns
+          ? `Use Sign in beside ${signInRequired === 1 ? 'the server' : 'each server'} to connect ${signInRequired === 1 ? 'it' : 'them'}.`
+          : `Turn on Remember MCP sign-ins above, then use Sign in beside ${signInRequired === 1 ? 'the server' : 'each server'}.`),
+      );
+    }
+    if (localAuthRequired > 0) {
+      authGuidance.push(
+        `${localAuthRequired} local MCP ${plural(localAuthRequired, 'server')} `
+        + `${localAuthRequired === 1 ? 'needs' : 'need'} authentication in `
+        + `${localAuthRequired === 1 ? 'its' : 'their'} source configuration.`,
+      );
+    }
+    const statusText = [status, ...authGuidance].join(' ');
+    if (statusEl.textContent !== statusText) statusEl.setText(statusText);
   }
 
   function renderList(): void {
@@ -391,7 +423,7 @@ export function renderCopilotResourceSettings(
         }
         const view = rendered.readiness;
         const phase = row.selected ? readiness.phase : 'disabled';
-        const text = row.selected ? readinessText(readiness) : 'Disabled';
+        const text = row.selected ? readinessText(readiness, row.supportsSignIn) : 'Disabled';
         if (view.text.textContent !== text) view.text.setText(text);
         if (view.element.dataset.phase !== phase) {
           view.element.dataset.phase = phase;
@@ -415,8 +447,12 @@ export function renderCopilotResourceSettings(
         }
         const disabled = saving > 0 || !row.selected || row.missing || selection.rememberMcpSignIns !== true;
         if (rendered.signIn.disabled !== disabled) rendered.signIn.disabled = disabled;
-        const title = disabled
-          ? 'Select this server and enable Remember MCP sign-ins first.'
+        const title = row.missing
+          ? 'This server was not found on this computer. Refresh its configuration.'
+          : !row.selected
+          ? 'Select this server before signing in.'
+          : selection.rememberMcpSignIns !== true
+          ? 'Turn on Remember MCP sign-ins above before signing in.'
           : 'Authenticate this server in your browser.';
         if (rendered.signIn.title !== title) rendered.signIn.title = title;
       } else if (rendered.signIn) {
@@ -446,7 +482,10 @@ export function renderCopilotResourceSettings(
     new Notice(`MCP readiness check failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  const unsubscribeReadiness = workspace.mcpReadiness.subscribe(renderList);
+  const unsubscribeReadiness = workspace.mcpReadiness.subscribe(() => {
+    renderList();
+    renderStatus();
+  });
   const signInPhases = new Map(getCopilotHostResources(settingsBag).selectedMcpServers.map(reference => [
     serverId(reference.configPath, reference.name), workspace.mcpSignIn.getState(reference).phase,
   ]));
@@ -472,13 +511,15 @@ export function renderCopilotResourceSettings(
   };
 }
 
-function readinessText(state: CopilotMcpReadinessState): string {
+function readinessText(state: CopilotMcpReadinessState, supportsSignIn: boolean): string {
   switch (state.phase) {
     case 'unchecked': return 'Not checked';
     case 'queued': return 'Queued';
     case 'checking': return 'Checking...';
     case 'connected': return `Connected (${state.toolCount} ${plural(state.toolCount, 'tool')})`;
-    case 'needs-auth': return 'Sign-in required';
+    case 'needs-auth': return supportsSignIn
+      ? 'Sign-in required'
+      : 'Authentication required; check server configuration.';
     case 'error': return `Check failed: ${state.message.split('\n')[0].slice(0, 240)} Retry with Check.`;
   }
 }

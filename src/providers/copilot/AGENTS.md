@@ -146,7 +146,7 @@ them as pending here.
   `environment_context` description of the host. MCP servers and skills are stated there
   too, from the caller's resources alone. Several of
   those default the other way outside empty mode, so an omission is not a smaller session
-  but a coding-agent one. The port exposes none of them. MCP OAuth storage defaults to memory; only explicit resource settings may opt in to native persistence. LLM judge enables only the native `AUTO_APPROVAL` feature flag, not general experimental mode.
+  but a coding-agent one. The port exposes none of them. MCP OAuth storage defaults to memory at the SDK boundary; resolved selected resources request native persistence by default unless the host turned it off. LLM judge enables only the native `AUTO_APPROVAL` feature flag, not general experimental mode.
 - A session's installed plugins are the exception, and the reason `COPILOT_HOME` isolation
   is load-bearing rather than tidy. The SDK clears them only in empty mode, through the
   options patch it sends after create and resume, and exposes no session field for them;
@@ -334,7 +334,7 @@ them as pending here.
 - Resources are deliberately outside `computeCopilotEnvironmentHash`. Including them would
   clear the discovered model catalog and the conversation's native session on every
   toggle, neither of which a selection invalidates.
-- Remembered MCP sign-ins use the native cache only after explicit host-scoped opt-in; it may fall back to plaintext token files outside the vault. This is separate from GitHub login's plaintext-storage policy. Storage mode belongs in the resource digest so changing it cold-restarts the client.
+- Remembered MCP sign-ins use the native cache by default on every host, including existing host selections without a saved choice; it may fall back to plaintext token files outside the vault. A later host-scoped off choice must persist as `false`, and malformed values fail closed. This is separate from GitHub login's plaintext-storage policy. Storage mode belongs in the resource digest so changing it cold-restarts the client.
 - `CopilotMcpSignInCoordinator` owns a temporary, tool-free session containing only the selected server. An authorization URL means waiting; success requires the native connected event or the documented cached-login result. Native OAuth owns token handling and reconnection; no token copying, global MCP edits, or model turns belong in this flow.
 - Sign-in has separate native-authentication and post-authentication runtime-publication lifetimes. Provider transition hooks may cancel and drain only native authentication; waiting for the encompassing sign-in flight would deadlock its own cache-refresh transition. Revalidate consent and provider generation before each native acquisition or OAuth initiation. Confirmed authentication survives cancellation and follow-up failures, but publication still waits for owned cleanup; cancellation and disposal must propagate teardown failures even after the dialog closes. A queued reopen belongs to its cancellation revision, not the cancelled flight.
 - Refresh/fencing warnings belong to one sign-in attempt. Closing captures that attempt's failure and authentication outcome rather than reading a newer attempt's state; disposal retains only actual owned-release failures, not historical refresh warnings. A later clean attempt must not erase unresolved teardown evidence or repeat unrelated warnings.

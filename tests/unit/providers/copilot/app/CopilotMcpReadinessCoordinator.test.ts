@@ -314,7 +314,7 @@ it.each([
       : []);
     expect(messages.map(message => message.includes('SDK stop failed.')))
       .toEqual(commits ? [] : [operation !== 'auth-gate', operation !== 'auth-gate']);
-    expect(getCopilotHostResources(settings).rememberMcpSignIns).toBe(commits ? undefined : true);
+    expect(getCopilotHostResources(settings).rememberMcpSignIns).toBe(!commits);
     expect(service.getState(references[0])).toEqual({ phase: 'unchecked' });
     await service.dispose();
   },

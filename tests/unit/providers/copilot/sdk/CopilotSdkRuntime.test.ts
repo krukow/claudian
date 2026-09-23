@@ -2080,8 +2080,91 @@ describe('copilotSdkRuntime selected server connections', () => {
 
     const session = await client.createSession(connectingConfig());
 
-    expect(session.resourceDiagnostics).toEqual([expect.stringContaining('needs-auth')]);
+    expect(session.resourceDiagnostics).toEqual([
+      'The local MCP server notes requires authentication. Its tools are unavailable '
+      + 'in this session. Check the credentials in the server configuration; browser '
+      + 'Sign in is only available for HTTP/SSE servers.',
+    ]);
     expect(FakeSdkCopilotSession.instances[0]?.toolListings).toEqual([]);
+  });
+
+  it('directs an opted-in user to Sign in without asking them to opt in again', async () => {
+    FakeSdkCopilotClient.behavior.listServers = async () => ({
+      servers: [{ name: 'notes', status: 'needs-auth' }],
+    });
+    const client = await createClient();
+
+    const session = await client.createSession(sessionConfig({
+      availableTools: ['builtin:read'],
+      resources: {
+        mcpServers: { notes: { type: 'http', url: 'https://notes.example.test/mcp' } },
+        mcpOAuthTokenStorage: 'persistent',
+        skillDirectories: [],
+      },
+    }));
+
+    expect(session.resourceDiagnostics).toEqual([
+      '1 selected MCP server needs sign-in: notes. Its tools are unavailable in this '
+      + 'session. Open Settings > Claudian > Providers > Copilot > Resources, then use '
+      + 'Sign in beside that server.',
+    ]);
+  });
+
+  it('reports selected HTTP servers needing sign-in once with the settings steps', async () => {
+    FakeSdkCopilotClient.behavior.listServers = async () => ({
+      servers: [
+        { name: 'notes', status: 'needs-auth' },
+        { name: 'wiki', status: 'needs-auth' },
+      ],
+    });
+    const client = await createClient();
+
+    const session = await client.createSession(sessionConfig({
+      availableTools: ['builtin:read'],
+      resources: {
+        mcpServers: {
+          notes: { type: 'http', url: 'https://notes.example.test/mcp' },
+          wiki: { type: 'http', url: 'https://wiki.example.test/mcp' },
+        },
+        skillDirectories: [],
+      },
+    }));
+
+    expect(session.resourceDiagnostics).toEqual([
+      '2 selected MCP servers need sign-in: notes, wiki. Their tools are unavailable in this '
+      + 'session. Open Settings > Claudian > Providers > Copilot > Resources, turn on '
+      + 'Remember MCP sign-ins, then use Sign in beside each server.',
+    ]);
+    expect(FakeSdkCopilotSession.instances[0]?.toolListings).toEqual([]);
+  });
+
+  it('keeps a native authentication failure instead of hiding it in the sign-in summary', async () => {
+    FakeSdkCopilotClient.behavior.listServers = async () => ({
+      servers: [
+        { name: 'notes', status: 'needs-auth', error: 'OAuth metadata could not be loaded' },
+        { name: 'wiki', status: 'needs-auth' },
+      ],
+    });
+    const client = await createClient();
+
+    const session = await client.createSession(sessionConfig({
+      availableTools: ['builtin:read'],
+      resources: {
+        mcpServers: {
+          notes: { type: 'http', url: 'https://notes.example.test/mcp' },
+          wiki: { type: 'http', url: 'https://wiki.example.test/mcp' },
+        },
+        skillDirectories: [],
+      },
+    }));
+
+    expect(session.resourceDiagnostics).toEqual([
+      '1 selected MCP server needs sign-in: wiki. Its tools are unavailable in this '
+      + 'session. Open Settings > Claudian > Providers > Copilot > Resources, turn on '
+      + 'Remember MCP sign-ins, then use Sign in beside that server.',
+      'The MCP server notes requires authentication, so none of its tools are available '
+      + 'in this session: OAuth metadata could not be loaded.',
+    ]);
   });
 
   it('stops waiting for a server that never finishes connecting', async () => {
