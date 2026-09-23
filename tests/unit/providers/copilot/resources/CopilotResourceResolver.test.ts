@@ -3,7 +3,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { resolveCopilotSelectedResources } from '@/providers/copilot/resources/CopilotResourceResolver';
-import type { CopilotResourceSettings } from '@/providers/copilot/resources/CopilotResourceSettings';
+import {
+  type CopilotResourceSettings,
+  normalizeCopilotResourceSettings,
+} from '@/providers/copilot/resources/CopilotResourceSettings';
 
 let workspace: string;
 
@@ -31,6 +34,7 @@ function selection(overrides: Partial<CopilotResourceSettings> = {}): CopilotRes
   return {
     additionalMcpConfigPaths: [],
     additionalSkillRoots: [],
+    rememberMcpSignIns: true,
     selectedMcpServers: [],
     selectedSkillPaths: [],
     ...overrides,
@@ -78,17 +82,22 @@ describe('resolveCopilotSelectedResources', () => {
     expect(resolution.problems).toEqual([]);
   });
 
-  it('uses native persistent authentication only for explicitly opted-in MCP selections', async () => {
+  it('uses native persistent authentication for a selected server by default, but not when turned off', async () => {
     const configPath = await writeFile('config/mcp.json', JSON.stringify({
       mcpServers: { notes: { type: 'http', url: 'https://example.test/mcp' } },
     }));
-    const resolution = await resolveCopilotSelectedResources(selection({
-      rememberMcpSignIns: true,
+    const selected = normalizeCopilotResourceSettings({
       selectedMcpServers: [{ configPath, name: 'notes' }],
-    }));
+    });
+    const resolution = await resolveCopilotSelectedResources(selected);
+    const optedOut = await resolveCopilotSelectedResources({
+      ...selected, rememberMcpSignIns: false,
+    });
 
     expect(resolution.resources).toMatchObject({ mcpOAuthTokenStorage: 'persistent' });
     expect(resolution.problems).toEqual([]);
+    expect(optedOut.resources).not.toHaveProperty('mcpOAuthTokenStorage');
+    expect(optedOut.problems).toEqual([]);
   });
 
   it('finds the physical repository of a linked vault instead of its lexical parent repository', async () => {
@@ -262,6 +271,7 @@ describe('resolveCopilotSelectedResources', () => {
 
     expect(resolution.problems).toEqual([]);
     expect(resolution.resources).toEqual({
+      mcpOAuthTokenStorage: 'persistent',
       mcpServers: {
         notes: {
           args: ['--vault'],

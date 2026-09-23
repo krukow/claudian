@@ -345,7 +345,7 @@ describe('Copilot resource settings', () => {
     failStop = false;
     within(container).getByRole('checkbox', { name: 'Remember MCP sign-ins' }).click();
     await settle();
-    expect(getCopilotHostResources(settings).rememberMcpSignIns).toBeUndefined();
+    expect(getCopilotHostResources(settings).rememberMcpSignIns).toBe(false);
   });
 
   it('disables sign-in while the remembered-credentials choice is being saved', async () => {
@@ -438,6 +438,84 @@ describe('Copilot resource settings', () => {
     ready = true;
     within(container).getByRole('button', { name: 'Check notes connection' }).click();
     await waitFor(() => expect(within(container).getByText('Connected (2 tools)')).toBeTruthy());
+  });
+
+  it('shows remembered sign-ins on by default and explains how to reconnect after opting out', async () => {
+    const configPath = write('home/.copilot/mcp-config.json', JSON.stringify({
+      mcpServers: {
+        notes: { type: 'http', url: 'https://notes.example.test/mcp' },
+        wiki: { type: 'http', url: 'https://wiki.example.test/mcp' },
+      },
+    }));
+    const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
+      onSessionCreated: session => {
+        session.mcpReadinessBehavior = async () => ({ phase: 'needs-auth' });
+      },
+    }));
+    const { container } = renderSection({
+      runtime, resources: { selectedMcpServers: ['notes', 'wiki'].map(name => ({ configPath, name })) },
+    });
+    await waitFor(() => expect(within(container).getAllByText('Sign-in required')).toHaveLength(2));
+    const status = within(container).getByRole('status');
+    expect(status.textContent).toContain('2 selected MCP servers need sign-in.');
+    expect(status.textContent).toContain('Use Sign in beside each server to connect them.');
+    const remember = within(container).getByRole('checkbox', { name: 'Remember MCP sign-ins' });
+    expect((remember as HTMLInputElement).checked).toBe(true);
+    expect(container.textContent).toContain('may store plaintext token files outside the vault');
+    const filter = within(container).getByRole('searchbox', { name: 'Filter resources' });
+    expect(Boolean(filter.compareDocumentPosition(remember) & Node.DOCUMENT_POSITION_FOLLOWING))
+      .toBe(true);
+    expect(within(container).getAllByRole('button', { name: /Sign in to/ })
+      .every(button => !(button as HTMLButtonElement).disabled)).toBe(true);
+
+    (remember as HTMLElement).click();
+    await waitFor(() => {
+      expect(status.textContent).toContain('Turn on Remember MCP sign-ins above, then use Sign in beside each server.');
+      expect(within(container).getAllByRole('button', { name: /Sign in to/ })
+        .every(button => (button as HTMLButtonElement).disabled)).toBe(true);
+    });
+    expect((await checkAccessibility(container)).violations).toEqual([]);
+  });
+
+  it('directs a local server requiring authentication to its configuration, not browser sign-in', async () => {
+    const configPath = write('home/.copilot/mcp-config.json', JSON.stringify({
+      mcpServers: { local: { command: '/usr/bin/local-mcp' } },
+    }));
+    const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
+      onSessionCreated: session => {
+        session.mcpReadinessBehavior = async () => ({ phase: 'needs-auth' });
+      },
+    }));
+    const { container } = renderSection({
+      runtime, resources: { selectedMcpServers: [{ configPath, name: 'local' }] },
+    });
+
+    await waitFor(() => {
+      expect(within(container).getByText('Authentication required; check server configuration.')).toBeTruthy();
+    });
+    expect(within(container).getByRole('status').textContent)
+      .toContain('1 local MCP server needs authentication in its source configuration.');
+    expect(within(container).queryByRole('button', { name: 'Sign in to local' })).toBeNull();
+  });
+
+  it('does not label a missing inventory source as a local server when its saved connection needs auth', async () => {
+    const configPath = write('custom/mcp-config.json', JSON.stringify({
+      mcpServers: { notes: { type: 'http', url: 'https://example.test/mcp' } },
+    }));
+    const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
+      onSessionCreated: session => {
+        session.mcpReadinessBehavior = async () => ({ phase: 'needs-auth' });
+      },
+    }));
+    const { container } = renderSection({
+      runtime, resources: { selectedMcpServers: [{ configPath, name: 'notes' }] },
+    });
+    await waitFor(() => expect(within(container).getByText(
+      'Authentication required; check server configuration.',
+    )).toBeTruthy());
+
+    expect(container.textContent).toContain('not found on this computer');
+    expect(within(container).getByRole('status').textContent).not.toContain('local MCP server');
   });
 
   it('rechecks after completed OAuth, not after handing off the URL, and waits for tool listing', async () => {
@@ -1179,7 +1257,7 @@ describe('Copilot resource settings', () => {
     }
   });
 
-  it('offers sign-in only after selecting a remote server and opting in to remembered credentials', async () => {
+  it('offers sign-in only for a selected remote server while remembered credentials are enabled', async () => {
     write('home/.copilot/mcp-config.json', JSON.stringify({
       mcpServers: { notes: { type: 'http', url: 'https://example.test/mcp' } },
     }));
@@ -1195,11 +1273,20 @@ describe('Copilot resource settings', () => {
     expect(signIn.disabled).toBe(true);
     selected.click();
     await settle();
-    expect(signIn.disabled).toBe(true);
+    expect(signIn.disabled).toBe(false);
+    const remember = within(container).getByRole('checkbox', { name: 'Remember MCP sign-ins' });
+    expect((remember as HTMLInputElement).checked).toBe(true);
 
-    within(container).getByRole('checkbox', { name: 'Remember MCP sign-ins' }).click();
+    (remember as HTMLElement).click();
     await settle();
 
+    expect(getCopilotHostResources(settings).rememberMcpSignIns).toBe(false);
+    await waitFor(() => {
+      expect((within(container).getByRole('button', { name: 'Sign in to notes' }) as HTMLButtonElement).disabled)
+        .toBe(true);
+    });
+    (remember as HTMLElement).click();
+    await settle();
     expect(getCopilotHostResources(settings).rememberMcpSignIns).toBe(true);
     await waitFor(() => {
       expect((within(container).getByRole('button', { name: 'Sign in to notes' }) as HTMLButtonElement).disabled).toBe(false);

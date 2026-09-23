@@ -881,6 +881,8 @@ async function collectSelectedMcpTools(
   }
   const diagnostics: string[] = [];
   const tools: string[] = [];
+  const browserSignInRequired: string[] = [];
+  const localAuthenticationRequired: string[] = [];
   const states = await settleMcpConnections(session, serverNames, call);
   /**
    * Selecting a server says which servers this session may reach, not that it has tools.
@@ -893,7 +895,17 @@ async function collectSelectedMcpTools(
   const grantsTools = config.availableTools.length > 0;
 
   for (const serverName of serverNames) {
-    const unavailable = describeUnavailableServer(serverName, states.get(serverName));
+    const state = states.get(serverName);
+    if (state?.status === 'needs-auth' && !state.failure) {
+      const server = resources.mcpServers[serverName];
+      if (server.type === 'http' || server.type === 'sse') {
+        browserSignInRequired.push(serverName);
+      } else {
+        localAuthenticationRequired.push(serverName);
+      }
+      continue;
+    }
+    const unavailable = describeUnavailableServer(serverName, state);
     if (unavailable) {
       diagnostics.push(unavailable);
       continue;
@@ -918,6 +930,28 @@ async function collectSelectedMcpTools(
         + `available in this session: ${describeError(error)}`,
       );
     }
+  }
+  if (localAuthenticationRequired.length > 0) {
+    const count = localAuthenticationRequired.length;
+    const names = localAuthenticationRequired.join(', ');
+    diagnostics.unshift(
+      `The local MCP server${count === 1 ? '' : 's'} ${names} `
+      + `${count === 1 ? 'requires' : 'require'} authentication. `
+      + `${count === 1 ? 'Its' : 'Their'} tools are unavailable in this session. Check the credentials in the `
+      + 'server configuration; browser Sign in is only available for HTTP/SSE servers.',
+    );
+  }
+  if (browserSignInRequired.length > 0) {
+    const count = browserSignInRequired.length;
+    diagnostics.unshift(
+      `${count} selected MCP server${count === 1 ? '' : 's'} `
+      + `${count === 1 ? 'needs' : 'need'} sign-in: ${browserSignInRequired.join(', ')}. `
+      + `${count === 1 ? 'Its' : 'Their'} tools are unavailable in this session. Open Settings > Claudian > `
+      + 'Providers > Copilot > Resources, '
+      + (resources.mcpOAuthTokenStorage === 'persistent'
+        ? `then use Sign in beside ${count === 1 ? 'that server' : 'each server'}.`
+        : `turn on Remember MCP sign-ins, then use Sign in beside ${count === 1 ? 'that server' : 'each server'}.`),
+    );
   }
   return { diagnostics, tools };
 }
@@ -986,7 +1020,8 @@ function describeUnavailableServer(
     return null;
   }
   const detail = state.failure ? `: ${state.failure}` : '';
-  return `The MCP server ${serverName} is ${state.status}, so none of its tools are `
+  const status = state.status === 'needs-auth' ? 'requires authentication' : `is ${state.status}`;
+  return `The MCP server ${serverName} ${status}, so none of its tools are `
     + `available in this session${detail}.`;
 }
 
@@ -1004,8 +1039,9 @@ const TURN_TIMEOUT_MS = 600_000;
  * runtime discovers around the vault.
  *
  * The caller chooses tools, a model, directories, an approval mode, and the handlers.
- * MCP credential persistence is an explicit resource choice; other ambient integrations
- * remain fixed at this boundary.
+ * MCP credential persistence follows the resolved resource choice, which is on by
+ * default for selected servers but absent for a host that turned it off; other ambient
+ * integrations remain fixed at this boundary.
  */
 function toSessionConfig(
   config: CopilotSdkSessionConfig,

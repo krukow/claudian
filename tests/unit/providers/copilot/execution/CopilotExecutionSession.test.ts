@@ -2562,7 +2562,7 @@ describe('Copilot session resources', () => {
         [getHostnameKey()]: {
           additionalMcpConfigPaths: [],
           additionalSkillRoots: [],
-          ...(overrides.rememberMcpSignIns ? { rememberMcpSignIns: true } : {}),
+          rememberMcpSignIns: overrides.rememberMcpSignIns ?? true,
           selectedMcpServers: overrides.selectedMcpServers ?? [],
           selectedSkillPaths: overrides.selectedSkillPaths ?? [],
         },
@@ -2603,6 +2603,7 @@ describe('Copilot session resources', () => {
     await collect(session.execute(createRequest()).events);
 
     expect(runtime.lastClient?.lastSession?.config.resources).toEqual({
+      mcpOAuthTokenStorage: 'persistent',
       mcpServers: { notes: { command: '/usr/bin/notes-mcp', type: 'stdio' } },
       skillDirectories: [path.dirname(skillPath)],
     });
@@ -2630,7 +2631,7 @@ describe('Copilot session resources', () => {
         resourcesByHost: {
           [getHostnameKey()]: {
             additionalMcpConfigPaths: [], additionalSkillRoots: [], selectedMcpServers: [],
-            selectedSkillPaths: [], disabledRepositorySkillPaths: [skillPath],
+            rememberMcpSignIns: true, selectedSkillPaths: [], disabledRepositorySkillPaths: [skillPath],
           },
         },
       });
@@ -2683,7 +2684,7 @@ describe('Copilot session resources', () => {
       resourcesByHost: {
         [getHostnameKey()]: {
           additionalMcpConfigPaths: [], additionalSkillRoots: [], selectedMcpServers: [],
-          selectedSkillPaths: [], disabledRepositorySkillPaths: disabled ? [broken] : [],
+          rememberMcpSignIns: true, selectedSkillPaths: [], disabledRepositorySkillPaths: disabled ? [broken] : [],
         },
       },
     });
@@ -2901,6 +2902,7 @@ describe('Copilot resource changes on a live conversation', () => {
         [getHostnameKey()]: {
           additionalMcpConfigPaths: [],
           additionalSkillRoots: [],
+          rememberMcpSignIns: true,
           selectedMcpServers: servers,
           selectedSkillPaths: [],
         },
@@ -2927,6 +2929,7 @@ describe('Copilot resource changes on a live conversation', () => {
     expect(runtime.clients[0]?.stopped).toBe(1);
     expect(runtime.clients[1]?.resumedSessionIds).toEqual([nativeSessionId]);
     expect(runtime.clients[1]?.lastSession?.config.resources).toEqual({
+      mcpOAuthTokenStorage: 'persistent',
       mcpServers: { replacement: { command: '/usr/bin/replacement', type: 'stdio' } },
       skillDirectories: [],
     });

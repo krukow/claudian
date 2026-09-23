@@ -59,6 +59,7 @@ function createHost(selectedSkillPaths: string[] = [], vaultDirectory = VAULT_PA
       [getHostnameKey()]: {
         additionalMcpConfigPaths: [],
         additionalSkillRoots: [],
+        rememberMcpSignIns: true,
         selectedMcpServers: [],
         selectedSkillPaths,
       },
@@ -155,7 +156,7 @@ describe('CopilotCommandLoader', () => {
       resourcesByHost: {
         [getHostnameKey()]: {
           additionalMcpConfigPaths: [], additionalSkillRoots: [], selectedMcpServers: [],
-          selectedSkillPaths: [], disabledRepositorySkillPaths: [skillPath],
+          rememberMcpSignIns: true, selectedSkillPaths: [], disabledRepositorySkillPaths: [skillPath],
         },
       },
     });

@@ -120,12 +120,14 @@ describe('getCopilotProviderSettings', () => {
       laptop: {
         additionalMcpConfigPaths: ['/config/tools.json'],
         additionalSkillRoots: ['/skills'],
+        rememberMcpSignIns: true,
         selectedMcpServers: [{ configPath: '/config/tools.json', name: 'notes' }],
         selectedSkillPaths: ['/skills/summary/SKILL.md'],
       },
       desktop: {
         additionalMcpConfigPaths: [],
         additionalSkillRoots: [],
+        rememberMcpSignIns: true,
         selectedMcpServers: [{ configPath: 'C:\\Tools\\mcp.json', name: 'search' }],
         selectedSkillPaths: [],
       },
@@ -221,6 +223,7 @@ describe('updateCopilotProviderSettings against configuration it does not own', 
         laptop: {
           additionalMcpConfigPaths: [],
           additionalSkillRoots: [],
+          rememberMcpSignIns: true,
           selectedMcpServers: [],
           selectedSkillPaths: ['/skills/summary/SKILL.md'],
         },
