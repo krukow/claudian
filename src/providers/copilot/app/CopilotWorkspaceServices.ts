@@ -1,3 +1,5 @@
+import { Notice } from 'obsidian';
+
 import type { ProviderCommandCatalog } from '../../../core/providers/commands/ProviderCommandCatalog';
 import type { ProviderHost } from '../../../core/providers/ProviderHost';
 import { ProviderWorkspaceRegistry } from '../../../core/providers/ProviderWorkspaceRegistry';
@@ -10,9 +12,12 @@ import type {
 import { CopilotCommandCatalog } from '../commands/CopilotCommandCatalog';
 import { computeCopilotEnvironmentHash } from '../env/CopilotSettingsReconciler';
 import { sameCopilotDiscoveredModels } from '../models';
+import { getCopilotHostResources } from '../resources/CopilotHostResources';
 import { CopilotBrowserLogin } from '../runtime/CopilotBrowserLogin';
 import { CopilotCliResolver } from '../runtime/CopilotCliResolver';
 import { CopilotModelDiscoveryService } from '../runtime/CopilotModelDiscoveryService';
+import { describeError } from '../sdk/CopilotRuntimeError';
+import type { CopilotSdkRuntime } from '../sdk/CopilotSdkPort';
 import { getCopilotProviderSettings, updateCopilotProviderSettings } from '../settings';
 import { copilotSettingsTabRenderer } from '../ui/CopilotSettingsTab';
 import { CopilotCommandLoader } from './CopilotCommandLoader';
@@ -49,20 +54,39 @@ export interface CopilotWorkspaceServices extends ProviderWorkspaceServices {
 export interface CopilotWorkspaceServicesOptions {
   readonly commandMetadataProbe?: CopilotCommandMetadataProbe;
   readonly modelDiscoveryService?: Pick<CopilotModelDiscoveryService, 'discoverModels'>;
+  readonly runtime?: CopilotSdkRuntime;
 }
 
 export function createCopilotWorkspaceServices(
   plugin: ProviderHost,
   options: CopilotWorkspaceServicesOptions = {},
 ): CopilotWorkspaceServices {
+  const runtimeOptions = { runtime: options.runtime };
   const cliResolver = new CopilotCliResolver();
   const modelDiscoveryService = options.modelDiscoveryService
-    ?? new CopilotModelDiscoveryService(plugin);
+    ?? new CopilotModelDiscoveryService(plugin, runtimeOptions);
   const commandMetadataProbe = options.commandMetadataProbe
-    ?? new CopilotCommandMetadataProbe(plugin);
-  const connection = new CopilotConnectionCoordinator(plugin, { login: new CopilotBrowserLogin() });
-  const mcpSignIn = new CopilotMcpSignInCoordinator(plugin);
-  const mcpReadiness = new CopilotMcpReadinessCoordinator(plugin);
+    ?? new CopilotCommandMetadataProbe(plugin, runtimeOptions);
+  const connection = new CopilotConnectionCoordinator(plugin, { ...runtimeOptions, login: new CopilotBrowserLogin() });
+  const mcpSignIn = new CopilotMcpSignInCoordinator(plugin, runtimeOptions);
+  const mcpReadiness = new CopilotMcpReadinessCoordinator(plugin, runtimeOptions);
+  const unsubscribeConnection = connection.subscribe(state => {
+    if (state.phase === 'connected') void mcpReadiness.check().catch(reportReadinessFailure);
+  });
+  const signInPhases = new Map(getCopilotHostResources(plugin.settings).selectedMcpServers.map(reference => [
+    JSON.stringify([reference.configPath, reference.name]), mcpSignIn.getState(reference).phase,
+  ]));
+  const unsubscribeSignIn = mcpSignIn.subscribe(() => {
+    for (const reference of getCopilotHostResources(plugin.settings).selectedMcpServers) {
+      const id = JSON.stringify([reference.configPath, reference.name]);
+      const phase = mcpSignIn.getState(reference).phase;
+      const previous = signInPhases.get(id);
+      signInPhases.set(id, phase);
+      if (phase === 'connected' && previous !== phase) {
+        void mcpReadiness.check(reference).catch(reportReadinessFailure);
+      }
+    }
+  });
   let latestRefresh = 0;
 
   return {
@@ -73,6 +97,8 @@ export function createCopilotWorkspaceServices(
     mcpSignIn,
     mcpReadiness,
     async dispose() {
+      unsubscribeConnection();
+      unsubscribeSignIn();
       const results = await Promise.allSettled([
         commandMetadataProbe.dispose(), connection.dispose(), mcpSignIn.dispose(), mcpReadiness.dispose(),
       ]);
@@ -152,6 +178,7 @@ export function createCopilotWorkspaceServices(
         published = true;
         return true;
       });
+      if (published) void mcpReadiness.ensureChecked().catch(reportReadinessFailure);
       return published ? { changed: true, persistedSettingsChanged: true } : { changed: false };
     },
   };
@@ -159,9 +186,23 @@ export function createCopilotWorkspaceServices(
 
 export const copilotWorkspaceRegistration:
 ProviderWorkspaceRegistration<CopilotWorkspaceServices> = {
-  initialize: async ({ plugin }) => createCopilotWorkspaceServices(plugin),
+  initialize: async ({ plugin }) => {
+    const services = createCopilotWorkspaceServices(plugin);
+    services.mcpReadiness.start();
+    return services;
+  },
 };
+
+export async function initializeCopilotMcpReadiness(plugin: ProviderHost): Promise<void> {
+  if (!getCopilotProviderSettings(plugin.settings).enabled
+    || getCopilotHostResources(plugin.settings).selectedMcpServers.length === 0) return;
+  await ProviderWorkspaceRegistry.ensureInitialized(plugin, COPILOT_PROVIDER_ID, 'mcp-readiness');
+}
 
 export function getCopilotWorkspaceServices(): CopilotWorkspaceServices {
   return ProviderWorkspaceRegistry.requireServices('copilot') as CopilotWorkspaceServices;
+}
+
+function reportReadinessFailure(error: unknown): void {
+  new Notice(`MCP readiness check failed: ${describeError(error)}`);
 }

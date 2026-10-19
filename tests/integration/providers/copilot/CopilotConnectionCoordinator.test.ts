@@ -1,6 +1,11 @@
+/**
+ * @jest-environment jsdom
+ */
+
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { deserialize, serialize } from 'node:v8';
 
 import type { App, PluginManifest } from 'obsidian';
 
@@ -36,6 +41,10 @@ const interactionPort: ProviderInteractionPort = {
   requestPlanDecision: async () => { throw new Error('Unexpected plan decision.'); },
 };
 
+beforeAll(() => {
+  global.structuredClone = <T>(value: T): T => deserialize(serialize(value)) as T;
+});
+
 function createApp(basePath: string, settings: Record<string, unknown>): App {
   const files = new Map([[CLAUDIAN_SETTINGS_PATH, JSON.stringify(settings)]]);
   const folders = new Set(['.claudian']);
@@ -58,7 +67,13 @@ function createApp(basePath: string, settings: Record<string, unknown>): App {
         write: async (file: string, content: string) => { files.set(file, content); },
       },
     },
-    workspace: { getLeavesOfType: () => [], layoutReady: true },
+    workspace: {
+      getLeavesOfType: () => [],
+      iterateAllLeaves: () => {},
+      layoutReady: true,
+      on: () => ({}),
+      offref: () => {},
+    },
   } as unknown as App;
 }
 

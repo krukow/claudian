@@ -119,11 +119,12 @@ them as pending here.
   those shapes resolve; a reference that names no directory is accepted only inside
   `node_modules`, so a `.js` word in a comment cannot become the CLI path.
 - Only the stdio transport is supported. The in-process FFI transport, the BYOK request
-  forwarder, and the SQLite session store are replaced with fail-closed stubs at bundle
+  forwarder, the SQLite session store, and the SDK's `runtimeArtifacts` loader are replaced with fail-closed stubs at bundle
   time by `scripts/copilotSdkBundleEnvelope.js`, which also keeps the native `koffi`
   addon out of the bundle. `sdk/CopilotSdkRuntime` is written against that envelope, so
   adding an SDK feature that reaches those modules requires revisiting it, not deleting
   it.
+- SDK lockfile entries use canonical public-registry URLs with verified integrity hashes. Contributor-specific registry mirrors belong in installation configuration, not the committed SDK artifact locations.
 - The client is constructed with `mode: 'copilot-cli'`, because `mode: 'empty'` is the one
   thing that writes `COPILOT_DISABLE_KEYTAR=1` into the environment the CLI is spawned
   with. The SDK writes it after the caller's own environment, so no entry can take it back
@@ -316,7 +317,7 @@ them as pending here.
   ask — a runtime that reports no state leaves the tool listing as the authority, which
   answers for a connected server and fails with the runtime's own reason for one that is
   not. Do not turn this into a retry around `listTools`.
-- Resource preparation has one startup-sized deadline covering all skills and MCP metadata operations. A failed state request is surfaced; silence cancels subsequent setup steps, cleans up the unpublished session, and terminates the client. Cleanup may delete a newly created session that never reached a caller, but never an existing session whose resume preparation failed.
+- Resource preparation has one startup-sized deadline covering all skills and MCP metadata operations. A failed state request is surfaced; timeout errors name the last setup operation or pending MCP servers, without treating responsive connection polling as RPC silence. Expiry cancels subsequent setup steps, cleans up the unpublished session, and terminates the client. Cleanup may delete a newly created session that never reached a caller, but never an existing session whose resume preparation failed.
 - A skill command is invoked through `session.rpc.commands.invoke`, which answers with a
   prompt the caller submits. Sending `/name args` as ordinary text is not an invocation
   and must not be treated as one; the user's own message is what the turn displays.
@@ -338,9 +339,10 @@ them as pending here.
 - `CopilotMcpSignInCoordinator` owns a temporary, tool-free session containing only the selected server. An authorization URL means waiting; success requires the native connected event or the documented cached-login result. Native OAuth owns token handling and reconnection; no token copying, global MCP edits, or model turns belong in this flow.
 - Sign-in has separate native-authentication and post-authentication runtime-publication lifetimes. Provider transition hooks may cancel and drain only native authentication; waiting for the encompassing sign-in flight would deadlock its own cache-refresh transition. Revalidate consent and provider generation before each native acquisition or OAuth initiation. Confirmed authentication survives cancellation and follow-up failures, but publication still waits for owned cleanup; cancellation and disposal must propagate teardown failures even after the dialog closes. A queued reopen belongs to its cancellation revision, not the cancelled flight.
 - Refresh/fencing warnings belong to one sign-in attempt. Closing captures that attempt's failure and authentication outcome rather than reading a newer attempt's state; disposal retains only actual owned-release failures, not historical refresh warnings. A later clean attempt must not erase unresolved teardown evidence or repeat unrelated warnings.
-- `CopilotMcpReadinessCoordinator`, retained by workspace services, serializes isolated checks of selected MCP servers. Readiness comes from the typed SDK boundary: explicit native connection plus successful tools/list, including an empty list; never parse diagnostics or infer readiness from cached credentials. Each probe has no skills or available tools and respects the existing native cache selection. Settings-view disposal cancels the queue; the settings shell owns the renderer disposer. Filters/rerenders must not create probes, and selection, runtime generation, configuration, and client identity fence late results.
-- Completed readiness is a view-lifetime snapshot of MCP selection, cache choice, and runtime configuration, not skill settings or generic execution generation. Transitions still quiesce active probes and generation-fence their results, while skill-only updates reuse completed checks. Explicit Check, Refresh, and completed OAuth force fresh probes. Failed native quiescence remains a visible transition failure; do not bypass the registry's settings-commit gate.
-- Queued/checking readiness entries and their queued requests remain generation-bound. Retire stale unfinished work in the after-transition hook even when a failed chat-lease release skipped the before-transition hook; completed snapshots retain their separate reuse identity.
+- `CopilotMcpReadinessCoordinator`, retained by workspace services, runs at most three isolated checks of selected MCP servers, including their native cleanup. Refill idle workers when checks join an active run; the shared completion promise must include those workers. Drain every active probe before reporting cancellation or transition failure, even when another release fails. Readiness comes from the typed SDK boundary: explicit native connection plus successful tools/list, including an empty list; never parse diagnostics or infer readiness from cached credentials. Each probe has no skills or available tools and respects the existing native cache selection. Settings-view disposal only unsubscribes; workspace disposal owns cancellation. Filters/rerenders must not create probes, and selection, runtime generation, configuration, and client identity fence late results.
+- Completed readiness is a workspace-lifetime snapshot of MCP selection, cache choice, runtime configuration, provider enablement, and whether an enabled model is available, not model choice, skill settings, or generic execution generation. Transitions still quiesce active probes and generation-fence their results, while skill-only updates reuse completed checks. Explicit Check, Refresh, and completed OAuth force fresh probes; workspace services own sign-in follow-up even when settings are closed. Failed native quiescence remains a visible transition failure; do not restart background probes from a failed quiescence or bypass the registry's settings-commit gate.
+- `src/main.ts` starts the selected, enabled Copilot workspace after layout through `initializeCopilotMcpReadiness`; other providers remain lazy. Automatic checks require an enabled provider and model, run after relevant settings changes, and recheck on focus/visibility return after a 15-minute cooldown. Do not poll while idle or launch OAuth. Group newly auth-required servers in a notice, distinguish HTTP/SSE sign-in from local configuration, and suppress repeats until a successful connection; queued/checking/error states are not authentication recovery.
+- Queued/checking readiness entries and their queued requests remain generation-bound. Retire stale unfinished work in the after-transition hook even when a failed chat-lease release skipped the before-transition hook; completed snapshots retain their separate reuse identity. A late probe's configuration or client-identity mismatch may invalidate only its own generation, never a newer check's result.
 - Once a cancelled readiness probe has positively observed all owned releases succeed, its stale metadata/session-operation error must not veto the new settings mutation. Keep uncancelled operation errors visible and preserve the primary failure alongside any release failure. Factory acquisition failures do not certify cleanup and remain conservative; do not infer release success from their exception.
 - A selection that changes while a client is alive ends that client and resumes the same
   native session on a fresh one. An exclusion list applies where the runtime starts
@@ -371,7 +373,7 @@ them as pending here.
   the transport failure its call site would otherwise report — the CLI cannot be
   reinstalled by sending the turn again. Both shapes are quoted from the SDK; an SDK
   upgrade that rewords either one silently returns it to the fallback category, so check
-  them when the SDK moves.
+  them when the SDK moves. Missing-CLI messages take precedence over broad keyword matches and direct users to Claudian's CLI-path settings, not the SDK's `COPILOT_CLI_PATH` environment hint; the installed-SDK regression must stay covered.
 - `CopilotClient.stop` resolves with the errors it hit rather than rejecting. A stop that
   did not do all of it — reported errors, rejected, or never answered — escalates to a
   forced stop and is reported, because the CLI was killed rather than shut down.
@@ -409,10 +411,10 @@ them as pending here.
   raw SDK client is bounded there for the same reason and one more: it is the only native
   call made while that client is still private to the module, so a bound anywhere else
   would be waiting on a process it was never handed and could not stop. A start that goes
-  silent kills the CLI and returns no client. `sdk/CopilotClientFactory` bounds its own
-  start too, because it owns the CLI resolution and environment work wrapped around the
-  runtime's start, and both bounds use the startup budget: a shorter one outside would cut
-  the cold start the inner one is still waiting out.
+  silent kills the CLI and returns no client. `sdk/CopilotClientFactory` must await this
+  result without adding another deadline: the SDK runtime still owns the CLI during
+  failed-start cleanup, and an outer timeout would release readiness slots or lifecycle
+  ownership before that process has stopped.
 - An abort and a disconnect are left to their caller to bound, because the caller has to
   decide what a silent runtime means for a session it might still reuse. The port says so;
   do not bind them to a budget here.
@@ -442,7 +444,7 @@ them as pending here.
 - Approvals, questions, and events all carry the identity of the live session they came
   from, so a session Claudian dropped can never answer for the run that replaced it.
 - Permission modes are host-scoped and apply only to persistent chat with a `provider-default` or `unrestricted` tool policy. `CopilotExecutionSession` snapshots the effective mode before asynchronous acquisition and includes it in session identity; auxiliary and restricted turns always use Ask. Approval modes never widen available or excluded tools.
-- Before publishing a created or resumed session, the SDK boundary calls `session.rpc.options.update({ featureFlags: { AUTO_APPROVAL: mode === 'judge' } })`, then `session.rpc.commands.invoke({ name: 'permissions', input })`, where input is `default`, `assisted`, or `allow-all`. SDK 1.0.11 exposes generated `setAllowAll`/`getAllowAll` methods that CLI 1.0.86-2 rejects with `Unhandled method`; do not substitute them or enable general experimental mode.
+- Before publishing a created or resumed session, the SDK boundary calls `session.rpc.options.update({ featureFlags: { AUTO_APPROVAL: mode === 'judge' } })`, then `session.rpc.commands.invoke({ name: 'permissions', input })`, where input is `default`, `assisted`, or `allow-all`. Generated permission RPCs are not a compatibility substitute for this native command; changing that path requires a native CLI compatibility check. Do not enable general experimental mode.
 - Assisted approvals have one event-aware response owner: the SDK invokes its ordinary callback before public events and omits prompt metadata. Only while that owner is attached in judge mode does the callback return `no-result`. Normalize native `assistedApproval` and SDK `autoApproval`; only an affirmative recommendation without a managed-human requirement may approve once. Keep request, turn, cancellation, and disposal fences, and never attribute an AI or standing approval with `approvedInteractively`.
 - Input the provider cannot carry is reported on the turn rather than dropped. An image
   reaches nothing — the CLI receives a text prompt and `capabilities.ts` advertises no

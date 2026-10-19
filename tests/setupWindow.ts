@@ -70,6 +70,9 @@ function applyDomElementInfo(el: Element, info: unknown): void {
     return;
   }
   const opts = info as Record<string, unknown>;
+  if (typeof opts.type === 'string') {
+    el.setAttribute('type', opts.type);
+  }
   if (opts.cls) {
     const classes = Array.isArray(opts.cls) ? opts.cls : String(opts.cls).split(/\s+/);
     el.classList.add(...classes.filter(Boolean) as string[]);

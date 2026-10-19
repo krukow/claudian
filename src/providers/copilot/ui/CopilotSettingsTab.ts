@@ -210,6 +210,7 @@ function renderCopilotModelPicker(
   settingsBag: Record<string, unknown>,
   loadCatalog: () => Promise<'empty' | 'failed' | 'loaded'>,
 ): void {
+  const workspace = getCopilotWorkspaceServices();
   const getState = (): ProviderModelPickerState => {
     const settings = getCopilotProviderSettings(settingsBag);
     return {
@@ -248,6 +249,9 @@ function renderCopilotModelPicker(
         updateCopilotProviderSettings(settings, { visibleModels });
       });
       context.notifyProviderModelOptionsChanged(COPILOT_PROVIDER_ID);
+      void workspace.mcpReadiness.ensureChecked().catch(error => {
+        new Notice(`MCP readiness check failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
     },
     providerName: 'Copilot',
     searchPlaceholder: 'Filter by model name, description, or alias ID...',

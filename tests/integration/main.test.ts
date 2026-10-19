@@ -21,6 +21,8 @@ import {
   getCodexProviderSettings,
   updateCodexProviderSettings,
 } from '@/providers/codex/settings';
+import { updateCopilotHostResources } from '@/providers/copilot/resources/CopilotHostResources';
+import { updateCopilotProviderSettings } from '@/providers/copilot/settings';
 import { computeGrokEnvironmentHash } from '@/providers/grok/env/GrokSettingsReconciler';
 import { GrokCliResolver } from '@/providers/grok/runtime/GrokCliResolver';
 import { GrokModelCatalogCoordinator } from '@/providers/grok/runtime/GrokModelCatalogCoordinator';
@@ -183,6 +185,7 @@ describe('ClaudianPlugin', () => {
         on: jest.fn().mockReturnValue({ id: 'workspace-event' }),
         offref: jest.fn(),
         onLayoutReady: jest.fn(),
+        iterateAllLeaves: jest.fn(),
         getLeavesOfType: jest.fn().mockReturnValue([]),
         getMostRecentLeaf: jest.fn().mockReturnValue(null),
         getRightLeaf: jest.fn().mockReturnValue({
@@ -221,6 +224,45 @@ describe('ClaudianPlugin', () => {
   });
 
   describe('onload', () => {
+    it.each([
+      { enabled: true, selected: true, unloaded: false, initialized: true },
+      { enabled: false, selected: true, unloaded: false, initialized: false },
+      { enabled: true, selected: false, unloaded: false, initialized: false },
+      { enabled: true, selected: true, unloaded: true, initialized: false },
+    ])('starts selected Copilot MCP checks after layout (enabled=$enabled, selected=$selected, unloaded=$unloaded)', async ({
+      enabled, selected, unloaded, initialized,
+    }) => {
+      const properties = ['document', 'addEventListener', 'removeEventListener'] as const;
+      const previous = properties.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const);
+      const events = new EventTarget();
+      Object.defineProperties(globalThis, {
+        document: { configurable: true, value: Object.assign(new EventTarget(), { visibilityState: 'visible' }) },
+        addEventListener: { configurable: true, value: events.addEventListener.bind(events) },
+        removeEventListener: { configurable: true, value: events.removeEventListener.bind(events) },
+      });
+      try {
+        await plugin.onload();
+        updateCopilotProviderSettings(plugin.settings, {
+          enabled,
+          resourcesByHost: updateCopilotHostResources(plugin.settings, {
+            selectedMcpServers: selected ? [{ configPath: '/test/mcp.json', name: 'notes' }] : [],
+          }),
+        });
+        expect(ProviderWorkspaceRegistry.getIfInitialized('copilot')).toBeNull();
+        if (unloaded) plugin.onunload();
+        for (const [afterLayout] of mockApp.workspace.onLayoutReady.mock.calls) afterLayout();
+        await new Promise(resolve => setImmediate(resolve));
+
+        expect(ProviderWorkspaceRegistry.getIfInitialized('copilot') !== null).toBe(initialized);
+      } finally {
+        await ProviderWorkspaceRegistry.disposeInitialized();
+        for (const [name, descriptor] of previous) {
+          if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+          else Reflect.deleteProperty(globalThis, name);
+        }
+      }
+    });
+
     it('should initialize settings with defaults', async () => {
       await plugin.onload();
 
