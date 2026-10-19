@@ -182,7 +182,7 @@ jest.mock('obsidian', () => {
   };
 });
 
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -199,7 +199,8 @@ import { registerBuiltInProviders } from '@/providers';
 import { CopilotMcpReadinessCoordinator } from '@/providers/copilot/app/CopilotMcpReadinessCoordinator';
 import { CopilotMcpSignInCoordinator } from '@/providers/copilot/app/CopilotMcpSignInCoordinator';
 import type { CopilotWorkspaceServices } from '@/providers/copilot/app/CopilotWorkspaceServices';
-import { getCopilotProviderSettings } from '@/providers/copilot/settings';
+import { updateCopilotHostResources } from '@/providers/copilot/resources/CopilotHostResources';
+import { getCopilotProviderSettings, updateCopilotProviderSettings } from '@/providers/copilot/settings';
 import { copilotSettingsTabRenderer } from '@/providers/copilot/ui/CopilotSettingsTab';
 
 import { FakeCopilotSdkRuntime } from '../sdk/FakeCopilotSdkRuntime';
@@ -252,6 +253,7 @@ function createHost(settings: Record<string, unknown>): ProviderHost {
     | 'applyProviderRuntimeSettings'
     | 'executionLifecycleRegistry'
     | 'getEnvironmentVariablesForScope'
+    | 'getResolvedProviderCliPath'
     | 'mutateSettings'
     | 'runProviderExecutionTransition'
     | 'settings'
@@ -263,6 +265,7 @@ function createHost(settings: Record<string, unknown>): ProviderHost {
       await onApplied?.();
     },
     getEnvironmentVariablesForScope: () => '',
+    getResolvedProviderCliPath: async () => '/usr/bin/copilot',
     mutateSettings: applyMutation,
     runProviderExecutionTransition: async (_providerIds, mutation) => mutation({} as never),
     settings: settings as unknown as ClaudianSettings,
@@ -399,6 +402,37 @@ describe('Copilot settings tab', () => {
       .toBe('button');
     expect(container.textContent).toContain('Use Connect Copilot above to sign in and choose a model.');
     expect(within(container).getByRole('button', { name: 'Discover' })).toBeTruthy();
+  });
+
+  it('checks selected MCP servers when the first usable model is enabled in the picker', async () => {
+    const configDirectory = path.join(mockHomeDirectory, '.copilot');
+    mkdirSync(configDirectory);
+    const configPath = path.join(configDirectory, 'mcp-config.json');
+    writeFileSync(configPath, JSON.stringify({
+      mcpServers: { notes: { type: 'http', url: 'https://notes.example.test/mcp' } },
+    }));
+    const initial: Record<string, unknown> = {};
+    updateCopilotProviderSettings(initial, {
+      enabled: true,
+      visibleModels: [],
+      discoveredModels: [{
+        rawId: 'gpt-5-mini', displayName: 'GPT-5 mini',
+        reasoningEfforts: [], supportsReasoning: false, supportsVision: false,
+      }],
+      resourcesByHost: updateCopilotHostResources(initial, {
+        selectedMcpServers: [{ configPath, name: 'notes' }],
+      }),
+    });
+    const { container } = renderSettingsTab(initial);
+    await waitFor(() => expect(within(container).getByText(
+      'Check failed: Connect Copilot and enable a model before checking servers. Retry with Check.',
+    )).toBeTruthy());
+
+    within(container).getByText('Browse models').parentElement!.click();
+    within(container).getByRole('checkbox', { name: /^GPT-5 mini/ }).click();
+
+    await waitFor(() => expect(within(container).getByText('Connected (0 tools)')).toBeTruthy());
+    expect(await checkAccessibility(container)).toHaveNoViolations();
   });
 
   it('has no accessibility violations', async () => {

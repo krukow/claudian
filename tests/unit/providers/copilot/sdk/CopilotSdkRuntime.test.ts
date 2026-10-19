@@ -12,7 +12,9 @@ import * as path from 'node:path';
 import type { CopilotClientOptions, SessionConfig, SessionEvent } from '@github/copilot-sdk';
 
 import type { ProviderApprovalInteractionRequest, ProviderInteractionPort } from '@/core/execution';
+import type { ProviderHost } from '@/core/providers/ProviderHost';
 import { CopilotInteractionHandler } from '@/providers/copilot/execution/CopilotInteractionHandler';
+import { CopilotClientFactory } from '@/providers/copilot/sdk/CopilotClientFactory';
 import type {
   CopilotSdkClient,
   CopilotSdkPermissionPrompt,
@@ -333,6 +335,38 @@ beforeEach(() => {
   FakeSdkCopilotClient.instances.length = 0;
   FakeSdkCopilotSession.instances.length = 0;
   FakeSdkCopilotClient.behavior = {};
+});
+
+it('holds factory startup ownership until the timed-out SDK client finishes cleanup', async () => {
+  await withFakeTimers(async () => {
+    const release = createDeferred();
+    FakeSdkCopilotClient.behavior.start = () => neverAnswers<void>();
+    FakeSdkCopilotClient.behavior.stop = async () => {
+      await release.promise;
+      return [];
+    };
+    const factory = new CopilotClientFactory({ settings: {} } as ProviderHost, { runtime: copilotSdkRuntime });
+    let settled = false;
+    const opening = factory.createClient({
+      baseDirectory: '/state/copilot',
+      cliPath: '/usr/local/bin/copilot',
+      environment: {},
+      workingDirectory: '/vault',
+    }).then(
+      value => { settled = true; return value; },
+      (error: unknown) => { settled = true; return error; },
+    );
+    await jest.advanceTimersByTimeAsync(30_001);
+    const settledBeforeCleanup = settled;
+    const forcedBeforeCleanup = FakeSdkCopilotClient.instances[0]?.forceStopped;
+    release.resolve();
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(settledBeforeCleanup).toBe(false);
+    expect(forcedBeforeCleanup).toBe(0);
+    expect(await opening).toMatchObject({ category: 'transport' });
+    expect(FakeSdkCopilotClient.instances[0]?.forceStopped).toBe(1);
+  });
 });
 
 describe('copilotSdkRuntime MCP sign-in primitive', () => {
@@ -1787,9 +1821,16 @@ describe('copilotSdkRuntime session resources', () => {
     });
   }
 
-  it.each(['ensureSkills', 'listSkills', 'disableSkill', 'updateOptions', 'listTools'] as const)(
-    'bounds a silent %s during resource preparation and stops the CLI',
-    async (step) => {
+  it.each([
+    { step: 'configurePermissions', phase: 'configuring Copilot permissions' },
+    { step: 'ensureSkills', phase: 'loading selected skills' },
+    { step: 'listSkills', phase: 'listing loaded skills' },
+    { step: 'disableSkill', phase: 'disabling unselected skill builtin-unselected' },
+    { step: 'updateOptions', phase: 'enabling selected MCP tools' },
+    { step: 'listTools', phase: 'listing tools for MCP server notes' },
+  ] as const)(
+    'identifies a silent $step during resource preparation and stops the CLI',
+    async ({ step, phase }) => {
       await withFakeTimers(async () => {
         FakeSdkCopilotClient.behavior.skills = [{ name: 'builtin-unselected' }];
         FakeSdkCopilotClient.behavior.listTools = async () => ({ tools: [{ name: 'read' }] });
@@ -1803,11 +1844,35 @@ describe('copilotSdkRuntime session resources', () => {
         await jest.advanceTimersByTimeAsync(40_000);
 
         expect(outcome).toBeInstanceOf(Error);
+        expect(outcome).toMatchObject({ message: expect.stringContaining(`Last step: ${phase}.`) });
         expect(FakeSdkCopilotClient.instances[0]?.forceStopped).toBe(1);
         await opening;
       });
     },
   );
+
+  it('names the servers still connecting instead of claiming a responsive CLI did not answer', async () => {
+    await withFakeTimers(async () => {
+      FakeSdkCopilotClient.behavior.listServers = async () => ({
+        servers: [
+          { name: 'notes', status: 'pending' },
+          { name: 'ready', status: 'connected' },
+        ],
+      });
+      const client = await createClient();
+      const opening = client.createSession(resourceConfig({
+        mcpServers: { notes: notesServer, ready: notesServer },
+        skillDirectories: [],
+      })).then(() => undefined, (error: unknown) => error);
+      await jest.advanceTimersByTimeAsync(40_000);
+
+      expect(await opening).toMatchObject({
+        category: 'transport',
+        message: 'Timed out after 30 seconds preparing selected Copilot resources. '
+          + 'Last step: waiting for MCP servers: notes. The Copilot CLI was terminated.',
+      });
+    });
+  });
 
   it('does not silently continue when MCP connection-state discovery fails', async () => {
     FakeSdkCopilotClient.behavior.listServers = async () => {

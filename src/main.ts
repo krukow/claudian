@@ -109,6 +109,7 @@ import { ClaudianSettingTab } from './features/settings/ClaudianSettings';
 import { setLocale, t } from './i18n/i18n';
 import type { Locale } from './i18n/types';
 import { deleteLegacyMcpConfig } from './providers/claude/storage/LegacyMcpConfigCleanup';
+import { initializeCopilotMcpReadiness } from './providers/copilot/app/CopilotWorkspaceServices';
 import { buildCursorContext } from './utils/editor';
 import { getInstallationKey } from './utils/env';
 import { revealWorkspaceLeaf } from './utils/obsidianCompat';
@@ -240,7 +241,7 @@ export default class ClaudianPlugin extends Plugin {
         'settings-load',
         () => this.loadSettings({ deferNonRestoredSessionMetadata: true }),
       );
-      // Provider workspace services are initialized lazily on first use.
+      // Selected Copilot MCP checks start after layout; other provider services remain lazy.
 
       this.registerView(
         VIEW_TYPE_CLAUDIAN,
@@ -446,6 +447,12 @@ export default class ClaudianPlugin extends Plugin {
 
       this.addSettingTab(new ClaudianSettingTab(this.app, this));
       this.initializeCollabLayoutLifecycle();
+      this.app.workspace.onLayoutReady(() => {
+        if (this.isUnloading) return;
+        void initializeCopilotMcpReadiness(this.providerHost).catch(error => {
+          new Notice(`Could not start Copilot MCP checks: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      });
       if (this.isCollabEnabled()) void this.startAgentRuntime();
       this.scheduleRemainingSessionMetadataLoad();
     } finally {

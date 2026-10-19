@@ -35,8 +35,10 @@ const RESOURCES_DESCRIPTION = 'MCP servers and skills this computer offers, for 
   + 'the definition, so a synced vault carries no commands, environment entries, or '
   + 'headers. Selections apply to chat only — the title, inline edit, and instruction '
   + 'runs never start a server or load a skill. Selecting a server does not sign in to it. '
-  + 'Opening these settings checks enabled MCP servers by connecting and listing tools; '
-  + 'checks never invoke tools or open browser sign-in.';
+  + 'While Copilot is enabled, selected servers are checked at startup, after MCP settings '
+  + 'changes, and when returning to Obsidian after a 15-minute cooldown. Up to three checks '
+  + 'run at once. Checks only connect and list tools; authentication requirements produce '
+  + 'notifications, never automatic browser sign-in.';
 
 interface ResourceRow {
   readonly detail: string;
@@ -294,7 +296,10 @@ export function renderCopilotResourceSettings(
       renderList();
       renderStatus();
     }
-    if (!disposed && !discoveryFailure) check();
+    if (!disposed && !discoveryFailure) {
+      if (refreshing) check();
+      else void workspace.mcpReadiness.ensureChecked().catch(reportReadinessFailure);
+    }
   };
 
   discoverButton.addEventListener('click', () => {
@@ -486,28 +491,12 @@ export function renderCopilotResourceSettings(
     renderList();
     renderStatus();
   });
-  const signInPhases = new Map(getCopilotHostResources(settingsBag).selectedMcpServers.map(reference => [
-    serverId(reference.configPath, reference.name), workspace.mcpSignIn.getState(reference).phase,
-  ]));
-  const unsubscribeSignIn = workspace.mcpSignIn.subscribe(() => {
-    for (const reference of getCopilotHostResources(settingsBag).selectedMcpServers) {
-      const id = serverId(reference.configPath, reference.name);
-      const phase = workspace.mcpSignIn.getState(reference).phase;
-      const previous = signInPhases.get(id);
-      signInPhases.set(id, phase);
-      if (phase === 'connected' && previous !== phase) check(reference);
-    }
-  });
   renderList();
   void discover();
   return () => {
     if (disposed) return;
     disposed = true;
     unsubscribeReadiness();
-    unsubscribeSignIn();
-    void workspace.mcpReadiness.cancel().catch(error => {
-      new Notice(`Could not close MCP readiness checks: ${error instanceof Error ? error.message : String(error)}`);
-    });
   };
 }
 

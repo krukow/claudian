@@ -249,8 +249,10 @@ class SdkBackedClient implements CopilotSdkClient {
   ): Promise<CopilotSdkSession> {
     permissions?.attach(session);
     const cancellation = new AbortController();
-    const call: ResourceSetupCall = async operation => {
+    let lastStep = 'starting session preparation';
+    const call: ResourceSetupCall = async (operation, step) => {
       cancellation.signal.throwIfAborted();
+      lastStep = step;
       const result = await operation();
       cancellation.signal.throwIfAborted();
       return result;
@@ -273,9 +275,11 @@ class SdkBackedClient implements CopilotSdkClient {
     }
     const error = outcome.kind === 'rejected'
       ? outcome.error
-      : copilotNativeSilenceError(
-        config.resources ? 'preparing selected Copilot resources' : 'configuring Copilot permissions',
-        NATIVE_STARTUP_TIMEOUT_SECONDS,
+      : new CopilotRuntimeError(
+        'transport',
+        `Timed out after ${NATIVE_STARTUP_TIMEOUT_SECONDS} seconds `
+        + `${config.resources ? 'preparing selected Copilot resources' : 'configuring Copilot permissions'}. `
+        + `Last step: ${lastStep}`,
       );
     cancellation.abort(error);
     permissions?.dispose();
@@ -418,11 +422,14 @@ async function applyNativePermissionMode(
   try {
     const updated = await call(() => session.rpc.options.update({
       featureFlags: { AUTO_APPROVAL: permissionMode === 'judge' },
-    }));
+    }), 'applying Copilot approval settings');
     if (!updated.success) {
       throw copilotConfigurationError('The CLI did not apply the approval feature setting.');
     }
-    const result = await call(() => session.rpc.commands.invoke({ name: 'permissions', input }));
+    const result = await call(
+      () => session.rpc.commands.invoke({ name: 'permissions', input }),
+      'configuring Copilot permissions',
+    );
     if (result.kind !== 'text') {
       throw copilotConfigurationError('The CLI did not complete the permission-mode command.');
     }
@@ -807,12 +814,12 @@ async function prepareSessionResources(
   if (mcp.tools.length > 0) {
     await call(() => session.rpc.options.update({
         availableTools: [...config.availableTools, ...mcp.tools],
-    }));
+    }), 'enabling selected MCP tools');
   }
   return { resourceDiagnostics: mcp.diagnostics, skillCommandNames };
 }
 
-type ResourceSetupCall = <T>(operation: () => Promise<T>) => Promise<T>;
+type ResourceSetupCall = <T>(operation: () => Promise<T>, step: string) => Promise<T>;
 
 /** Disables every loaded skill outside the selection, and names those that stay. */
 async function selectNativeSkills(
@@ -827,8 +834,8 @@ async function selectNativeSkills(
     path.normalize(directory),
     canonicalizeCopilotHostPath(directory, process.platform),
   ].filter((value): value is string => Boolean(value))));
-  await call(() => session.rpc.skills.ensureLoaded());
-  const listed = await call(() => session.rpc.skills.list());
+  await call(() => session.rpc.skills.ensureLoaded(), 'loading selected skills');
+  const listed = await call(() => session.rpc.skills.list(), 'listing loaded skills');
   const commandNames = new Set<string>();
   for (const skill of listed.skills) {
     if (isSelectedSkill(skill.path, selectedDirectories)) {
@@ -837,7 +844,10 @@ async function selectNativeSkills(
       }
       continue;
     }
-    await call(() => session.rpc.skills.disable({ name: skill.name }));
+    await call(
+      () => session.rpc.skills.disable({ name: skill.name }),
+      `disabling unselected skill ${skill.name}`,
+    );
   }
   return commandNames;
 }
@@ -918,7 +928,10 @@ async function collectSelectedMcpTools(
       ? new Set(server.tools)
       : null;
     try {
-      const listing = await call(() => session.rpc.mcp.listTools({ serverName }));
+      const listing = await call(
+        () => session.rpc.mcp.listTools({ serverName }),
+        `listing tools for MCP server ${serverName}`,
+      );
       for (const tool of listing.tools) {
         if (!allowed || allowed.has(tool.name)) {
           tools.push(`mcp:${serverName}-${tool.name}`);
@@ -976,13 +989,20 @@ async function settleMcpConnections(
   serverNames: readonly string[],
   call: ResourceSetupCall,
 ): Promise<Map<string, McpServerState>> {
+  let pending: readonly string[] = [];
   for (;;) {
-    const states = await call(() => readMcpServerStates(session, serverNames));
-    const pending = serverNames.filter(name => states.get(name)?.status === 'pending');
+    const states = await call(
+      () => readMcpServerStates(session, serverNames),
+      `reading MCP connection states${pending.length ? ` (waiting for ${pending.join(', ')})` : ''}`,
+    );
+    pending = serverNames.filter(name => states.get(name)?.status === 'pending');
     if (pending.length === 0) {
       return states;
     }
-    await call(() => new Promise(resolve => window.setTimeout(resolve, MCP_CONNECTION_POLL_MS)));
+    await call(
+      () => new Promise(resolve => window.setTimeout(resolve, MCP_CONNECTION_POLL_MS)),
+      `waiting for MCP servers: ${pending.join(', ')}`,
+    );
   }
 }
 

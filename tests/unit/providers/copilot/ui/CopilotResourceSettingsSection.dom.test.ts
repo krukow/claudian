@@ -79,11 +79,10 @@ import type { ProviderHost } from '@/core/providers/ProviderHost';
 import { ProviderWorkspaceRegistry } from '@/core/providers/ProviderWorkspaceRegistry';
 import type { ProviderId, ProviderSettingsTabRendererContext } from '@/core/providers/types';
 import type { ClaudianSettings } from '@/core/types';
-import { CopilotCommandLoader } from '@/providers/copilot/app/CopilotCommandLoader';
-import { CopilotCommandMetadataProbe } from '@/providers/copilot/app/CopilotCommandMetadataProbe';
-import { CopilotMcpReadinessCoordinator } from '@/providers/copilot/app/CopilotMcpReadinessCoordinator';
-import { CopilotMcpSignInCoordinator } from '@/providers/copilot/app/CopilotMcpSignInCoordinator';
-import type { CopilotWorkspaceServices } from '@/providers/copilot/app/CopilotWorkspaceServices';
+import type { CopilotCommandLoader } from '@/providers/copilot/app/CopilotCommandLoader';
+import type { CopilotMcpReadinessCoordinator } from '@/providers/copilot/app/CopilotMcpReadinessCoordinator';
+import type { CopilotMcpSignInCoordinator } from '@/providers/copilot/app/CopilotMcpSignInCoordinator';
+import { createCopilotWorkspaceServices } from '@/providers/copilot/app/CopilotWorkspaceServices';
 import {
   getCopilotHostResources,
   updateCopilotHostResources,
@@ -137,6 +136,8 @@ function renderSection(options: {
   persistedSelections: CopilotResourceSettings[];
   settings: Record<string, unknown>;
   dispose: () => void;
+  context: ProviderSettingsTabRendererContext;
+  mcpReadiness: CopilotMcpReadinessCoordinator;
   mcpSignIn: CopilotMcpSignInCoordinator;
   registry: ProviderExecutionLifecycleRegistry;
 } {
@@ -179,11 +180,10 @@ function renderSection(options: {
     settings: settings as unknown as ClaudianSettings,
   } as unknown as ProviderHost;
 
-  const commandLoader = new CopilotCommandLoader(new CopilotCommandMetadataProbe(host));
   const runtime = options.runtime ?? new FakeCopilotSdkRuntime();
-  const mcpReadiness = new CopilotMcpReadinessCoordinator(host, { runtime });
-  const mcpSignIn = new CopilotMcpSignInCoordinator(host, { runtime });
-  ProviderWorkspaceRegistry.setServices('copilot', { commandLoader, mcpReadiness, mcpSignIn } as CopilotWorkspaceServices);
+  const services = createCopilotWorkspaceServices(host, { runtime });
+  const { commandLoader, mcpReadiness, mcpSignIn } = services;
+  ProviderWorkspaceRegistry.setServices('copilot', services);
 
   const context = {
     notifyProviderModelOptionsChanged: () => {},
@@ -198,10 +198,9 @@ function renderSection(options: {
   const dispose = () => { if (typeof release === 'function') release(); };
   cleanups.push(async () => {
     dispose();
-    await mcpReadiness.dispose();
-    await mcpSignIn.dispose();
+    await services.dispose?.();
   });
-  return { commandLoader, container, persistedSelections, settings, dispose, mcpSignIn, registry };
+  return { commandLoader, container, persistedSelections, settings, dispose, context, mcpReadiness, mcpSignIn, registry };
 }
 
 async function settle(): Promise<void> {
@@ -251,6 +250,65 @@ afterEach(async () => {
 });
 
 describe('Copilot resource settings', () => {
+  it('checks three servers concurrently and starts the next as soon as a probe has been released', async () => {
+    const names = ['first', 'second', 'third', 'fourth', 'fifth'];
+    const configPath = write('home/.copilot/mcp-config.json', JSON.stringify({
+      mcpServers: Object.fromEntries(names.map(name => [
+        name, { type: 'http', url: `https://${name}.example.test/mcp` },
+      ])),
+    }));
+    const listings = new Map(names.map(name => [name, createDeferred()]));
+    const stoppingSecond = createDeferred();
+    const releaseSecond = createDeferred();
+    const runtime = new FakeCopilotSdkRuntime(() => {
+      let serverName = '';
+      return new FakeCopilotSdkClient({
+        onSessionCreated: session => {
+          session.mcpReadinessBehavior = async name => {
+            serverName = name;
+            await listings.get(name)!.promise;
+            return { phase: 'connected', toolCount: 0 };
+          };
+        },
+        stopBehavior: async () => {
+          if (serverName === 'second') {
+            stoppingSecond.resolve();
+            await releaseSecond.promise;
+          }
+        },
+      });
+    });
+    const { container } = renderSection({
+      runtime, resources: { selectedMcpServers: names.map(name => ({ configPath, name })) },
+    });
+    const phase = (name: string) => {
+      const button = within(container).getByRole('button', { name: `Check ${name} connection` });
+      return button.parentElement!.dataset.phase;
+    };
+
+    try {
+      await waitFor(() => expect(names.map(phase)).toEqual([
+        'checking', 'checking', 'checking', 'queued', 'queued',
+      ]));
+      listings.get('second')!.resolve();
+      await stoppingSecond.promise;
+      expect(names.map(phase)).toEqual(['checking', 'checking', 'checking', 'queued', 'queued']);
+
+      releaseSecond.resolve();
+      await waitFor(() => expect(names.map(phase)).toEqual([
+        'checking', 'connected', 'checking', 'checking', 'queued',
+      ]));
+      listings.get('fourth')!.resolve();
+      await waitFor(() => expect(names.map(phase)).toEqual([
+        'checking', 'connected', 'checking', 'connected', 'checking',
+      ]));
+    } finally {
+      for (const listing of listings.values()) listing.resolve();
+      releaseSecond.resolve();
+    }
+    await waitFor(() => expect(within(container).getAllByText('Connected (0 tools)')).toHaveLength(5));
+  });
+
   it('keeps completed MCP checks across skill-only changes while explicit Refresh checks again', async () => {
     const configPath = write('home/.copilot/mcp-config.json', JSON.stringify({
       mcpServers: {
@@ -280,7 +338,7 @@ describe('Copilot resource settings', () => {
     await waitFor(() => expect(within(container).getAllByText('Connected (0 tools)')).toHaveLength(2));
     expect(runtime.clients.flatMap(client => client.createdSessions.map(session => (
       Object.keys(session.config.resources?.mcpServers ?? {})
-    )))).toEqual([['notes'], ['wiki'], ['notes'], ['wiki']]);
+    ))).sort()).toEqual([['notes'], ['notes'], ['wiki'], ['wiki']]);
   });
 
   it('rechecks confirmed authentication even when the chat-runtime refresh fails', async () => {
@@ -558,7 +616,7 @@ describe('Copilot resource settings', () => {
     await waitFor(() => expect(within(container).getByText('Connected (1 tool)')).toBeTruthy());
   });
 
-  it('releases the view and fences its late readiness completion', async () => {
+  it('keeps checks alive after closing settings and reuses their results when reopened', async () => {
     const configPath = write('home/.copilot/mcp-config.json', JSON.stringify({
       mcpServers: { notes: { command: 'notes-mcp' } },
     }));
@@ -573,16 +631,56 @@ describe('Copilot resource settings', () => {
         };
       },
     }));
-    const { container, dispose } = renderSection({
-      runtime, resources: { selectedMcpServers: [{ configPath, name: 'notes' }] },
+    const reference = { configPath, name: 'notes' };
+    const { container, context, dispose, mcpReadiness } = renderSection({
+      runtime, resources: { selectedMcpServers: [reference] },
     });
+
     await entered.promise;
+    const checking = mcpReadiness.ensureChecked();
     dispose();
     const text = container.textContent;
     listing.resolve();
-    await waitFor(() => expect(runtime.clients[0]?.stopped).toBe(1));
+    await checking;
     expect(container.textContent).toBe(text);
     expect(container.textContent).not.toContain('Connected');
+    expect(mcpReadiness.getState(reference)).toEqual({ phase: 'connected', toolCount: 1 });
+
+    const clients = [...runtime.clients];
+    const reopened = document.body.appendChild(document.createElement('div'));
+    const closeReopened = renderCopilotResourceSettings(reopened, context);
+    try {
+      await settle();
+      expect(within(reopened).getByText('Connected (1 tool)')).toBeTruthy();
+      expect(runtime.clients).toEqual(clients);
+    } finally {
+      closeReopened();
+    }
+  });
+
+  it('rechecks completed MCP sign-in even after the settings view has closed', async () => {
+    const configPath = write('home/.copilot/mcp-config.json', JSON.stringify({
+      mcpServers: { notes: { type: 'http', url: 'https://notes.example.test/mcp' } },
+    }));
+    const reference = { configPath, name: 'notes' };
+    let authenticated = false;
+    const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
+      onSessionCreated: session => {
+        session.mcpSignInBehavior = async () => { authenticated = true; return {}; };
+        session.mcpReadinessBehavior = async () => authenticated
+          ? { phase: 'connected', toolCount: 2 } : { phase: 'needs-auth' };
+      },
+    }));
+    const { container, dispose, mcpReadiness, mcpSignIn } = renderSection({
+      runtime, resources: { selectedMcpServers: [reference] },
+    });
+    await waitFor(() => expect(mcpReadiness.getState(reference)).toEqual({ phase: 'needs-auth' }));
+    dispose();
+    const text = container.textContent;
+    await mcpSignIn.signIn(reference);
+
+    await waitFor(() => expect(mcpReadiness.getState(reference)).toEqual({ phase: 'connected', toolCount: 2 }));
+    expect(container.textContent).toBe(text);
   });
 
   it('automatically verifies selected resources without false missing labels or settings writes', async () => {

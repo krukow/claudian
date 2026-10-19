@@ -1,3 +1,9 @@
+import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+import { CopilotClient, RuntimeConnection } from '@github/copilot-sdk';
+
 import type { ProviderExecutionErrorCategory } from '@/core/execution';
 import {
   copilotAuthenticationError,
@@ -10,6 +16,11 @@ import {
   toCopilotRuntimeError,
   toCopilotSendError,
 } from '@/providers/copilot/sdk/CopilotRuntimeError';
+
+jest.mock('node:child_process', () => ({
+  ...jest.requireActual('node:child_process'),
+  spawn: () => { throw new Error('Native processes are forbidden in error-classification tests.'); },
+}));
 
 describe('Copilot runtime error constructors', () => {
   it('marks a configuration failure as unrecoverable', () => {
@@ -116,17 +127,45 @@ describe('toCopilotRuntimeError', () => {
  */
 describe('toCopilotRuntimeError for the SDK missing-CLI failure', () => {
   it.each([
-    '/opt/homebrew/bin/copilot',
-    'C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\@github\\copilot\\npm-loader.js',
-  ])('reports the path %s as unrecoverable configuration', (cliPath) => {
+    { cliPath: '/opt/homebrew/bin/copilot', hint: 'Ensure @github/copilot is installed.' },
+    { cliPath: '/opt/homebrew/bin/copilot', hint: 'Set COPILOT_CLI_PATH to use a custom installation.' },
+    { cliPath: '/opt/unauthorized/copilot', hint: 'Set COPILOT_CLI_PATH to use a custom installation.' },
+    {
+      cliPath: 'C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\@github\\copilot\\npm-loader.js',
+      hint: 'Set COPILOT_CLI_PATH to use a custom installation.',
+    },
+  ])('reports the path $cliPath as unrecoverable configuration ($hint)', ({ cliPath, hint }) => {
+    const original = new Error(`Copilot CLI not found at ${cliPath}. ${hint}`);
     const error = toCopilotRuntimeError(
-      new Error(`Copilot CLI not found at ${cliPath}. Ensure @github/copilot is installed.`),
+      original,
       'transport',
     );
 
     expect(error.category).toBe('configuration');
     expect(error.recoverable).toBe(false);
     expect(error.nativeReset).toBe('none');
+    expect(error.cause).toBe(original);
+    expect(error.message).toContain(cliPath);
+    expect(error.message).toContain('Settings > Claudian > Providers > Copilot');
+    expect(error.message).not.toContain('COPILOT_CLI_PATH');
+  });
+
+  it('recognizes the installed SDK error rather than only a captured message fixture', async () => {
+    const missingPath = path.join(tmpdir(), `claudian-missing-cli-${randomUUID()}`, 'copilot');
+    const client = new CopilotClient({
+      baseDirectory: path.join(tmpdir(), `claudian-missing-cli-state-${randomUUID()}`),
+      connection: RuntimeConnection.forStdio({ path: missingPath, env: {} }),
+      mode: 'empty',
+    });
+    try {
+      const failure = await client.start().then(() => undefined, (error: unknown) => error);
+      const error = toCopilotRuntimeError(failure, 'transport');
+
+      expect(error).toMatchObject({ category: 'configuration', recoverable: false, nativeReset: 'none' });
+      expect(error.message).toContain('Settings > Claudian > Providers > Copilot');
+    } finally {
+      await client.forceStop();
+    }
   });
 });
 

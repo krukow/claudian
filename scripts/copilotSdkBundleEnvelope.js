@@ -1,10 +1,7 @@
 /**
- * Installing `@github/copilot-sdk` also installs a Copilot CLI Claudian never runs and a
- * native addon Obsidian cannot load: `@github/copilot` and `koffi` are ordinary dependencies
- * of the SDK, and the CLI resolves one per-platform binary package (~276-312 MB unpacked,
- * whichever platform installs) through its own optional dependencies. There is no opt-out
- * short of package-manager overrides or a vendored stub, both of which trade a disk cost for
- * a resolution the SDK can silently break, so the cost is accepted and disclosed instead.
+ * The SDK declares optional platform runtimes and the native `koffi` addon. Claudian
+ * always uses the user-installed CLI; neither bundled runtime resolution nor native FFI
+ * may reach the Obsidian bundle.
  *
  * What this envelope guarantees is narrower and enforceable: none of it reaches `main.js`,
  * and nothing in the bundle can resolve it at runtime.
@@ -12,15 +9,17 @@
  * envelope and measures both halves — the graph that must be absent, and the stdio JSON-RPC
  * client that must survive.
  */
-const fsPromises = require('node:fs/promises');
 const path = require('node:path');
 
 const envelopeRequire = require;
+const bundledCliRejection =
+  'The Copilot CLI bundled with the SDK is not used by Claudian. '
+  + 'Install the copilot CLI and set its path in Copilot settings.';
 
 /**
  * The Copilot SDK reaches the Copilot CLI over stdio JSON-RPC. Everything else it can
- * reach for — the in-process FFI runtime, the BYOK request forwarder, and the SQLite
- * session store — is unsupported in Claudian and is replaced with a fail-closed stub so
+ * reach for — the in-process FFI runtime, the BYOK request forwarder, the SQLite
+ * session store, and SDK-managed runtime assets — is unsupported in Claudian and is replaced with a fail-closed stub so
  * the native `koffi` addon and its transitive graph never enter the Obsidian bundle.
  */
 const unsupportedSdkModules = Object.freeze({
@@ -39,8 +38,13 @@ const unsupportedSdkModules = Object.freeze({
     functionExports: [],
     reason: 'Copilot in-process FFI transport is disabled in Claudian.',
   },
+  runtimeArtifacts: {
+    classExports: [],
+    functionExports: ['ensureRuntimeBundle'],
+    reason: bundledCliRejection,
+  },
   sessionFsProvider: {
-    classExports: ['SessionFsSqliteTransactionFailure'],
+    classExports: ['SessionFsSqliteTransactionFailure', 'SessionFsWriteFailure'],
     functionExports: ['createSessionFsAdapter'],
     reason: 'Copilot SQLite session storage is disabled in Claudian.',
   },
@@ -57,40 +61,6 @@ function unsupportedModuleSource(moduleName) {
       `export class ${exportName} { constructor() { throw new Error(reason); } }`
     )),
   ].join('\n');
-}
-
-/**
- * The SDK falls back to the CLI that ships inside its own dependency graph when no path is
- * supplied. Claudian always supplies one, but leaving the fallback in the bundle keeps a
- * path to a runtime the user never installed, and drags the platform package names in with
- * it. Both resolvers are replaced with a throw so the fallback cannot fire and the graph
- * leaves no trace in `main.js`.
- */
-const bundledCliResolvers = Object.freeze([
-  'getCliPlatformPackageNames',
-  'getBundledCliPath',
-]);
-
-const bundledCliRejection =
-  'The Copilot CLI bundled with the SDK is not used by Claudian. '
-  + 'Install the copilot CLI and set its path in Copilot settings.';
-
-function stripBundledCliResolvers(contents, modulePath) {
-  let patched = contents;
-  for (const name of bundledCliResolvers) {
-    const declaration = new RegExp(`function ${name}\\(\\)\\s*\\{[\\s\\S]*?\\n\\}\\n`);
-    if (!declaration.test(patched)) {
-      throw new Error(
-        `Copilot SDK bundle envelope could not neutralize ${name} in ${modulePath}. `
-        + 'The SDK changed shape; revisit the envelope instead of shipping the fallback.',
-      );
-    }
-    patched = patched.replace(
-      declaration,
-      `function ${name}() { throw new Error(${JSON.stringify(bundledCliRejection)}); }\n`,
-    );
-  }
-  return patched;
 }
 
 function resolveVscodeJsonRpcNodeEntry() {
@@ -127,6 +97,8 @@ const copilotForbiddenBundleMarkers = Object.freeze({
   '@github/copilot-linux': 'an SDK-bundled CLI platform package',
   '@github/copilot-darwin': 'an SDK-bundled CLI platform package',
   '@github/copilot-win32': 'an SDK-bundled CLI platform package',
+  '@github/copilot-sdk-': 'an SDK-bundled runtime platform package',
+  'materializeRuntimeBundle': 'SDK-bundled runtime extraction',
   'Could not resolve a @github/copilot platform package':
     'the SDK-bundled CLI resolution failure path',
 });
@@ -160,21 +132,11 @@ function createCopilotSdkBundleEnvelopePlugin() {
       Object.keys(unsupportedSdkModules).join('|')
     })\\.js$`,
   );
-  const clientFilter =
-    /[\\/]node_modules[\\/]@github[\\/]copilot-sdk[\\/]dist[\\/](?:cjs[\\/])?client\.js$/;
-
   return {
     name: 'copilot-sdk-bundle-envelope',
     setup(build) {
       build.onLoad({ filter: unsupportedFilter }, (args) => ({
         contents: unsupportedModuleSource(path.basename(args.path, '.js')),
-        loader: 'js',
-      }));
-      build.onLoad({ filter: clientFilter }, async (args) => ({
-        contents: stripBundledCliResolvers(
-          await fsPromises.readFile(args.path, 'utf8'),
-          args.path,
-        ),
         loader: 'js',
       }));
     },
@@ -183,11 +145,9 @@ function createCopilotSdkBundleEnvelopePlugin() {
 
 module.exports = {
   bundledCliRejection,
-  bundledCliResolvers,
   createCopilotSdkBundleEnvelopePlugin,
   createCopilotSdkRuntimeAliases,
   inspectCopilotBundleEnvelope,
   resolveVscodeJsonRpcNodeEntry,
-  stripBundledCliResolvers,
   unsupportedSdkModules,
 };

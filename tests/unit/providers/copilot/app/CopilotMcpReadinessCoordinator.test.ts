@@ -60,6 +60,7 @@ it('reports each isolated server, including empty tools, without starting disabl
           await listing.promise;
           throw new Error('tools/list refused');
         }
+        await listing.promise;
         return { phase: 'connected', toolCount: 0 };
       };
     },
@@ -68,7 +69,7 @@ it('reports each isolated server, including empty tools, without starting disabl
   const checking = service.check();
   await entered.promise;
   expect(service.getState(references[0])).toEqual({ phase: 'checking' });
-  expect(service.getState(references[1])).toEqual({ phase: 'queued' });
+  expect(service.getState(references[1])).toEqual({ phase: 'checking' });
   expect(service.check()).toBe(checking);
   listing.resolve();
   await checking;
@@ -83,7 +84,7 @@ it('reports each isolated server, including empty tools, without starting disabl
     permission: session.config.permissionMode,
     prompts: session.prompts,
     signIns: session.mcpSignIns,
-  })))).toEqual(['first', 'second'].map(name => ({
+  }))).sort((left, right) => left.servers[0].localeCompare(right.servers[0]))).toEqual(['first', 'second'].map(name => ({
     servers: [name], tools: [], skills: [], cache: 'persistent', permission: 'ask', prompts: [], signIns: [],
   })));
   for (const client of runtime.clients) {
@@ -165,7 +166,7 @@ it('surfaces cleanup failure instead of publishing ready', async () => {
   await service.dispose();
 });
 
-it('does not restart a deferred recheck after its settings view closes', async () => {
+it('does not restart a deferred recheck after a subsequent cancellation', async () => {
   const entered = createDeferred();
   const listing = createDeferred();
   const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
@@ -245,7 +246,7 @@ it.each(['cache', 'selection', 'runtime'] as const)(
     expect(service.getState(references[0])).toEqual({ phase: 'connected', toolCount: 0 });
     expect(runtime.clients.flatMap(client => client.createdSessions.map(session => (
       Object.keys(session.config.resources?.mcpServers ?? {})
-    )))).toEqual([['first'], ['second'], ['first'], ['second']]);
+    ))).sort()).toEqual([['first'], ['first'], ['second'], ['second']]);
     await service.dispose();
   },
 );
@@ -342,19 +343,29 @@ it.each(['metadata', 'create-session'])(
   },
 );
 
-it('retires unfinished readiness when a failed chat lease skips the before-transition hook', async () => {
+it('fences old probes when a failed chat lease skips quiescence and fresh checks finish first', async () => {
   const entered = createDeferred();
-  const release = createDeferred();
+  const releaseFirst = createDeferred();
+  const releaseSecond = createDeferred();
+  const refreshed = createDeferred();
+  let started = 0;
+  let firstChecks = 0;
   const runtime = new FakeCopilotSdkRuntime(() => new FakeCopilotSdkClient({
     onSessionCreated: session => {
-      session.mcpReadinessBehavior = async () => {
-        entered.resolve();
-        await release.promise;
+      session.mcpReadinessBehavior = async name => {
+        started += 1;
+        if (started === 2) entered.resolve();
+        if (name === 'first' && ++firstChecks > 1) return { phase: 'connected', toolCount: 2 };
+        await (name === 'first' ? releaseFirst.promise : releaseSecond.promise);
         return { phase: 'connected', toolCount: 1 };
       };
     },
   }));
-  const { host, references, registry, service } = await setup(runtime);
+  const { host, references, registry, service, setCliPath } = await setup(runtime);
+  service.subscribe(() => {
+    const state = service.getState(references[0]);
+    if (state.phase === 'connected' && state.toolCount === 2) refreshed.resolve();
+  });
   const interactionPort: ProviderInteractionPort = {
     requestApproval: async () => { throw new Error('Unexpected approval.'); },
     askUserQuestion: async () => { throw new Error('Unexpected question.'); },
@@ -389,15 +400,19 @@ it('retires unfinished readiness when a failed chat lease skips the before-trans
     expect(references.map(reference => service.getState(reference))).toEqual([
       { phase: 'unchecked' }, { phase: 'unchecked' },
     ]);
+    setCliPath('/opt/copilot');
     const rechecking = service.check(references[0]);
-    release.resolve();
+    releaseSecond.resolve();
+    await refreshed.promise;
+    releaseFirst.resolve();
     await Promise.all([checking, rechecking]);
-    expect(service.getState(references[0])).toEqual({ phase: 'connected', toolCount: 1 });
+    expect(service.getState(references[0])).toEqual({ phase: 'connected', toolCount: 2 });
     expect(runtime.clients.flatMap(client => client.createdSessions.map(session => (
       Object.keys(session.config.resources?.mcpServers ?? {})
-    )))).toEqual([['first'], ['first']]);
+    ))).sort()).toEqual([['first'], ['first'], ['second']]);
   } finally {
-    release.resolve();
+    releaseFirst.resolve();
+    releaseSecond.resolve();
     await checking;
     await service.dispose();
     await registry.dispose();

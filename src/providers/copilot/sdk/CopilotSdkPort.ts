@@ -25,14 +25,14 @@ export type CopilotSdkModel = ModelInfo;
 export type CopilotSdkPermissionRequest = PermissionRequest;
 export type CopilotSdkPermissionResult = PermissionRequestResult;
 /** Metadata available on permission events, but omitted from the SDK callback. */
-export type CopilotSdkPermissionPrompt = Pick<
-  NonNullable<Extract<SessionEvent, { type: 'permission.requested' }>['data']['promptRequest']>,
-  'autoApproval'
-> & {
+export interface CopilotSdkPermissionPrompt {
+  readonly autoApproval?: NonNullable<
+    Extract<SessionEvent, { type: 'permission.requested' }>['data']['promptRequest']
+  >['assistedApproval'];
   readonly managedApprovalRequired?: boolean;
   /** Ends when the native prompt is resolved, cancelled, or loses its turn. */
   readonly signal?: AbortSignal;
-};
+}
 export type CopilotSdkUserInputRequest = Parameters<UserInputHandler>[0];
 export type CopilotSdkUserInputResponse = Awaited<ReturnType<UserInputHandler>>;
 
@@ -252,9 +252,9 @@ export interface CopilotSdkClient {
 
 export interface CopilotSdkRuntime {
   /**
-   * Starts a CLI and hands back the client bound to it, within the startup budget rather
-   * than the shorter one every release shares: a cold CLI is still coming up long after a
-   * runtime that is already running would have answered.
+   * Bounds native startup with the startup budget, then completes any failed-start
+   * cleanup within the release budgets before rejecting. Callers retain ownership until
+   * this settles; a second deadline would discard a CLI the runtime is still releasing.
    */
   createClient(options: CopilotSdkClientOptions): Promise<CopilotSdkClient>;
 }
