@@ -115,7 +115,7 @@ const SEND_TIMEOUT_PATTERN = /^Timeout after \d+ms waiting for session\.idle$/;
  * saying the configured path is wrong.
  */
 const CLI_PATH_MISSING_PATTERN =
-  /^Copilot CLI not found at .+\. Ensure @github\/copilot is installed\.$/;
+  /^Copilot CLI not found at (.+)\. (?:Ensure @github\/copilot is installed|Set COPILOT_CLI_PATH to use a custom installation)\.$/;
 
 /**
  * Maps a `send` failure onto the provider contract.
@@ -150,6 +150,15 @@ export function toCopilotRuntimeError(
   }
 
   const message = describeError(error);
+  const missingCli = CLI_PATH_MISSING_PATTERN.exec(message);
+  if (missingCli) {
+    return new CopilotRuntimeError(
+      'configuration',
+      `The Copilot CLI was not found at ${missingCli[1]}. Check the CLI path in `
+      + 'Settings > Claudian > Providers > Copilot, or reinstall the CLI.',
+      { cause: error },
+    );
+  }
   return new CopilotRuntimeError(
     categorizeMessage(message) ?? fallbackCategory,
     message,
@@ -171,7 +180,7 @@ export function describeError(error: unknown): string {
 function categorizeMessage(message: string): ProviderExecutionErrorCategory | null {
   if (MISSING_SESSION_PATTERN.test(message)) return 'provider-session-missing';
   if (AUTHENTICATION_PATTERN.test(message)) return 'authentication';
-  if (CONFIGURATION_PATTERN.test(message) || CLI_PATH_MISSING_PATTERN.test(message)) {
+  if (CONFIGURATION_PATTERN.test(message)) {
     return 'configuration';
   }
   if (PROCESS_EXIT_PATTERN.test(message)) return 'process-exited';

@@ -1108,28 +1108,17 @@ test('production bundle policy rejects Copilot SDK code the envelope excludes', 
   }
 });
 
-/**
- * Patching the SDK source is not what keeps the resolvers out of the artifact: the patched
- * module still names them, and only the production minifier drops the names along with the
- * bodies that now only throw. The gate above reads the artifact, so it stays stricter than
- * the patch.
- */
-test('the Copilot bundle envelope removes the SDK-bundled CLI resolvers', () => {
-  const { stripBundledCliResolvers } = copilotSdkBundleEnvelopeHelpers;
+test('the Copilot SDK resolves bundled runtimes only through the stubbed boundary', () => {
+  const { unsupportedSdkModules } = copilotSdkBundleEnvelopeHelpers;
   const clientPath = path.join(
     process.cwd(),
     'node_modules/@github/copilot-sdk/dist/client.js',
   );
-  const patched = stripBundledCliResolvers(fs.readFileSync(clientPath, 'utf8'), clientPath);
-
-  assert.equal(inspectCopilotBundleEnvelope(patched).forbidden.length > 0, true);
-  assert.match(patched, /function getBundledCliPath\(\) \{ throw new Error\(/);
-  assert.match(patched, /function getCliPlatformPackageNames\(\) \{ throw new Error\(/);
-  assert.equal(patched.includes('@github/copilot-${variant}-${arch}'), false);
-  assert.throws(
-    () => stripBundledCliResolvers('export const nothing = 1;', 'client.js'),
-    /could not neutralize getCliPlatformPackageNames/,
+  assert.match(
+    fs.readFileSync(clientPath, 'utf8'),
+    /import \{ ensureRuntimeBundle \} from "\.\/runtimeArtifacts\.js"/,
   );
+  assert.deepEqual(unsupportedSdkModules.runtimeArtifacts.functionExports, ['ensureRuntimeBundle']);
 });
 
 test('bundle-critical runtime dependencies require exact manifest and lock agreement', () => {

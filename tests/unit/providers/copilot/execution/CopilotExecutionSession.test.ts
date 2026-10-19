@@ -2244,28 +2244,27 @@ describe('CopilotExecutionSession bounded native acquisition', () => {
     });
   });
 
-  it('cancels and disposes a turn whose client never finishes starting', async () => {
-    await withFakeTimers(async () => {
-      const starting = createDeferred();
-      const runtime = new FakeCopilotSdkRuntime(() => {
-        starting.resolve();
-        return new Promise<FakeCopilotSdkClient>(() => {});
-      });
-      const session = new CopilotExecutionBackend(createHost(), { runtime })
-        .createSession(createSessionConfig());
-
-      const run = session.execute(createRequest());
-      const collected = collect(run.events);
-      await starting.promise;
-      run.cancel();
-      await jest.advanceTimersByTimeAsync(30_000);
-
-      expect(turnFlow(await collected).at(-1)).toMatchObject({ type: 'cancelled' });
-
-      await session.dispose();
-
-      expect(session.getStatus()).toBe('disposed');
+  it('cancels and disposes a turn after the SDK completes failed-start cleanup', async () => {
+    const starting = createDeferred();
+    const failedStartup = createDeferred<FakeCopilotSdkClient>();
+    const runtime = new FakeCopilotSdkRuntime(() => {
+      starting.resolve();
+      return failedStartup.promise;
     });
+    const session = new CopilotExecutionBackend(createHost(), { runtime })
+      .createSession(createSessionConfig());
+    const run = session.execute(createRequest());
+    let ended = false;
+    const collected = collect(run.events).then(events => { ended = true; return events; });
+    await starting.promise;
+    run.cancel();
+    await Promise.resolve();
+    expect(ended).toBe(false);
+
+    failedStartup.reject(new CopilotRuntimeError('transport', 'The SDK ended a timed-out startup.'));
+    expect(turnFlow(await collected).at(-1)).toMatchObject({ type: 'cancelled' });
+    await session.dispose();
+    expect(session.getStatus()).toBe('disposed');
   });
 
   /**

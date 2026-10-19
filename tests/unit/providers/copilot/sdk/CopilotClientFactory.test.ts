@@ -239,12 +239,8 @@ describe('CopilotClientFactory authentication gate', () => {
   });
 });
 
-/**
- * The factory bounds the create as well, so that a runtime which never answers is not
- * left holding a client nobody can reach. That bound has to be the same startup budget
- * the runtime uses, or it cuts the cold start the runtime is still waiting out.
- */
-describe('CopilotClientFactory startup budget', () => {
+/** Caller-side deadlines must not cut short the runtime's startup and cleanup ownership. */
+describe('CopilotClientFactory startup ownership', () => {
   it('waits out a cold start that outlasts the cleanup budget', async () => {
     jest.useFakeTimers();
     try {

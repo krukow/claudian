@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { builtinModules, createRequire } from 'node:module';
 import path from 'node:path';
 
@@ -36,8 +36,7 @@ const upstreamCeilingBytes = budgetPolicyBytes('upstreamMainBudgetBytes');
 const preCopilotBaselineBytes = budgetPolicyBytes('preCopilotSdkBaselineMainBytes');
 
 /**
- * The retained SDK measures ~147 KB through the production Terser path at SDK 1.0.11. The
- * bound is deliberately not that number: ordinary SDK growth is not a regression, while the
+ * Ordinary SDK growth is not a regression, while the
  * graph this envelope excludes — the native FFI addon and the platform CLI resolver — is
  * measured in megabytes and cannot hide under it. The floor is the other half of the same
  * guarantee: a broken alias, a tree-shaken client, or a stubbed-out transport would collapse
@@ -48,15 +47,12 @@ const retainedSdkLowerBoundBytes = 50_000;
 const requiredProjectedHeadroomBytes = 100_000;
 
 /**
- * Both packages arrive as ordinary transitive dependencies of `@github/copilot-sdk`: the
- * per-platform Copilot CLI through `@github/copilot`'s optional dependencies (~276-312 MB
- * unpacked, whichever platform installs) and the native `koffi` FFI addon (~1.8 MB). Neither
- * is opt-in, so installing the SDK downloads both, and this suite exists to prove that cost
- * is contributor and CI disk only: the envelope keeps them out of the bundle and off every
- * path the bundle can resolve.
+ * Native FFI is an ordinary SDK dependency; platform runtimes are optional dependencies.
+ * Any installed native payload stays on contributor/CI disk, never in the plugin bundle
+ * or on a runtime resolution path the bundle can take.
  */
 const nativeFfiPackage = 'koffi';
-const platformCliPackagePattern = /^copilot-(?:darwin|linux|linuxmusl|win32)-(?:arm64|x64)$/;
+const platformCliPackagePattern = /^@github\/copilot-sdk-(?:darwin|linux|linuxmusl|win32)-(?:arm64|x64)$/;
 
 async function bundleFixture(contents: string): Promise<{
   bytes: number;
@@ -119,6 +115,7 @@ describe('Copilot SDK bundle envelope', () => {
           CopilotWebSocketForwarder,
           CopilotWebSocketHandler,
           SessionFsSqliteTransactionFailure,
+          SessionFsWriteFailure,
           createSessionFsAdapter,
         } from '@github/copilot-sdk';
 
@@ -132,6 +129,7 @@ describe('Copilot SDK bundle envelope', () => {
             ['CopilotWebSocketForwarder', () => new CopilotWebSocketForwarder()],
             ['CopilotWebSocketHandler', () => new CopilotWebSocketHandler()],
             ['SessionFsSqliteTransactionFailure', () => new SessionFsSqliteTransactionFailure()],
+            ['SessionFsWriteFailure', () => new SessionFsWriteFailure()],
             ['createSessionFsAdapter', () => createSessionFsAdapter()],
           ];
           return stubs.map(([name, invoke]) => {
@@ -179,6 +177,7 @@ describe('Copilot SDK bundle envelope', () => {
       input.includes(`/${nativeFfiPackage}/`)
       || input.includes('/@github/copilot/')
       || /\/@github\/copilot-(?:darwin|linux|linuxmusl|win32)-/.test(input)
+      || /\/@github\/copilot-sdk-(?:darwin|linux|linuxmusl|win32)-/.test(input)
       || input.includes('/detect-libc/')
     ))).toEqual([]);
   });
@@ -192,6 +191,7 @@ describe('Copilot SDK bundle envelope', () => {
         'SessionFsSqliteTransactionFailure',
         'Copilot SQLite session storage is disabled in Claudian.',
       ],
+      ['SessionFsWriteFailure', 'Copilot SQLite session storage is disabled in Claudian.'],
       ['createSessionFsAdapter', 'Copilot SQLite session storage is disabled in Claudian.'],
     ]);
     // The FFI host is internal to the SDK, so its stub is proven by the rejection it carries
@@ -226,10 +226,11 @@ describe('Copilot SDK bundle envelope', () => {
     expect(bundleBytes).toBeGreaterThan(retainedSdkBytes);
   });
 
-  it('installs the platform CLI and native FFI packages it refuses to bundle', () => {
-    const githubPackages = readdirSync(path.join(root, 'node_modules', '@github'));
-
-    expect(githubPackages.filter(name => platformCliPackagePattern.test(name)).length)
+  it('declares optional platform runtimes and installs the native FFI dependency it refuses to bundle', () => {
+    const sdkManifest = JSON.parse(readFileSync(
+      path.join(root, 'node_modules', '@github', 'copilot-sdk', 'package.json'), 'utf8',
+    )) as { optionalDependencies: Record<string, string> };
+    expect(Object.keys(sdkManifest.optionalDependencies).filter(name => platformCliPackagePattern.test(name)).length)
       .toBeGreaterThan(0);
     expect(existsSync(path.join(root, 'node_modules', nativeFfiPackage))).toBe(true);
   });

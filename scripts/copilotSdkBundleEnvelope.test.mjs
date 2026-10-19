@@ -8,7 +8,6 @@ import copilotSdkBundleEnvelope from './copilotSdkBundleEnvelope.js';
 import { bundleCriticalRuntimeDependencies } from './runtimeDependencyParity.mjs';
 
 const {
-  bundledCliResolvers,
   createCopilotSdkBundleEnvelopePlugin,
   createCopilotSdkRuntimeAliases,
   inspectCopilotBundleEnvelope,
@@ -25,7 +24,17 @@ function readJson(relativePath) {
 
 test('the Copilot SDK is pinned to an exact bundle-critical version', () => {
   assert.ok(bundleCriticalRuntimeDependencies.includes('@github/copilot-sdk'));
-  assert.equal(readJson('package.json').dependencies['@github/copilot-sdk'], '1.0.11');
+  assert.equal(readJson('package.json').dependencies['@github/copilot-sdk'], '1.0.19');
+});
+
+test('SDK lockfile URLs remain portable across contributor registry configurations', () => {
+  const lock = readJson('package-lock.json');
+  const sdk = readJson('node_modules/@github/copilot-sdk/package.json');
+  for (const name of [sdk.name, ...Object.keys(sdk.optionalDependencies)]) {
+    const entry = lock.packages[`node_modules/${name}`];
+    const unscopedName = name.split('/')[1];
+    assert.equal(entry.resolved, `https://registry.npmjs.org/${name}/-/${unscopedName}-${entry.version}.tgz`);
+  }
 });
 
 test('vscode-jsonrpc resolves to the Node implementation, not the browser build', () => {
@@ -56,7 +65,7 @@ test('unsupported Copilot SDK transports are replaced with fail-closed stubs', a
     },
   });
 
-  assert.equal(loaders.length, 2);
+  assert.equal(loaders.length, 1);
   const [{ callback, filter }] = loaders;
 
   for (const moduleName of Object.keys(unsupportedSdkModules)) {
@@ -77,7 +86,7 @@ test('unsupported Copilot SDK transports are replaced with fail-closed stubs', a
   }
 });
 
-test('the SDK-bundled CLI resolvers are replaced with a throw', async () => {
+test('SDK-bundled runtime initialization fails before resolving or materializing native assets', async () => {
   const plugin = createCopilotSdkBundleEnvelopePlugin();
   const loaders = [];
   plugin.setup({
@@ -85,16 +94,17 @@ test('the SDK-bundled CLI resolvers are replaced with a throw', async () => {
       loaders.push({ callback, filter: options.filter });
     },
   });
-  const clientLoader = loaders[1];
-  const clientPath = path.join(sdkRoot, 'dist', 'client.js');
-
-  assert.match(clientPath, clientLoader.filter);
-  const patched = await clientLoader.callback({ path: clientPath });
-
-  assert.equal(patched.loader, 'js');
-  assert.match(patched.contents, /function getBundledCliPath\(\) \{ throw new Error\(/);
-  assert.match(patched.contents, /function getCliPlatformPackageNames\(\) \{ throw/);
-  assert.equal(patched.contents.includes('@github/copilot-${variant}-${arch}'), false);
+  const runtimePath = path.join(sdkRoot, 'dist', 'runtimeArtifacts.js');
+  const loader = loaders.find(({ filter }) => filter.test(runtimePath));
+  assert.ok(loader, 'The runtime materializer must be inside the fail-closed envelope.');
+  const stub = await loader.callback({ path: runtimePath });
+  const ensureRuntimeBundle = new Function(
+    `${stub.contents.replaceAll('export ', '')}\nreturn ensureRuntimeBundle;`,
+  )();
+  assert.throws(
+    () => ensureRuntimeBundle('1.0.95'),
+    /The Copilot CLI bundled with the SDK is not used by Claudian/,
+  );
 });
 
 test('the FFI transport stub keeps the native koffi addon out of the bundle', () => {
@@ -107,27 +117,20 @@ test('the FFI transport stub keeps the native koffi addon out of the bundle', ()
   assert.doesNotMatch(clientSource, /from "koffi"/);
 });
 
-/**
- * Installing the SDK is not free: `@github/copilot` and `koffi` are ordinary dependencies of
- * `@github/copilot-sdk`, so every install pulls the native FFI addon and one per-platform
- * Copilot CLI (~276-312 MB unpacked) into `node_modules`. Claudian bundles and resolves
- * neither. This test fails when that shape changes, so the disclosure in the envelope and in
- * the build tests stays true rather than quietly describing an older SDK.
- */
-test('the SDK install cost the envelope contains is a transitive dependency, not an extra', () => {
+test('the SDK declares optional platform runtimes and an ordinary FFI dependency', () => {
   const sdkManifest = readJson('node_modules/@github/copilot-sdk/package.json');
-  const cliManifest = readJson('node_modules/@github/copilot/package.json');
-  const platformPackages = Object.keys(cliManifest.optionalDependencies ?? {});
+  const platformPackages = Object.entries(sdkManifest.optionalDependencies ?? {});
 
   assert.equal(sdkManifest.dependencies.koffi !== undefined, true);
-  assert.equal(sdkManifest.dependencies['@github/copilot'] !== undefined, true);
+  assert.equal(sdkManifest.dependencies['@github/copilot'], undefined);
   assert.ok(platformPackages.length > 0);
-  assert.ok(platformPackages.every(name => name.startsWith('@github/copilot-')));
+  assert.ok(platformPackages.every(([name, version]) => (
+    name.startsWith('@github/copilot-sdk-') && version === sdkManifest.version
+  )));
   assert.equal(fs.existsSync(path.join(root, 'node_modules', 'koffi')), true);
 
   assert.ok('ffiRuntimeHost' in unsupportedSdkModules);
-  assert.deepEqual(bundledCliResolvers, ['getCliPlatformPackageNames', 'getBundledCliPath']);
-  for (const marker of ['koffi', 'getBundledCliPath', '@github/copilot-darwin']) {
+  for (const marker of ['koffi', 'getBundledCliPath', '@github/copilot-sdk-darwin']) {
     assert.equal(inspectCopilotBundleEnvelope(marker).forbidden.length, 1);
   }
 });

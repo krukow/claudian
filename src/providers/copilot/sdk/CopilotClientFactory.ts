@@ -10,8 +10,6 @@ import {
 import {
   acquireNativeWithin,
   copilotNativeSilenceError,
-  NATIVE_STARTUP_TIMEOUT_MS,
-  NATIVE_STARTUP_TIMEOUT_SECONDS,
 } from './CopilotNativeBudget';
 import {
   copilotConfigurationError,
@@ -125,34 +123,12 @@ export class CopilotClientFactory {
     return status;
   }
 
-  /**
-   * Starts a client under the startup budget.
-   *
-   * A CLI that never finishes starting would otherwise hold the turn open, and the
-   * cancellation and disposal queued behind it with it. A client that arrives once the
-   * budget has elapsed has no caller left to hand it to, so it is abandoned where it
-   * arrives rather than left running as a process nothing can stop.
-   *
-   * This bound has to be the same budget the runtime starts on. A shorter one here would
-   * cut the cold start the runtime is still waiting out, and abandon a CLI that was about
-   * to answer.
-   */
+  /** The runtime owns startup and cleanup; a second deadline would release its CLI early. */
   private async startClient(identity: CopilotClientIdentity): Promise<CopilotSdkClient> {
-    const outcome = await acquireNativeWithin(
-      this.runtime.createClient(identity),
-      abandonCopilotClient,
-      NATIVE_STARTUP_TIMEOUT_MS,
-    );
-    switch (outcome.kind) {
-      case 'settled':
-        return outcome.value;
-      case 'rejected':
-        throw toCopilotRuntimeError(outcome.error, 'transport');
-      case 'timed-out':
-        throw copilotNativeSilenceError(
-          'starting the Copilot CLI',
-          NATIVE_STARTUP_TIMEOUT_SECONDS,
-        );
+    try {
+      return await this.runtime.createClient(identity);
+    } catch (error) {
+      throw toCopilotRuntimeError(error, 'transport');
     }
   }
 
