@@ -6,7 +6,7 @@ import { resolveCopilotSelectedResources } from '../resources/CopilotResourceRes
 import type { CopilotMcpServerReference, CopilotResourceSettings } from '../resources/CopilotResourceSettings';
 import { CopilotClientFactory } from '../sdk/CopilotClientFactory';
 import { copilotNativeSilenceError, settleNativeWithin } from '../sdk/CopilotNativeBudget';
-import { describeError } from '../sdk/CopilotRuntimeError';
+import { CopilotRuntimeError, describeError } from '../sdk/CopilotRuntimeError';
 import type { CopilotSdkRuntime, CopilotSdkSession } from '../sdk/CopilotSdkPort';
 import { getCopilotProviderSettings, getEnabledCopilotModels } from '../settings';
 
@@ -14,7 +14,7 @@ export type CopilotMcpSignInState =
   | { readonly phase: 'idle' | 'starting' }
   | { readonly phase: 'connected'; readonly warning?: string }
   | { readonly phase: 'waiting'; readonly authorizationUrl: string }
-  | { readonly phase: 'error'; readonly message: string };
+  | { readonly phase: 'error'; readonly message: string; readonly retryable: boolean };
 
 export class CopilotMcpSignInFollowUpError extends Error {
   constructor(readonly authenticated: boolean, error: unknown) {
@@ -82,7 +82,9 @@ export class CopilotMcpSignInCoordinator {
     if (this.disposed) return Promise.reject(new Error('MCP sign-in is disposed.'));
     const id = referenceId(reference);
     if (this.transitioning) {
-      this.publish(id, { phase: 'error', message: 'Copilot settings are changing. Wait for them to finish, then try again.' });
+      this.publish(id, {
+        phase: 'error', message: 'Copilot settings are changing. Wait for them to finish, then try again.', retryable: true,
+      });
       return Promise.resolve();
     }
     if (this.flight) {
@@ -95,7 +97,7 @@ export class CopilotMcpSignInCoordinator {
         }
         return this.flight;
       }
-      this.publish(id, { phase: 'error', message: 'Finish or cancel the current MCP sign-in first.' });
+      this.publish(id, { phase: 'error', message: 'Finish or cancel the current MCP sign-in first.', retryable: true });
       return Promise.resolve();
     }
     const controller = new AbortController();
@@ -133,7 +135,7 @@ export class CopilotMcpSignInCoordinator {
         ? { phase: 'connected', warning: describeError(error) }
         : this.cancelled && error === controller.signal.reason
         ? { phase: 'idle' }
-        : { phase: 'error', message: describeError(error) });
+        : { phase: 'error', message: describeError(error), retryable: canRetrySignIn(error) });
     }).finally(() => {
       window.clearTimeout(timer);
       this.controller = null;
@@ -315,6 +317,11 @@ export class CopilotMcpSignInCoordinator {
 
 function referenceId(reference: CopilotMcpServerReference): string {
   return JSON.stringify([reference.configPath, reference.name]);
+}
+
+function canRetrySignIn(error: unknown): boolean {
+  if (error instanceof AggregateError) return error.errors.every(canRetrySignIn);
+  return !(error instanceof CopilotRuntimeError) || error.recoverable;
 }
 
 function validateAuthorizationUrl(value: string): string {

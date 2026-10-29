@@ -37,6 +37,7 @@ import { type App, Notice } from 'obsidian';
 import { ProviderExecutionLifecycleRegistry } from '@/core/execution/ProviderExecutionLifecycleRegistry';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
 import { CopilotMcpSignInCoordinator } from '@/providers/copilot/app/CopilotMcpSignInCoordinator';
+import { CopilotRuntimeError } from '@/providers/copilot/sdk/CopilotRuntimeError';
 import { updateCopilotProviderSettings } from '@/providers/copilot/settings';
 import { CopilotMcpSignInModal } from '@/providers/copilot/ui/CopilotMcpSignInModal';
 import { getHostnameKey } from '@/utils/env';
@@ -171,6 +172,45 @@ it('shows native failure and lets the user retry without enabling another server
   expect(Object.keys(client.lastSession?.config.resources?.mcpServers ?? {})).toEqual(['notes']);
   modal.onClose();
 });
+
+it.each([false, true])(
+  'closes a non-retryable sign-in failure without offering a futile retry (cleanup fails=%s)',
+  async cleanupFails => {
+    const message = 'Microsoft sign-in requires host configuration. Reconnect in the Copilot CLI.';
+    const cleanupMessage = 'Native MCP shutdown failed.';
+    if (cleanupFails) expectedDisposalFailure = cleanupMessage;
+    client = new FakeCopilotSdkClient({
+      onSessionCreated: session => {
+        session.mcpSignInBehavior = async () => {
+          throw new CopilotRuntimeError('configuration', message);
+        };
+      },
+      stopBehavior: async () => {
+        if (cleanupFails) throw new Error(cleanupMessage);
+      },
+    });
+    const modal = new CopilotMcpSignInModal({} as App, service, reference);
+    modal.onOpen();
+    const dialog = within(document.body).getByRole('dialog', { name: 'Sign in to notes' });
+    const close = await waitFor(() => within(dialog).getByRole('button', { name: 'Close' }));
+
+    expect(within(dialog).getByRole('status').textContent).toContain(message);
+    expect(within(dialog).queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(within(dialog).queryByRole('link')).toBeNull();
+    expect(await checkAccessibility(dialog)).toHaveNoViolations();
+    expect(within(dialog).getByRole('status').textContent?.includes(cleanupMessage)).toBe(cleanupFails);
+
+    close.click();
+
+    expect(within(document.body).queryByRole('dialog')).toBeNull();
+    expect(client.deletedSessions).toEqual([client.lastSession?.sessionId]);
+    await waitFor(() => {
+      expect(jest.mocked(Notice).mock.calls.some(([message]) => (
+        typeof message === 'string' && message.includes(cleanupMessage)
+      ))).toBe(cleanupFails);
+    });
+  },
+);
 
 it('reopens browser sign-in after the cancelled modal finishes releasing its client', async () => {
   const stopping = createDeferred();

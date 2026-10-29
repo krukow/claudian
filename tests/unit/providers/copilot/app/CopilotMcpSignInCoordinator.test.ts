@@ -156,7 +156,7 @@ it('refuses authentication for a source that was not selected', async () => {
   await service.signIn(reference);
 
   expect(service.getState(reference)).toEqual({
-    phase: 'error', message: 'Select this MCP server before signing in.',
+    phase: 'error', message: 'Select this MCP server before signing in.', retryable: true,
   });
   expect(runtime.clients).toEqual([]);
   await service.dispose();
@@ -283,6 +283,7 @@ it('preserves a native OAuth failure alongside cleanup failure when cancellation
   expect(service.getState(reference)).toEqual({
     phase: 'error',
     message: expect.stringContaining('Native OAuth initiation failed.'),
+    retryable: true,
   });
   expect(result).toMatchObject({
     status: 'rejected',
@@ -409,7 +410,7 @@ it.each(['https://user:secret@login.example.test/authorize', 'http://login.examp
     await service.signIn(reference);
 
     expect(service.getState(reference)).toEqual({
-      phase: 'error', message: 'The MCP server returned an unsupported sign-in URL.',
+      phase: 'error', message: 'The MCP server returned an unsupported sign-in URL.', retryable: true,
     });
     expect(client.stopped).toBe(1);
     await service.dispose();
@@ -440,7 +441,7 @@ it('times out browser waiting without treating the authorization URL as authenti
     await signingIn;
 
     expect(service.getState(reference)).toEqual({
-      phase: 'error', message: 'MCP sign-in timed out. Try again when you are ready.',
+      phase: 'error', message: 'MCP sign-in timed out. Try again when you are ready.', retryable: true,
     });
     expect(client.deletedSessions).toEqual([client.lastSession?.sessionId]);
     expect(client.stopped).toBe(1);
