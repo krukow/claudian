@@ -26,13 +26,13 @@ describeNative('Copilot native selected MCP sign-in', () => {
     if (root) rmSync(root, { recursive: true, force: true });
   });
 
-  it('signs in one selected loopback server and reuses its native cache on a new client', async () => {
+  async function openFixture(authorization: 'dynamic' | 'entra' = 'dynamic') {
     root = mkdtempSync(path.join(os.tmpdir(), 'claudian-mcp-oauth-'));
     const home = path.join(root, 'home');
     const vault = path.join(root, 'vault');
     mkdirSync(home);
     mkdirSync(vault);
-    fixture = await startOAuthMcpServer();
+    fixture = await startOAuthMcpServer({ authorization });
     const cliPath = new CopilotCliResolver().resolve(undefined, configuredCli, '');
     if (!cliPath) throw new Error('Configured native CLI could not be resolved.');
     const clientOptions = {
@@ -49,15 +49,10 @@ describeNative('Copilot native selected MCP sign-in', () => {
       },
       workingDirectory: vault,
     };
-    let connected = false;
     const config: CopilotSdkSessionConfig = {
       availableTools: [],
       model: 'gpt-5-mini',
-      onEvent: event => {
-        if (event.type === 'session.mcp_server_status_changed'
-          && event.data.serverName === 'protected-fixture'
-          && event.data.status === 'connected') connected = true;
-      },
+      onEvent: () => {},
       onPermissionRequest: async () => ({ kind: 'reject' }),
       onUserInputRequest: async () => { throw new Error('The fixture cannot answer user questions.'); },
       resources: {
@@ -69,7 +64,20 @@ describeNative('Copilot native selected MCP sign-in', () => {
       workingDirectory: vault,
     };
     client = await copilotSdkRuntime.createClient(clientOptions);
-    const session = await client.createSession(config);
+    return { clientOptions, config, client, fixture };
+  }
+
+  it('signs in one selected loopback server and reuses its native cache on a new client', async () => {
+    const { clientOptions, config, client: started, fixture } = await openFixture();
+    let connected = false;
+    const session = await started.createSession({
+      ...config,
+      onEvent: event => {
+        if (event.type === 'session.mcp_server_status_changed'
+          && event.data.serverName === 'protected-fixture'
+          && event.data.status === 'connected') connected = true;
+      },
+    });
     expect(await session.checkMcpServer('protected-fixture')).toEqual({ phase: 'needs-auth' });
     const login = await session.signInMcpServer('protected-fixture');
     if (!login.authorizationUrl) throw new Error('The fresh fixture did not request authorization.');
@@ -84,7 +92,7 @@ describeNative('Copilot native selected MCP sign-in', () => {
     expect(await session.checkMcpServer('protected-fixture')).toEqual({
       phase: 'connected', toolCount: 1,
     });
-    await client.stop();
+    await started.stop();
     client = undefined;
 
     client = await copilotSdkRuntime.createClient(clientOptions);
@@ -95,5 +103,23 @@ describeNative('Copilot native selected MCP sign-in', () => {
     });
     expect(await next.signInMcpServer('protected-fixture')).toEqual({});
     expect(fixture.tokenExchanges).toBe(1);
+  });
+
+  it('reports the missing Entra host configuration without requesting browser authorization', async () => {
+    const { client, config, fixture } = await openFixture('entra');
+    const session = await client.createSession(config);
+
+    await expect(session.signInMcpServer('protected-fixture')).rejects.toMatchObject({
+      category: 'configuration',
+      recoverable: false,
+      message: expect.stringContaining('Claudian cannot sign in to this Microsoft MCP server'),
+      cause: expect.objectContaining({
+        message: expect.stringContaining(
+          'Microsoft Entra authentication requires the host to configure an Entra client ID',
+        ),
+      }),
+    });
+    expect(fixture.tokenExchanges).toBe(0);
+    expect(await session.checkMcpServer('protected-fixture')).toEqual({ phase: 'needs-auth' });
   });
 });

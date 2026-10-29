@@ -7,7 +7,9 @@ export interface OAuthMcpFixture {
   close(): Promise<void>;
 }
 
-export async function startOAuthMcpServer(): Promise<OAuthMcpFixture> {
+export async function startOAuthMcpServer(
+  options: { authorization?: 'dynamic' | 'entra' } = {},
+): Promise<OAuthMcpFixture> {
   let origin = '';
   let tokenExchanges = 0;
   const server = createServer((request, response) => {
@@ -24,9 +26,13 @@ export async function startOAuthMcpServer(): Promise<OAuthMcpFixture> {
       } else if (request.url === '/.well-known/oauth-authorization-server') {
         response.end(JSON.stringify({
           issuer: origin,
-          authorization_endpoint: `${origin}/authorize`,
-          token_endpoint: `${origin}/token`,
-          registration_endpoint: `${origin}/register`,
+          authorization_endpoint: options.authorization === 'entra'
+            ? 'https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize'
+            : `${origin}/authorize`,
+          token_endpoint: options.authorization === 'entra'
+            ? 'https://login.microsoftonline.com/organizations/oauth2/v2.0/token'
+            : `${origin}/token`,
+          ...(options.authorization === 'entra' ? {} : { registration_endpoint: `${origin}/register` }),
           response_types_supported: ['code'],
           grant_types_supported: ['authorization_code', 'refresh_token'],
           code_challenge_methods_supported: ['S256'],

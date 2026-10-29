@@ -117,6 +117,10 @@ const SEND_TIMEOUT_PATTERN = /^Timeout after \d+ms waiting for session\.idle$/;
 const CLI_PATH_MISSING_PATTERN =
   /^Copilot CLI not found at (.+)\. (?:Ensure @github\/copilot is installed|Set COPILOT_CLI_PATH to use a custom installation)\.$/;
 
+// The native OAuth RPC has no typed code for this host-capability failure.
+const ENTRA_HOST_CONFIGURATION_PATTERN =
+  /^(?:Request session\.mcp\.oauth\.login failed with message: )?Microsoft Entra authentication requires the host to configure an Entra client ID$/;
+
 /**
  * Maps a `send` failure onto the provider contract.
  *
@@ -150,6 +154,16 @@ export function toCopilotRuntimeError(
   }
 
   const message = describeError(error);
+  if (ENTRA_HOST_CONFIGURATION_PATTERN.test(message)) {
+    return new CopilotRuntimeError(
+      'configuration',
+      'Claudian cannot sign in to this Microsoft MCP server: the Copilot runtime requires '
+      + 'Entra host configuration that this integration does not provide. Retrying here will not help. '
+      + 'Workaround: close Obsidian, reconnect the server in the Copilot CLI, then reopen Obsidian. '
+      + 'Automatic Microsoft reauthentication is not supported.',
+      { cause: error },
+    );
+  }
   const missingCli = CLI_PATH_MISSING_PATTERN.exec(message);
   if (missingCli) {
     return new CopilotRuntimeError(

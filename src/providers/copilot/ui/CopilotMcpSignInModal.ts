@@ -60,7 +60,7 @@ export class CopilotMcpSignInModal extends Modal {
       });
     }
     const actions = this.contentEl.createDiv({ cls: 'claudian-copilot-connect-actions' });
-    if (state.phase === 'error') {
+    if (state.phase === 'error' && state.retryable) {
       const retry = actions.createEl('button', {
         cls: 'claudian-copilot-connect-button', text: 'Try again', attr: { type: 'button' },
       });
@@ -68,7 +68,8 @@ export class CopilotMcpSignInModal extends Modal {
     }
     const close = actions.createEl('button', {
       cls: 'claudian-copilot-connect-button',
-      text: state.phase === 'connected' ? 'Done' : 'Cancel',
+      text: state.phase === 'connected' ? 'Done'
+        : state.phase === 'error' && !state.retryable ? 'Close' : 'Cancel',
       attr: { type: 'button' },
     });
     close.addEventListener('click', () => this.close());

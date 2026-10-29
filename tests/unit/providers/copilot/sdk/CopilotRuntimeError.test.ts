@@ -112,6 +112,33 @@ describe('toCopilotRuntimeError', () => {
     expect(toCopilotRuntimeError('plain failure').message).toBe('plain failure');
     expect(toCopilotRuntimeError(undefined).message).toBe('Unknown Copilot error.');
   });
+
+  it.each(['', 'Request session.mcp.oauth.login failed with message: '])(
+    'reports missing Entra host configuration as non-retryable without RPC plumbing (%s)',
+    prefix => {
+      const cause = new Error(
+        `${prefix}Microsoft Entra authentication requires the host to configure an Entra client ID`,
+      );
+      const error = toCopilotRuntimeError(cause);
+
+      expect(error).toMatchObject({
+        category: 'configuration', recoverable: false, nativeReset: 'none', cause,
+      });
+      expect(error.message).toContain('Claudian cannot sign in to this Microsoft MCP server');
+      expect(error.message).toContain('close Obsidian');
+      expect(error.message).toContain('Copilot CLI');
+      expect(error.message).toContain('Automatic Microsoft reauthentication is not supported');
+      expect(error.message).not.toContain('session.mcp.oauth.login');
+    },
+  );
+
+  it('does not classify a different Microsoft sign-in failure as missing host configuration', () => {
+    const cause = new Error('Microsoft Entra authentication failed: the service is unavailable.');
+
+    expect(toCopilotRuntimeError(cause)).toMatchObject({
+      category: 'provider', recoverable: true, message: cause.message, cause,
+    });
+  });
 });
 
 /**
