@@ -1,10 +1,8 @@
 import type { ProviderCapabilities } from '../../core/providers/types';
 
 /**
- * The Copilot foundation layer streams turns, tools, and approvals, and offers the skills
- * this computer selected as provider commands. Every flag that would advertise native
- * history browsing, rewind, fork, plan mode, or images stays false until the owning
- * behavior actually exists.
+ * History restoration reads native transcripts without acquiring an execution session.
+ * Rewind, fork, plan mode, and images remain independent, unsupported capabilities.
  */
 export const COPILOT_PROVIDER_CAPABILITIES: Readonly<ProviderCapabilities> = Object.freeze({
   providerId: 'copilot',
@@ -12,7 +10,7 @@ export const COPILOT_PROVIDER_CAPABILITIES: Readonly<ProviderCapabilities> = Obj
   supportsFork: false,
   supportsImageAttachments: false,
   supportsInstructionMode: true,
-  supportsNativeHistory: false,
+  supportsNativeHistory: true,
   supportsPlanMode: false,
   supportsProviderCommands: true,
   supportsRewind: false,

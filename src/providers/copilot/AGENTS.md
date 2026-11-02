@@ -5,7 +5,7 @@ a stdio JSON-RPC subprocess.
 
 The provider is reachable from `src/main.ts` and ships switched off. It streams text,
 reasoning, tools, approvals, and questions for chat and for the ephemeral title, inline
-edit, and instruction-refinement runs, and runs selected MCP servers and enabled skills in persistent chat. Native history browsing, replay, rewind, fork, plan mode,
+edit, and instruction-refinement runs, and runs selected MCP servers and enabled skills in persistent chat. Native history restoration reads local transcripts without starting the CLI. Rewind, fork, plan mode,
 images, subagents, and plugins are absent, and `capabilities.ts` says so; do not describe
 them as pending here.
 
@@ -46,7 +46,8 @@ them as pending here.
 | `execution/CopilotUsageBuilder` | Projecting a usage report onto Claudian's contract, and what counts as resident context |
 | `execution/CopilotInteractionHandler` | Which turn an approval or a question belongs to, and refusing the ones no turn owns or the policy forbids |
 | `execution/CopilotExecutionSession` | The client, the live native session, the lease each turn leaves behind, and every fence between them |
-| `history/CopilotConversationHistoryService` | Which native session a conversation refers to, and what a runtime that lost it changes |
+| `history/CopilotConversationHistoryService` | Read-only conversation hydration, native session references, and what a runtime that lost a session changes |
+| `history/CopilotHistoryStore` | Vault-owned transcript lookup, validation, and historical message projection |
 | `capabilities.ts` | What the provider advertises, and therefore what the UI offers |
 | `registration.ts` | The provider's place in the built-in catalog, its environment key claim, and explicit title-model overrides |
 | `resources/CopilotResourceSettings` | The persisted shape of a selection, and its fail-closed normalization |
@@ -442,6 +443,8 @@ them as pending here.
 - Native session data is provider-owned and read-only. The only ids this layer deletes are
   the ephemeral ones it created itself, for a lease it promised to clean up; a deletion
   that fails is retried through the next client and reported when no next client can exist.
+- History hydration reads `session-state/<sessionId>/events.jsonl` under the same `resolveCopilotHomeDirectory(vaultPath)` used by execution. Never use provider-configured environment values, persisted absolute paths, another vault's store, or a CLI launch to locate history. Reject escaping references, symlinks outside the home, mismatched session headers, and malformed records; surface read failures without deleting or resetting the conversation.
+- Native aggregate events, not live deltas or the execution normalizer, are the history source. Group the main agent's text, readable reasoning, and tools between canonical user messages; exclude internal skill/agent prompts and subagent output. Preserve populated in-memory messages, leave incomplete historical tools non-running, and let the application repository correlate accepted-input context after hydration.
 - Approvals, questions, and events all carry the identity of the live session they came
   from, so a session Claudian dropped can never answer for the run that replaced it.
 - Permission modes are host-scoped and apply only to persistent chat with a `provider-default` or `unrestricted` tool policy. `CopilotExecutionSession` snapshots the effective mode before asynchronous acquisition and includes it in session identity; auxiliary and restricted turns always use Ask. Approval modes never widen available or excluded tools.

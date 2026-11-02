@@ -3,24 +3,17 @@ import type {
   ProviderConversationSessionAvailability,
 } from '../../../core/providers/types';
 import type { Conversation } from '../../../core/types';
+import { CopilotHistoryError, CopilotHistoryStore } from './CopilotHistoryStore';
 
-/**
- * The minimum history contract this layer can honor.
- *
- * Copilot session data lives in the CLI's own store, which Claudian treats as read-only
- * and does not read. The service therefore answers only what it can answer truthfully:
- * which native session a conversation refers to, and what to do when the runtime reports
- * that session is gone. It never hydrates a transcript, forks, or recovers a historical
- * model, and `COPILOT_PROVIDER_CAPABILITIES` advertises none of those.
- */
 export class CopilotConversationHistoryService implements ProviderConversationHistoryService {
+  private readonly history = new CopilotHistoryStore();
+
   resolveSessionIdForConversation(conversation: Conversation | null): string | null {
     return conversation?.providerId === 'copilot' ? conversation.sessionId ?? null : null;
   }
 
   /**
-   * Availability cannot be proven without reading the CLI's private store, so a
-   * conversation that names a session is reported as unknown rather than guessed at.
+   * A readable transcript does not prove that the CLI can resume the session.
    */
   async getConversationSessionAvailability(
     conversation: Conversation,
@@ -52,12 +45,22 @@ export class CopilotConversationHistoryService implements ProviderConversationHi
     return 'reset';
   }
 
-  /**
-   * Replay is a Claudian-side concern in this layer. A resumed native session already
-   * carries its own context, so re-sending conversation history would duplicate it.
-   */
-  async hydrateConversationHistory(): Promise<void> {
-    // Intentionally empty: Copilot transcripts are provider-owned and read-only.
+  async hydrateConversationHistory(
+    conversation: Conversation,
+    vaultPath: string | null,
+  ): Promise<void> {
+    const sessionId = this.resolveSessionIdForConversation(conversation);
+    if (!sessionId || conversation.messages.length > 0) return;
+    if (!vaultPath) {
+      throw new CopilotHistoryError('A vault path is required to restore Copilot history.');
+    }
+    const messages = await this.history.load(sessionId, vaultPath);
+    if (
+      this.resolveSessionIdForConversation(conversation) === sessionId
+      && conversation.messages.length === 0
+    ) {
+      conversation.messages = messages;
+    }
   }
 
   isPendingForkConversation(): boolean {
