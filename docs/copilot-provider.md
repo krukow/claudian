@@ -85,6 +85,7 @@ Leave **CLI path** empty for automatic discovery. Set an absolute path only when
 ## Using it
 
 - **Chat**: pick a Copilot model in the chat model selector and send a message. Text and reasoning stream as they arrive, tool calls appear as they start and finish, and usage is reported against the model's context window.
+- **History**: select a chat from **Chat history**, the session sidebar, or `/resume` to restore its messages, readable reasoning, and tool results from Copilot's local transcript. Loading history does not start the CLI, connect MCP servers, or send a model request. The transcript must still exist on this computer under this vault's Copilot home.
 - **Stop a response**: select **Stop** in the active chat's composer, or press **Esc**. This cancels only that tab's foreground response, including reasoning and tool approval waits, without deleting the conversation or losing queued or draft input. **Stopping...** remains disabled until the turn settles; stopping during preparation prevents the turn from being sent. Rewind is not interruptible through this control.
 - **Tools**: Copilot runs its own built-in tools with the vault as its working directory, not a filesystem sandbox. Claudian narrows them to the ones it can render, and the background-agent and factory families are never available.
 - **Approvals**: use the single **Tool approvals** dropdown to choose **Ask**, **LLM judge**, or **Allow all** under Copilot's permission settings. The choice applies to chat on this computer, not auxiliary or restricted turns. Requests without a live owning turn are refused.
@@ -106,7 +107,7 @@ Leave **CLI path** empty for automatic discovery. Set an absolute path only when
 | External directories as context | Yes |
 | Conversation titles and inline edit | Yes |
 | Image attachments | No — an attached image is reported as unsent rather than dropped |
-| Native history browsing and replay | No |
+| Native history restoration | Yes — existing Claudian chats from this vault's local Copilot transcripts |
 | Rewind and fork | No |
 | Plan mode | No |
 | Subagents and background agents | No |
@@ -223,6 +224,8 @@ Claudian depends on `@github/copilot-sdk`, which declares the native `koffi` FFI
 **No models after clicking Discover** — the CLI answered but the account offers none. Check that the signed-in account has an active Copilot subscription and that your organization's policy does not disable every model.
 
 **"Could not load the Copilot model catalog"** — the CLI could not be started or did not answer. Check the CLI path, run `copilot --version` in a terminal, and confirm sign-in.
+
+**"Failed to load conversation" when opening Copilot history** — the local transcript could not be read or was malformed. Claudian preserves the conversation and native session reference so loading can be retried; it does not substitute an empty history or start a new session. Copilot transcripts are local to the computer and the vault's path, so syncing metadata or moving the vault does not move its transcript store.
 
 **"Timed out after 30 seconds preparing selected Copilot resources"** — read **Last step** in the error. It identifies permission configuration, skill loading, a tool listing, or the MCP servers still connecting. A server that remains pending can exhaust this budget even while the CLI answers status requests; the error does not necessarily mean the whole CLI was unresponsive. Check the named server or skill configuration before retrying. Claudian still releases the unprepared session and runtime rather than leaving startup work behind.
 

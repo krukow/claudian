@@ -1,0 +1,5 @@
+{"type":"session.start","data":{"sessionId":"copilot-session-1","version":1,"producer":"copilot-agent","selectedModel":"gpt-5.3-codex","context":{"cwd":"/synthetic/vault"}},"id":"session-start","timestamp":"2026-11-02T07:00:00.000Z","parentId":null}
+{"type":"user.message","data":{"content":"Summarize this note.","transformedContent":"<native-context>Summarize this note.</native-context>","messageId":"user-1","turnId":"turn-1"},"id":"user-event-1","timestamp":"2026-11-02T07:00:01.000Z","parentId":"session-start"}
+{"type":"assistant.turn_start","data":{"turnId":"turn-1"},"id":"turn-start-1","timestamp":"2026-11-02T07:00:02.000Z","parentId":"user-event-1"}
+{"type":"assistant.message","data":{"messageId":"assistant-1","originatingMessageId":"user-1","content":"The note describes a garden.","turnId":"turn-1"},"id":"assistant-event-1","timestamp":"2026-11-02T07:00:03.000Z","parentId":"turn-start-1"}
+{"type":"assistant.turn_end","data":{"turnId":"turn-1"},"id":"turn-end-1","timestamp":"2026-11-02T07:00:04.000Z","parentId":"assistant-event-1"}
