@@ -6,6 +6,7 @@ import type * as CopilotSdk from '@microsoft/copilot-sdk';
 
 import type { ProviderApprovalInteractionRequest, ProviderInteractionPort } from '@/core/execution';
 import { CopilotInteractionHandler } from '@/providers/copilot/execution/CopilotInteractionHandler';
+import { encodeToolSelection } from '@/providers/copilot/execution/CopilotRequestEncoder';
 import { resolveCopilotSelectedResources } from '@/providers/copilot/resources/CopilotResourceResolver';
 import { normalizeCopilotResourceSettings } from '@/providers/copilot/resources/CopilotResourceSettings';
 import { CopilotCliResolver } from '@/providers/copilot/runtime/CopilotCliResolver';
@@ -140,6 +141,23 @@ describeWithCli('Copilot native resource isolation', () => {
       root = '';
     }
     mockHomeDirectory = '/synthetic-copilot-home';
+  });
+
+  it('offers ordinary chat tools but no background workflow tools to the model', async () => {
+    const localModel = await useLocalModel();
+    const started = await startClient();
+    const session = await started.createSession({
+      ...sessionConfig(vault),
+      ...encodeToolSelection({ kind: 'provider-default' }),
+      model: 'gpt-4o',
+    });
+    await session.send('Return the synthetic completion.');
+
+    const request: { tools: { function: { name: string } }[] } = JSON.parse(localModel.completionRequests[0]);
+    const names = request.tools.map(tool => tool.function.name);
+    expect(names).toContain('view');
+    expect(names.filter(name => ['dynamic_workflows_manage', 'run_dynamic_workflow'].includes(name)))
+      .toEqual([]);
   });
 
   it('starts only the selected server, not home or workspace MCP definitions', async () => {

@@ -167,7 +167,7 @@ them as pending here.
 - Every tool policy therefore names an allow-list. A policy that restricts nothing says so
   as `builtin:*` — every builtin, and nothing an MCP server or a custom agent registered —
   rather than by staying silent, and it is the only shape that needs `excludedTools`,
-  because it is the only one that would otherwise match the agent and factory families.
+  because it is the only one that would otherwise match the background-agent and workflow tools. Deny the protocol-4 workflow names as well as their factory aliases.
   The narrower policies name those families nowhere, so a second deny-list on them would
   restate one rule twice.
 - The CLI does not inherit `process.env`. It receives a small forwarded base, then the

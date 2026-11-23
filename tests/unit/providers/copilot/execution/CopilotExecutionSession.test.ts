@@ -203,7 +203,8 @@ describe('CopilotExecutionSession permission profiles', () => {
           permissionMode: mode,
         });
         expect([...(runtime.lastClient?.lastSession?.config.excludedTools ?? [])].sort()).toEqual([
-          'factories_manage', 'list_agents', 'read_agent', 'run_factory', 'task', 'write_agent',
+          'dynamic_workflows_manage', 'factories_manage', 'list_agents', 'read_agent',
+          'run_dynamic_workflow', 'run_factory', 'task', 'write_agent',
         ]);
         expect(runtime.clientOptions[0].environment).not.toHaveProperty('COPILOT_ALLOW_ALL');
       } finally {
@@ -508,9 +509,11 @@ describe('CopilotExecutionSession turn lifecycle', () => {
     const config = runtime.lastClient?.lastSession?.config;
     expect(config?.availableTools).toEqual(['builtin:*']);
     expect([...(config?.excludedTools ?? [])].sort()).toEqual([
+      'dynamic_workflows_manage',
       'factories_manage',
       'list_agents',
       'read_agent',
+      'run_dynamic_workflow',
       'run_factory',
       'task',
       'write_agent',

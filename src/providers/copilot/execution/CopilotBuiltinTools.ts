@@ -1,13 +1,6 @@
 /**
- * The built-in tools the Copilot CLI registers for a Claudian session.
- *
- * Captured from `session.tools.getCurrentMetadata` on Copilot CLI 1.0.83 with the exact
- * session configuration `CopilotSdkRuntime` builds, so it excludes tools Claudian turns
- * off (skills, MCP apps, memory, scheduling) and includes `ask_user`, which only exists
- * because Claudian wires a user-input handler.
- *
- * The catalog is a record of what the CLI offered, not a contract. Tool policy is derived
- * from the read-only group as an allow-list, so a tool this capture does not know about —
+ * The built-in tools Claudian classifies explicitly. Tool policy is derived
+ * from the read-only group as an allow-list, so a tool this group does not name —
  * a newer builtin, a platform-specific shell, an MCP or custom tool — is unavailable to a
  * read-only turn rather than silently permitted.
  */
@@ -36,7 +29,7 @@ export const COPILOT_MUTATING_BUILTIN_TOOLS: readonly string[] = [
 
 /**
  * Tools that start, inspect, or author work outside the turn the user is watching: the
- * background-agent family, and the factory family that authors and runs JavaScript.
+ * background agents and programmable workflows, including their factory aliases.
  *
  * Claudian surfaces neither. `capabilities.ts` advertises no subagent support, there is
  * no subagent adapter, and nothing renders what either family would produce, so a turn
@@ -45,9 +38,11 @@ export const COPILOT_MUTATING_BUILTIN_TOOLS: readonly string[] = [
  * alone. Supporting them means building the surface first, not deleting this group.
  */
 export const COPILOT_UNSUPPORTED_BUILTIN_TOOLS: readonly string[] = [
+  'dynamic_workflows_manage',
   'factories_manage',
   'list_agents',
   'read_agent',
+  'run_dynamic_workflow',
   'run_factory',
   'task',
   'write_agent',

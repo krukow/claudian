@@ -57,7 +57,7 @@ const COPILOT_EVERY_BUILTIN_FILTER = 'builtin:*';
  * availability, so Allow all cannot make an unavailable tool available.
  *
  * The two widest policies are the only ones that need a deny-list, because
- * `builtin:*` matches the task and factory families the narrower policies simply never
+ * `builtin:*` matches the background-agent and workflow tools the narrower policies never
  * name. Claudian surfaces neither, so a turn that started one would run work the user can
  * neither watch nor stop.
  */

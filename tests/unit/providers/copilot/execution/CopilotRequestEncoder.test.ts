@@ -56,8 +56,10 @@ describe('encodeToolSelection', () => {
     for (const name of [
       'bash',
       'create',
+      'dynamic_workflows_manage',
       'edit',
       'factories_manage',
+      'run_dynamic_workflow',
       'run_factory',
       'sql',
       'stop_bash',
@@ -108,9 +110,11 @@ describe('encodeToolSelection', () => {
     const selection = encodeToolSelection({
       kind: 'allow-list',
       names: [
+        'dynamic_workflows_manage',
         'factories_manage',
         'list_agents',
         'read_agent',
+        'run_dynamic_workflow',
         'run_factory',
         'task',
         'write_agent',
@@ -160,9 +164,11 @@ describe('encodeToolSelection', () => {
     'excludes the task and factory families from a %s turn',
     (kind) => {
       expect([...(encodeToolSelection({ kind }).excludedTools ?? [])].sort()).toEqual([
+        'dynamic_workflows_manage',
         'factories_manage',
         'list_agents',
         'read_agent',
+        'run_dynamic_workflow',
         'run_factory',
         'task',
         'write_agent',
@@ -212,9 +218,11 @@ describe('encodeToolSelection', () => {
     const allowed = new Set(encodeToolSelection({ kind: 'read-only' }).availableTools ?? []);
 
     for (const name of [
+      'dynamic_workflows_manage',
       'factories_manage',
       'list_agents',
       'read_agent',
+      'run_dynamic_workflow',
       'run_factory',
       'task',
       'write_agent',
