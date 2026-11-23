@@ -5,6 +5,7 @@ import {
 
 /** Reasoning efforts Claudian recognizes in the CLI catalog and persisted settings. */
 export const COPILOT_REASONING_EFFORTS = [
+  'none',
   'low',
   'medium',
   'high',
