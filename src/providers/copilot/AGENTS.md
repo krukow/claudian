@@ -368,7 +368,7 @@ them as pending here.
   cannot be spawned is fixed in settings, not by retrying.
 - Two SDK failures carry no category and no keyword the categorizer reads, so each is
   matched by its whole message shape rather than by a word in it: the turn that never
-  reached `session.idle`, and `Copilot CLI not found at <path>.`, which the SDK throws
+  reached completion (`waiting for session.idle` or `waiting for response completion`), and `Copilot CLI not found at <path>.`, which the SDK throws
   when the path it was handed names nothing. The second is a configuration failure, not
   the transport failure its call site would otherwise report — the CLI cannot be
   reinstalled by sending the turn again. Both shapes are quoted from the SDK; an SDK
@@ -438,6 +438,7 @@ them as pending here.
   disposal waits; every later one repeats what that first one reported.
 - A turn ends exactly once. A cancellation that is followed by a failure, a late native
   answer, or a disposal does not end it a second time.
+- A main-agent `session.warning` with `warningType: "policy_blocked"` can be the only refusal signal even when the send succeeds. Report the refusal for that send, not a completed turn. Keep the client usable.
 - Native session data is provider-owned and read-only. The only ids this layer deletes are
   the ephemeral ones it created itself, for a lease it promised to clean up; a deletion
   that fails is retried through the next client and reported when no next client can exist.

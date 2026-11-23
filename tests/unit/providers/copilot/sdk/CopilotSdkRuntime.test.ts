@@ -30,6 +30,7 @@ import { createDeferred, type Deferred } from './FakeCopilotSdkRuntime';
 
 type NativePermissionMode = 'off' | 'on' | 'auto';
 type NativeOptionsUpdate = Parameters<CopilotSession['rpc']['options']['update']>[0];
+type NativeWarning = Extract<SessionEvent, { type: 'session.warning' }>;
 interface NativeMcpSignInRequest {
   readonly serverName: string;
   readonly clientName: string;
@@ -57,6 +58,7 @@ class FakeSdkCopilotSession {
   readonly modelChanges: string[] = [];
   readonly mcpSignInRequests: NativeMcpSignInRequest[] = [];
   private readonly permissionWaiters = new Map<string, Deferred<void>>();
+  private readonly warningListeners = new Set<(event: NativeWarning) => void>();
 
   constructor(readonly sessionId: string, public config?: SessionOptionsBase) {
     FakeSdkCopilotSession.instances.push(this);
@@ -141,12 +143,18 @@ class FakeSdkCopilotSession {
     await FakeSdkCopilotClient.behavior.send?.(this, prompt);
   }
 
+  on(_type: 'session.warning', listener: (event: NativeWarning) => void): () => void {
+    this.warningListeners.add(listener);
+    return () => { this.warningListeners.delete(listener); };
+  }
+
   async setModel(model: string): Promise<void> {
     this.modelChanges.push(model);
     await FakeSdkCopilotClient.behavior.setModel?.();
   }
 
   async dispatchEvent(event: SessionEvent): Promise<void> {
+    if (event.type === 'session.warning') this.warningListeners.forEach(listener => listener(event));
     // The SDK invokes its permission callback before public event subscribers.
     const response = event.type === 'permission.requested' && !event.data.resolvedByHook
       && this.disconnected === 0
@@ -342,6 +350,25 @@ beforeEach(() => {
   FakeSdkCopilotClient.instances.length = 0;
   FakeSdkCopilotSession.instances.length = 0;
   FakeSdkCopilotClient.behavior = {};
+});
+
+it('rejects a policy-blocked send with its reason without poisoning the next send', async () => {
+  const warning: NativeWarning = {
+    type: 'session.warning', id: 'warning', parentId: null, timestamp: '2026-01-01T00:00:00Z',
+    data: { message: 'This prompt is blocked by policy.', warningType: 'policy_blocked', originatingMessageId: 'm1' },
+  };
+  FakeSdkCopilotClient.behavior.send = async (native, prompt) => {
+    await native.dispatchEvent(prompt === 'first' ? warning : { ...warning, agentId: 'child' });
+  };
+  const session = await createSession();
+  try {
+    await expect(session.send('first')).rejects.toMatchObject({
+      category: 'provider', message: warning.data.message, nativeReset: 'none',
+    });
+    await expect(session.send('second')).resolves.toBeUndefined();
+  } finally {
+    await session.disconnect();
+  }
 });
 
 it('holds factory startup ownership until the timed-out SDK client finishes cleanup', async () => {

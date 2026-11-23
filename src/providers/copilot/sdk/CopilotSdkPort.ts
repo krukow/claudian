@@ -153,7 +153,7 @@ export interface CopilotSdkSession {
    * server had answered.
    */
   readonly resourceDiagnostics: readonly string[];
-  /** Sends a prompt and resolves when the turn reaches idle. */
+  /** Waits for completion. A prompt refused by policy rejects with the CLI's reason. */
   send(prompt: string): Promise<void>;
   /**
    * The user-invocable slash commands the selected skills registered, and nothing else:

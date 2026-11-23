@@ -621,12 +621,22 @@ class SdkBackedSession implements CopilotSdkSession {
 
   async send(prompt: string): Promise<void> {
     const turn = this.permissions?.beginTurn();
+    let refusal: string | undefined;
+    let unsubscribe: (() => void) | undefined;
     try {
+      unsubscribe = this.session.on('session.warning', event => {
+        if (!event.agentId && event.data.warningType === 'policy_blocked') {
+          refusal = event.data.message || 'The Copilot CLI blocked this prompt by policy.';
+        }
+      });
       const sending = this.session.sendAndWait(prompt, TURN_TIMEOUT_MS);
-      await (this.permissions ? this.permissions.withFailure(sending) : sending);
+      const response = await (this.permissions ? this.permissions.withFailure(sending) : sending);
+      // A blocked prompt reaches idle without a user or assistant message.
+      if (!response && refusal !== undefined) throw new CopilotRuntimeError('provider', refusal);
     } catch (error) {
       throw toCopilotSendError(error, TURN_TIMEOUT_MS);
     } finally {
+      unsubscribe?.();
       this.permissions?.endTurn(turn);
     }
   }

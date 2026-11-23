@@ -1088,8 +1088,8 @@ describe('CopilotExecutionSession failure recovery', () => {
     }));
   }
 
-  it('aborts and restarts the runtime when the turn never reaches idle', async () => {
-    const runtime = failingSendRuntime('Timeout after 600000ms waiting for session.idle');
+  it.each(['session.idle', 'response completion'])('aborts and restarts the runtime on a %s timeout', async wait => {
+    const runtime = failingSendRuntime(`Timeout after 600000ms waiting for ${wait}`);
     const session = new CopilotExecutionBackend(createHost(), { runtime })
       .createSession(createSessionConfig());
 
