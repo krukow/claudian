@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -93,6 +94,15 @@ describe('CopilotConversationHistoryService', () => {
 
 describe('Copilot transcript restoration', () => {
   const service: ProviderConversationHistoryService = new CopilotConversationHistoryService();
+  const sessionId = 'copilot-session-1';
+  const timestamp = '2026-11-02T07:00:00.000Z';
+  const record = (type: string, data: Record<string, unknown>) =>
+    JSON.stringify({ type, data, id: randomUUID(), timestamp, parentId: null });
+  const copied = (line: string) => JSON.stringify({ ...JSON.parse(line), checkpoint: true });
+  const link = (previousFile: string) => record('session.journal_link', { version: 1, sessionId, previousFile });
+  const start = record('session.start', { sessionId, version: 1 });
+  const checkpointStart = copied(start);
+  const journal = (...lines: string[]) => `${lines.join('\n')}\n`;
   let directory: string;
   let vaultPath: string;
   let transcriptPath: string;
@@ -182,6 +192,80 @@ describe('Copilot transcript restoration', () => {
       { type: 'text', content: 'Roses and mint.' },
     ]);
     expect(await readFile(transcriptPath, 'utf8')).toBe(nativeHistory);
+  });
+
+  it('projects only original events across linked journals, including a tool completed after rotation', async () => {
+    const session = path.dirname(transcriptPath);
+    const question = record('user.message', { content: 'Check the note.' });
+    const resume = record('session.resume', { eventCount: 6, resumeTime: timestamp });
+    const answer = record('assistant.message', { messageId: 'result', content: 'Found mint.' });
+    const root = journal(
+      start, question,
+      record('assistant.message', { messageId: 'answer', content: 'Checking.' }),
+      record('tool.execution_start', { toolName: 'view', toolCallId: 'read-note', arguments: {} }),
+    );
+    const middle = journal(
+      link('events.2.jsonl'), checkpointStart,
+      copied(question),
+      record('tool.execution_complete', { toolCallId: 'read-note', success: true, result: { content: 'Mint.' } }),
+      resume, answer,
+    );
+    const head = journal(
+      link('events.10.jsonl'),
+      copied(resume), copied(answer),
+      record('user.message', { content: 'Thanks.' }),
+    );
+    await writeFile(path.join(session, 'events.2.jsonl'), root);
+    await writeFile(path.join(session, 'events.10.jsonl'), middle);
+    await writeFile(path.join(session, 'events.3.jsonl'), 'unlinked archive');
+    await writeFile(transcriptPath, head);
+    const conversation = createConversation();
+
+    await service.hydrateConversationHistory(conversation, vaultPath);
+
+    expect(conversation.messages.map(({ role, content }) => [role, content])).toEqual([
+      ['user', 'Check the note.'], ['assistant', 'Checking.Found mint.'], ['user', 'Thanks.'],
+    ]);
+    expect(conversation.messages[1].toolCalls).toMatchObject([
+      { id: 'read-note', status: 'completed', result: 'Mint.' },
+    ]);
+    expect(await readFile(path.join(session, 'events.2.jsonl'), 'utf8')).toBe(root);
+    expect(await readFile(path.join(session, 'events.10.jsonl'), 'utf8')).toBe(middle);
+    expect(await readFile(transcriptPath, 'utf8')).toBe(head);
+  });
+
+  it.each([
+    ['missing predecessor', link('events.1.jsonl'), undefined, /Could not read/],
+    ['wrong link owner', link('events.1.jsonl').replace(sessionId, 'other'), undefined, /link/],
+    ['wrong link version', record('session.journal_link', { sessionId, version: 4, previousFile: 'events.1.jsonl' }), undefined, /link/],
+    ['checkpoint link', copied(link('events.1.jsonl')), undefined, /link/],
+    ['noncanonical name', link('events.01.jsonl'), undefined, /link/],
+    ['path instead of name', link('../other/events.1.jsonl'), undefined, /link/],
+    ['number outside u64', link('events.18446744073709551616.jsonl'), undefined, /link/],
+    ['misplaced link', journal(record('session.start', { sessionId }), link('events.1.jsonl')), undefined, /first record/],
+    ['cycle', link('events.1.jsonl'), journal(link('events.1.jsonl'), checkpointStart), /link/],
+    ['wrong root owner', link('events.1.jsonl'), journal(record('session.start', { sessionId: 'other' })), /selected session/],
+    ['incomplete archive', link('events.1.jsonl'), record('session.start', { sessionId }), /Incomplete/],
+  ] as const)('rejects %s without publishing partial history', async (_label, header, archive, error) => {
+    await writeFile(transcriptPath, journal(header, checkpointStart));
+    if (archive !== undefined) await writeFile(path.join(path.dirname(transcriptPath), 'events.1.jsonl'), archive);
+    const conversation = createConversation();
+    await expect(service.hydrateConversationHistory(conversation, vaultPath)).rejects.toThrow(error);
+    expect(conversation.messages).toEqual([]);
+  });
+
+  it.each([
+    ['missing header', ''],
+    ['unmarked header', journal(record('session.start', { sessionId }))],
+    ['wrong header type', journal(copied(record('user.message', { content: 'Replay only.' })))],
+    ['wrong session', journal(copied(record('session.start', { sessionId: 'other' })))],
+    ['unterminated checkpoint', checkpointStart],
+    ['checkpoint after original', journal(checkpointStart, record('user.message', { content: 'New.' }), checkpointStart)],
+  ])('rejects a malformed replay checkpoint: %s', async (_label, suffix) => {
+    await writeFile(path.join(path.dirname(transcriptPath), 'events.1.jsonl'), transcript);
+    await writeFile(transcriptPath, journal(link('events.1.jsonl')) + suffix);
+    await expect(service.hydrateConversationHistory(createConversation(), vaultPath))
+      .rejects.toMatchObject({ name: 'CopilotHistoryError' });
   });
 
   it('preserves the live message projection instead of replacing it from disk', async () => {
@@ -315,6 +399,37 @@ describe('Copilot transcript restoration', () => {
     await expect(service.hydrateConversationHistory(createConversation(), vaultPath))
       .rejects.toThrow('outside this vault\'s session store');
     expect(await readFile(outsidePath, 'utf8')).toBe(transcript);
+  });
+
+  it('refuses a transcript symlink to another session in the same vault-owned home', async () => {
+    const sibling = path.join(path.dirname(transcriptPath), '../another-session/events.jsonl');
+    await mkdir(path.dirname(sibling), { recursive: true });
+    await writeFile(sibling, transcript);
+    await rm(transcriptPath);
+    await symlink(sibling, transcriptPath);
+
+    await expect(service.hydrateConversationHistory(createConversation(), vaultPath))
+      .rejects.toThrow('outside this vault\'s session store');
+  });
+
+  it('refuses a numbered journal symlink outside the selected session', async () => {
+    const session = path.dirname(transcriptPath);
+    const sibling = path.join(session, '../another-session/events.1.jsonl');
+    await mkdir(path.dirname(sibling), { recursive: true });
+    await writeFile(sibling, transcript);
+    await symlink(sibling, path.join(session, 'events.1.jsonl'));
+    await writeFile(transcriptPath, journal(link('events.1.jsonl'), checkpointStart));
+    await expect(service.hydrateConversationHistory(createConversation(), vaultPath))
+      .rejects.toThrow('outside this vault\'s session store');
+  });
+
+  it.each(['session', 'vault home'])('refuses an aliased %s directory', async component => {
+    const selected = component === 'session' ? path.dirname(transcriptPath) : resolveCopilotHomeDirectory(vaultPath);
+    const other = path.join(path.dirname(selected), 'another-owner');
+    await rename(selected, other);
+    await symlink(other, selected, 'dir');
+    await expect(service.hydrateConversationHistory(createConversation(), vaultPath))
+      .rejects.toThrow('outside this vault\'s session store');
   });
 
   it('uses the runtime-owned home, not provider configuration or another vault', async () => {

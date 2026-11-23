@@ -1,9 +1,11 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { isPathWithinRoot } from '../../../core/storage/pathContainment';
 import type { ChatMessage, ContentBlock, ToolCallInfo } from '../../../core/types';
+import { isCopilotPathWithinRoot } from '../runtime/CopilotAbsolutePath';
 import { resolveCopilotHomeDirectory } from '../runtime/CopilotRuntimeEnvironment';
+
+const MAX_JOURNAL_NUMBER = BigInt('18446744073709551615'); // Native journal numbers are u64.
 
 export class CopilotHistoryError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -19,14 +21,42 @@ export class CopilotHistoryStore {
     }
 
     const home = resolveCopilotHomeDirectory(vaultPath);
-    const transcriptPath = path.join(home, 'session-state', sessionId, 'events.jsonl');
-    let content: string;
     try {
-      const resolvedPath = await fs.realpath(transcriptPath);
-      if (!isPathWithinRoot(resolvedPath, home)) {
-        throw new CopilotHistoryError('Copilot history is outside this vault\'s session store.');
+      // Resolve host aliases, but do not let the vault key or session directory alias another owner.
+      const session = path.join(await fs.realpath(path.dirname(home)), path.basename(home), 'session-state', sessionId);
+      const journals: Iterable<HistoryEvent>[] = [];
+      let segment: bigint | undefined;
+      for (;;) {
+        const filename = segment === undefined ? 'events.jsonl' : `events.${segment}.jsonl`;
+        const resolved = await fs.realpath(path.join(session, filename));
+        if (!isCopilotPathWithinRoot(resolved, session)) {
+          throw new CopilotHistoryError('Copilot history is outside this vault\'s session store.');
+        }
+        const content = await fs.readFile(resolved, 'utf8');
+        if (segment !== undefined && !content.endsWith('\n')) {
+          throw new CopilotHistoryError('Incomplete numbered Copilot journal.');
+        }
+        const lines = content.split('\n');
+        const first = lines.findIndex(line => line.trim() !== '');
+        if (first < 0) throw new CopilotHistoryError('Copilot history has no session header.');
+        const header = parseEvent(lines[first], first + 1);
+        if (header.type !== 'session.journal_link') {
+          validateBoundary(header, sessionId, segment !== undefined);
+          journals.push(originalEvents(lines, first + 1, false));
+          break;
+        }
+
+        segment = predecessorNumber(header, sessionId, segment);
+        const next = first + 1;
+        if (next >= lines.length - 1 || !lines[next].trim()) {
+          throw new CopilotHistoryError('Missing Copilot journal checkpoint header.');
+        }
+        const checkpoint = parseEvent(lines[next], next + 1);
+        if (!checkpoint.checkpoint) throw new CopilotHistoryError('Missing Copilot journal checkpoint header.');
+        validateBoundary(checkpoint, sessionId, true);
+        journals.push(originalEvents(lines, next + 1, true));
       }
-      content = await fs.readFile(resolvedPath, 'utf8');
+      return projectHistory(flattenJournals(journals.reverse()));
     } catch (error) {
       if (error instanceof CopilotHistoryError) throw error;
       throw new CopilotHistoryError(
@@ -34,16 +64,58 @@ export class CopilotHistoryStore {
         { cause: error },
       );
     }
-    return parseHistory(content, sessionId);
   }
 }
 
-function parseHistory(content: string, sessionId: string): ChatMessage[] {
+function predecessorNumber(header: HistoryEvent, sessionId: string, current?: bigint): bigint {
+  const match = /^events\.([1-9]\d{0,19})\.jsonl$/.exec(requireString(header.data, 'previousFile'));
+  const number = match && BigInt(match[1]);
+  if (header.checkpoint || header.data.version !== 1 || header.data.sessionId !== sessionId
+    || number === null || number > MAX_JOURNAL_NUMBER || (current !== undefined && number >= current)) {
+    throw new CopilotHistoryError('Invalid Copilot journal predecessor link.');
+  }
+  return number;
+}
+
+function validateBoundary(event: HistoryEvent, sessionId: string, allowResume: boolean): void {
+  if (event.type === 'session.start' && event.data.sessionId === sessionId) return;
+  // Unlike session.start, the SDK's session.resume header need not carry a sessionId.
+  if (allowResume && event.type === 'session.resume'
+    && (event.data.sessionId === undefined || event.data.sessionId === sessionId)) return;
+  throw new CopilotHistoryError('Copilot history does not match the selected session.');
+}
+
+function* originalEvents(lines: string[], start: number, linked: boolean): Generator<HistoryEvent> {
+  let inCheckpoint = linked;
+  for (let index = start; index < lines.length; index++) {
+    if (!lines[index].trim()) {
+      inCheckpoint = false;
+      continue;
+    }
+    const event = parseEvent(lines[index], index + 1);
+    if (event.type === 'session.journal_link') {
+      throw new CopilotHistoryError('A Copilot journal predecessor link must be the first record.');
+    }
+    if (linked && event.checkpoint) {
+      if (!inCheckpoint || index === lines.length - 1) {
+        throw new CopilotHistoryError('Invalid Copilot journal checkpoint prefix.');
+      }
+      continue;
+    }
+    inCheckpoint = false;
+    yield event;
+  }
+}
+
+function* flattenJournals(journals: Iterable<HistoryEvent>[]): Generator<HistoryEvent> {
+  for (const journal of journals) yield* journal;
+}
+
+function projectHistory(events: Iterable<HistoryEvent>): ChatMessage[] {
   const messages: ChatMessage[] = [];
   const tools = new Map<string, ToolCallInfo>();
   let assistant: (ChatMessage & { contentBlocks: ContentBlock[]; toolCalls: ToolCallInfo[] }) | null = null;
   let pendingReasoning: { event: HistoryEvent; text: string } | null = null;
-  let hasSessionStart = false;
 
   const getAssistant = (event: HistoryEvent) => {
     if (!assistant) {
@@ -86,16 +158,8 @@ function parseHistory(content: string, sessionId: string): ChatMessage[] {
     message.contentBlocks.push({ type: 'tool_use', toolId: id });
   };
 
-  for (const [index, line] of content.split(/\r?\n/).entries()) {
-    if (!line.trim()) continue;
-    const event = parseEvent(line, index + 1);
+  for (const event of events) {
     const { data } = event;
-    if (!hasSessionStart) {
-      if (event.type !== 'session.start' || data.sessionId !== sessionId) {
-        throw new CopilotHistoryError('Copilot history does not match the selected session.');
-      }
-      hasSessionStart = true;
-    }
     if (event.hidden) continue;
 
     switch (event.type) {
@@ -164,9 +228,6 @@ function parseHistory(content: string, sessionId: string): ChatMessage[] {
         break;
     }
   }
-  if (!hasSessionStart) {
-    throw new CopilotHistoryError('Copilot history has no session header.');
-  }
   if (pendingReasoning) flushReasoning(pendingReasoning.event);
   return messages;
 }
@@ -177,6 +238,7 @@ interface HistoryEvent {
   data: Record<string, unknown>;
   timestamp: number;
   hidden: boolean;
+  checkpoint: boolean;
 }
 
 function parseEvent(line: string, lineNumber: number): HistoryEvent {
@@ -199,6 +261,7 @@ function parseEvent(line: string, lineNumber: number): HistoryEvent {
     data: event.data,
     timestamp,
     hidden: Boolean(event.agentId || event.ephemeral || event.data.parentToolCallId),
+    checkpoint: event.checkpoint === true,
   };
 }
 
