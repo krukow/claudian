@@ -1,7 +1,8 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { builtinModules, createRequire } from 'node:module';
 import path from 'node:path';
 
+import type * as copilotSdk from '@microsoft/copilot-sdk';
 import { build, stop } from 'esbuild';
 
 import * as copilotSdkBundleEnvelopeHelpers from '../../../scripts/copilotSdkBundleEnvelope.js';
@@ -42,7 +43,7 @@ const preCopilotBaselineBytes = budgetPolicyBytes('preCopilotSdkBaselineMainByte
  * guarantee: a broken alias, a tree-shaken client, or a stubbed-out transport would collapse
  * the contribution and make every exclusion assertion below pass vacuously.
  */
-const retainedSdkUpperBoundBytes = 200_000;
+const retainedSdkUpperBoundBytes = 290_000;
 const retainedSdkLowerBoundBytes = 50_000;
 const requiredProjectedHeadroomBytes = 100_000;
 
@@ -52,7 +53,6 @@ const requiredProjectedHeadroomBytes = 100_000;
  * or on a runtime resolution path the bundle can take.
  */
 const nativeFfiPackage = 'koffi';
-const platformCliPackagePattern = /^@github\/copilot-sdk-(?:darwin|linux|linuxmusl|win32)-(?:arm64|x64)$/;
 
 async function bundleFixture(contents: string): Promise<{
   bytes: number;
@@ -101,8 +101,7 @@ describe('Copilot SDK bundle envelope', () => {
   let bundleInputs: string[] = [];
   let bundleSource = '';
   let retainedSdkBytes = 0;
-  let fixture: {
-    probeCopilotClient(): string[];
+  let fixture: Pick<typeof copilotSdk, 'CopilotClient' | 'RuntimeConnection'> & {
     probeFailClosedStubs(): [string, string | null][];
   };
 
@@ -114,14 +113,13 @@ describe('Copilot SDK bundle envelope', () => {
           CopilotRequestHandler,
           CopilotWebSocketForwarder,
           CopilotWebSocketHandler,
+          RuntimeConnection,
           SessionFsSqliteTransactionFailure,
           SessionFsWriteFailure,
           createSessionFsAdapter,
-        } from '@github/copilot-sdk';
+        } from '@microsoft/copilot-sdk';
 
-        export function probeCopilotClient() {
-          return [typeof CopilotClient, typeof CopilotClient.prototype.start];
-        }
+        export { CopilotClient, RuntimeConnection };
 
         export function probeFailClosedStubs() {
           const stubs = [
@@ -165,8 +163,18 @@ describe('Copilot SDK bundle envelope', () => {
     stop();
   });
 
-  it('retains a working CopilotClient through the production bundle path', () => {
-    expect(fixture.probeCopilotClient()).toEqual(['function', 'function']);
+  it('negotiates protocol 4 and checks CLI authentication over child stdio', async () => {
+    const cli = path.join(root, 'tests/fixtures/copilot/protocol4-cli.js');
+    const client = new fixture.CopilotClient({
+      mode: 'coding-agent',
+      runtime: fixture.RuntimeConnection.forSpawnedStdio({ path: cli }),
+    });
+    try {
+      await client.start();
+      await expect(client.getAuthStatus()).resolves.toEqual({ isAuthenticated: true });
+    } finally {
+      await client.forceStop();
+    }
     expect(retainedSdkBytes).toBeGreaterThan(retainedSdkLowerBoundBytes);
   });
 
@@ -177,7 +185,8 @@ describe('Copilot SDK bundle envelope', () => {
       input.includes(`/${nativeFfiPackage}/`)
       || input.includes('/@github/copilot/')
       || /\/@github\/copilot-(?:darwin|linux|linuxmusl|win32)-/.test(input)
-      || /\/@github\/copilot-sdk-(?:darwin|linux|linuxmusl|win32)-/.test(input)
+      || input.includes('/@microsoft/copilot-sdk-')
+      || input.includes('/@koromix/koffi-')
       || input.includes('/detect-libc/')
     ))).toEqual([]);
   });
@@ -194,12 +203,33 @@ describe('Copilot SDK bundle envelope', () => {
       ['SessionFsWriteFailure', 'Copilot SQLite session storage is disabled in Claudian.'],
       ['createSessionFsAdapter', 'Copilot SQLite session storage is disabled in Claudian.'],
     ]);
-    // The FFI host is internal to the SDK, so its stub is proven by the rejection it carries
-    // into the artifact rather than by construction.
-    expect(bundleSource).toContain('Copilot in-process FFI transport is disabled in Claudian.');
-    expect(bundleSource).toContain(
+  });
+
+  it('rejects a spawned connection without an explicit runtime', async () => {
+    const client = new fixture.CopilotClient({
+      mode: 'coding-agent',
+      runtime: fixture.RuntimeConnection.forSpawnedStdio({ env: {} }),
+    });
+    await expect(client.start()).rejects.toThrow(
       'The Copilot CLI bundled with the SDK is not used by Claudian.',
     );
+  });
+
+  it('rejects the SDK in-process factory even with an explicit runtime', async () => {
+    const previous = process.env.COPILOT_CLI_PATH;
+    process.env.COPILOT_CLI_PATH = path.join(root, 'tests/fixtures/copilot/protocol4-cli.js');
+    try {
+      const client = new fixture.CopilotClient({
+        mode: 'coding-agent',
+        runtime: fixture.RuntimeConnection.forInProcess(),
+      });
+      await expect(client.start()).rejects.toThrow(
+        'Copilot in-process FFI transport is disabled in Claudian.',
+      );
+    } finally {
+      if (previous === undefined) delete process.env.COPILOT_CLI_PATH;
+      else process.env.COPILOT_CLI_PATH = previous;
+    }
   });
 
   it('keeps the Node vscode-jsonrpc transport the CLI stdio connection needs', () => {
@@ -213,7 +243,7 @@ describe('Copilot SDK bundle envelope', () => {
     expect(bundleSource).toContain('Content-Length');
   });
 
-  it('fits the fork bundle budget with headroom for the first SDK consumer', () => {
+  it('keeps the retained SDK within its allocation in the fork bundle budget', () => {
     const projectedMainBytes = preCopilotBaselineBytes + retainedSdkBytes;
 
     expect(retainedSdkBytes).toBeLessThanOrEqual(retainedSdkUpperBoundBytes);
@@ -222,16 +252,7 @@ describe('Copilot SDK bundle envelope', () => {
     expect(projectedMainBytes).toBeLessThanOrEqual(forkBudgetBytes);
     expect(forkBudgetBytes - projectedMainBytes)
       .toBeGreaterThanOrEqual(requiredProjectedHeadroomBytes);
-    expect(forkBudgetBytes - upstreamCeilingBytes).toBe(250_000);
+    expect(forkBudgetBytes - upstreamCeilingBytes).toBe(400_000);
     expect(bundleBytes).toBeGreaterThan(retainedSdkBytes);
-  });
-
-  it('declares optional platform runtimes and installs the native FFI dependency it refuses to bundle', () => {
-    const sdkManifest = JSON.parse(readFileSync(
-      path.join(root, 'node_modules', '@github', 'copilot-sdk', 'package.json'), 'utf8',
-    )) as { optionalDependencies: Record<string, string> };
-    expect(Object.keys(sdkManifest.optionalDependencies).filter(name => platformCliPackagePattern.test(name)).length)
-      .toBeGreaterThan(0);
-    expect(existsSync(path.join(root, 'node_modules', nativeFfiPackage))).toBe(true);
   });
 });

@@ -7,7 +7,7 @@ The Copilot provider is disabled until you turn it on.
 ## Requirements
 
 - The GitHub Copilot CLI, installed by you. Claudian never bundles, downloads, or updates it.
-- A current Copilot CLI. Claudian uses `@github/copilot-sdk` 1.0.19, paired upstream with CLI 1.0.95. An older CLI may not implement these APIs even if the SDK exposes them.
+- A CLI that speaks SDK protocol 4. Claudian bundles `@microsoft/copilot-sdk` 2.0.1, paired upstream with CLI 1.0.114. Protocol 3 CLIs cannot connect to this build.
 - A GitHub account with an active Copilot subscription. **Connect Copilot** handles sign-in.
 - In-app connection requires a CLI whose `login` command supports `--web-flow`. Claudian checks this capability before starting sign-in.
 - The same Obsidian and desktop requirements as the rest of Claudian.
@@ -209,9 +209,11 @@ An MCP configuration file is the format the Copilot CLI uses: a JSON document wi
 
 ## Install footprint
 
-Claudian depends on `@github/copilot-sdk`, which declares the native `koffi` FFI addon and optional `@github/copilot-sdk-<platform>-<arch>` runtime packages. Development installs may therefore include native runtime assets that Claudian never uses. That cost is contributor and CI disk only: the published plugin bundles neither, and the SDK's runtime loader is replaced with a fail-closed stub so it cannot resolve or unpack those assets. Claudian always runs the CLI you installed yourself.
+Claudian depends on `@microsoft/copilot-sdk`, which declares the native `koffi` FFI addon and optional `@microsoft/copilot-sdk-<platform>-<arch>` runtime packages. Development installs may include these assets. The plugin does not bundle or load them. It starts the CLI you installed as a separate process and communicates over standard input and output.
 
 ## Troubleshooting
+
+**"SDK protocol version mismatch"** — this happens before sign-in. If the SDK supports `3-3` and the server reports `4`, update Claudian and reload the plugin. If the SDK supports `4-4` and the server reports `3`, update the CLI selected in Settings > Claudian > Providers > Copilot. Retrying with the same pair will not help.
 
 **"The Copilot CLI could not be launched" / "The Copilot CLI was not found"** — the path in settings does not resolve, or nothing named `copilot` is on this computer's PATH. Fix the path in Settings > Claudian > Providers > Copilot, or clear it to let Claudian search. Do not add `COPILOT_CLI_PATH` to the provider's environment settings; that key is intentionally ignored. The path must be absolute; a relative one would be read against the vault. On Windows, point it at `copilot.exe` or at the npm install rather than at a `.cmd` launcher, and name a JavaScript entry with a lowercase `.js`.
 

@@ -18,7 +18,7 @@ import type {
 } from '@/providers/copilot/sdk/CopilotSdkPort';
 
 /**
- * A fake `@github/copilot-sdk` runtime. Production modules only ever see the SDK port,
+ * A fake SDK runtime. Production modules only ever see the SDK port,
  * so this plus a fake CLI path is the entire mocked boundary for Copilot tests.
  */
 export class FakeCopilotSdkSession implements CopilotSdkSession {

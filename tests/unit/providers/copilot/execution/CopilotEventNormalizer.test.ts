@@ -125,12 +125,13 @@ describe('CopilotEventNormalizer tool lifecycle', () => {
     const normalizer = createNormalizer();
 
     const started = normalizer.normalize(sdkEvent('tool.execution_start', {
-      arguments: { path: 'note.md' },
+      arguments: { command: 'echo hello' },
       toolCallId: 'tool-1',
-      toolName: 'read',
+      toolName: 'bash',
     }));
-    const partial = normalizer.normalize(sdkEvent('tool.execution_partial_result', {
-      partialOutput: 'first chunk',
+    const partial = normalizer.normalize(sdkEvent('tool.shell_output', {
+      sequence: 0,
+      text: 'first chunk',
       toolCallId: 'tool-1',
     }));
     const completed = normalizer.normalize(sdkEvent('tool.execution_complete', {
@@ -140,8 +141,8 @@ describe('CopilotEventNormalizer tool lifecycle', () => {
     }));
 
     expect(started[0]).toMatchObject({
-      input: { path: 'note.md' },
-      name: 'read',
+      input: { command: 'echo hello' },
+      name: 'bash',
       toolCallId: 'tool-1',
       toolScope: { kind: 'main' },
       type: 'tool_started',
@@ -230,8 +231,9 @@ describe('CopilotEventNormalizer other events', () => {
       deltaContent: '',
       messageId: 'message-1',
     })).map(event => event.type)).toEqual(['assistant_message_started']);
-    expect(normalizer.normalize(sdkEvent('tool.execution_partial_result', {
-      partialOutput: '',
+    expect(normalizer.normalize(sdkEvent('tool.shell_output', {
+      sequence: 0,
+      text: '',
       toolCallId: 'tool-1',
     }))).toEqual([]);
   });

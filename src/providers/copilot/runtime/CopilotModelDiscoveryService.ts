@@ -101,27 +101,16 @@ async function stopProbeClient(client: CopilotSdkClient): Promise<void> {
 }
 
 function isSelectableModel(model: CopilotSdkModel): boolean {
-  const policy = (model as { policy?: { state?: unknown } }).policy;
-  return policy?.state !== 'disabled';
+  return model.policy?.state !== 'disabled';
 }
 
 function toDiscoveredModelInput(model: CopilotSdkModel): Record<string, unknown> {
-  const capabilities = (model as {
-    capabilities?: {
-      limits?: { max_context_window_tokens?: unknown };
-      supports?: { reasoningEffort?: unknown; vision?: unknown };
-    };
-  }).capabilities;
-
   return {
-    defaultReasoningEffort: (model as { defaultReasoningEffort?: unknown })
-      .defaultReasoningEffort,
+    defaultReasoningEffort: model.defaultReasoningEffort,
     id: model.id,
-    maxContextWindowTokens: capabilities?.limits?.max_context_window_tokens,
+    maxContextWindowTokens: model.capabilities?.limits?.max_context_window_tokens,
     name: model.name,
-    supportedReasoningEfforts: capabilities?.supports?.reasoningEffort
-      ? (model as { supportedReasoningEfforts?: unknown }).supportedReasoningEfforts
-      : [],
-    supportsVision: capabilities?.supports?.vision === true,
+    supportedReasoningEfforts: model.capabilities?.supports?.reasoningEffort ? model.supportedReasoningEfforts : [],
+    supportsVision: model.capabilities?.supports?.vision === true,
   };
 }

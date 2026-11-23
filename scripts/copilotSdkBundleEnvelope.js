@@ -9,9 +9,9 @@
  * envelope and measures both halves — the graph that must be absent, and the stdio JSON-RPC
  * client that must survive.
  */
+const { createRequire } = require('node:module');
 const path = require('node:path');
 
-const envelopeRequire = require;
 const bundledCliRejection =
   'The Copilot CLI bundled with the SDK is not used by Claudian. '
   + 'Install the copilot CLI and set its path in Copilot settings.';
@@ -36,6 +36,7 @@ const unsupportedSdkModules = Object.freeze({
   ffiRuntimeHost: {
     classExports: ['FfiRuntimeHost'],
     functionExports: [],
+    classBody: 'static create() { throw new Error(reason); }',
     reason: 'Copilot in-process FFI transport is disabled in Claudian.',
   },
   runtimeArtifacts: {
@@ -51,35 +52,31 @@ const unsupportedSdkModules = Object.freeze({
 });
 
 function unsupportedModuleSource(moduleName) {
-  const { classExports, functionExports, reason } = unsupportedSdkModules[moduleName];
+  const { classExports, functionExports, classBody = '', reason } = unsupportedSdkModules[moduleName];
   return [
     `const reason = ${JSON.stringify(reason)};`,
     ...functionExports.map(exportName => (
       `export function ${exportName}() { throw new Error(reason); }`
     )),
     ...classExports.map(exportName => (
-      `export class ${exportName} { constructor() { throw new Error(reason); } }`
+      `export class ${exportName} { constructor() { throw new Error(reason); } ${classBody} }`
     )),
   ].join('\n');
 }
 
 function resolveVscodeJsonRpcNodeEntry() {
-  return path.join(
-    path.dirname(envelopeRequire.resolve('vscode-jsonrpc/node.js')),
-    'lib',
-    'node',
-    'main.js',
-  );
+  const sdkRequire = createRequire(require.resolve('@microsoft/copilot-sdk'));
+  return sdkRequire.resolve('vscode-jsonrpc/node');
 }
 
 /**
  * Aliases that must be applied to the browser-targeted Obsidian bundle for the Copilot
- * SDK to keep working. `vscode-jsonrpc` publishes a browser build that cannot read or
- * write the CLI's stdio streams, so the Node implementation is pinned explicitly.
+ * SDK to keep working. JSON-RPC v10 exports `./node` only under the Node condition.
+ * Resolve it from the SDK without changing export conditions for the rest of the plugin.
  */
 function createCopilotSdkRuntimeAliases() {
   return Object.freeze({
-    'vscode-jsonrpc/node.js': resolveVscodeJsonRpcNodeEntry(),
+    'vscode-jsonrpc/node': resolveVscodeJsonRpcNodeEntry(),
   });
 }
 
@@ -98,6 +95,7 @@ const copilotForbiddenBundleMarkers = Object.freeze({
   '@github/copilot-darwin': 'an SDK-bundled CLI platform package',
   '@github/copilot-win32': 'an SDK-bundled CLI platform package',
   '@github/copilot-sdk-': 'an SDK-bundled runtime platform package',
+  '@microsoft/copilot-sdk-': 'an SDK-bundled runtime platform package',
   'materializeRuntimeBundle': 'SDK-bundled runtime extraction',
   'Could not resolve a @github/copilot platform package':
     'the SDK-bundled CLI resolution failure path',
@@ -128,7 +126,7 @@ function inspectCopilotBundleEnvelope(bundleContents) {
 
 function createCopilotSdkBundleEnvelopePlugin() {
   const unsupportedFilter = new RegExp(
-    `[\\\\/]node_modules[\\\\/]@github[\\\\/]copilot-sdk[\\\\/]dist[\\\\/](?:cjs[\\\\/])?(?:${
+    `[\\\\/]node_modules[\\\\/]@microsoft[\\\\/]copilot-sdk[\\\\/]dist[\\\\/](?:cjs[\\\\/])?(?:${
       Object.keys(unsupportedSdkModules).join('|')
     })\\.js$`,
   );

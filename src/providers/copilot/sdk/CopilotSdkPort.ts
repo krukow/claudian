@@ -2,17 +2,17 @@ import type { CopilotReasoningEffort } from '../models';
 import type { CopilotPermissionMode } from '../settings';
 import type {
   MCPServerConfig,
-  ModelInfo,
+  Model,
   PermissionRequest,
   PermissionRequestResult,
-  SessionConfig,
   SessionEvent,
+  SessionOptionsBase,
 } from './copilotSdkModule';
 
-type UserInputHandler = NonNullable<SessionConfig['onUserInputRequest']>;
+type UserInputHandler = NonNullable<NonNullable<SessionOptionsBase['interaction']>['onUserInputRequest']>;
 
 /**
- * The whole surface Claudian uses from `@github/copilot-sdk`, restated as a port.
+ * The whole surface Claudian uses from `@microsoft/copilot-sdk`, restated as a port.
  *
  * Every production module depends on these types instead of the SDK classes, so tests
  * substitute a fake runtime and the SDK plus the `copilot` CLI stay the only mocked
@@ -21,10 +21,10 @@ type UserInputHandler = NonNullable<SessionConfig['onUserInputRequest']>;
 
 export type CopilotSdkEvent = SessionEvent;
 export type CopilotSdkMcpServerConfig = MCPServerConfig;
-export type CopilotSdkModel = ModelInfo;
+export type CopilotSdkModel = Model;
 export type CopilotSdkPermissionRequest = PermissionRequest;
 export type CopilotSdkPermissionResult = PermissionRequestResult;
-/** Metadata available on permission events, but omitted from the SDK callback. */
+/** Metadata used to decide whether an assisted permission still needs a human. */
 export interface CopilotSdkPermissionPrompt {
   readonly autoApproval?: NonNullable<
     Extract<SessionEvent, { type: 'permission.requested' }>['data']['promptRequest']
@@ -85,8 +85,7 @@ export interface CopilotSdkSessionConfig {
    */
   readonly availableTools: readonly string[];
   /**
-   * Tool deny-list, which always wins over {@link availableTools}: the SDK sends
-   * `toolFilterPrecedence: 'excluded'` for every client it builds.
+   * Tool deny-list, which always wins over {@link availableTools}.
    */
   readonly excludedTools?: readonly string[];
   readonly model: string;

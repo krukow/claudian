@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { CopilotClient, RuntimeConnection } from '@github/copilot-sdk';
+import { CopilotClient, RuntimeConnection } from '@microsoft/copilot-sdk';
 
 import type { ProviderExecutionErrorCategory } from '@/core/execution';
 import {
@@ -142,7 +142,7 @@ describe('toCopilotRuntimeError', () => {
 });
 
 /**
- * The message `@github/copilot-sdk` throws from `CopilotClient.start` when the path it
+ * The message `@microsoft/copilot-sdk` throws from `CopilotClient.start` when the path it
  * was handed names nothing, quoted exactly from the SDK.
  *
  * Claudian resolves the CLI before every start, so this is what a path that stopped
@@ -180,9 +180,12 @@ describe('toCopilotRuntimeError for the SDK missing-CLI failure', () => {
   it('recognizes the installed SDK error rather than only a captured message fixture', async () => {
     const missingPath = path.join(tmpdir(), `claudian-missing-cli-${randomUUID()}`, 'copilot');
     const client = new CopilotClient({
-      baseDirectory: path.join(tmpdir(), `claudian-missing-cli-state-${randomUUID()}`),
-      connection: RuntimeConnection.forStdio({ path: missingPath, env: {} }),
       mode: 'empty',
+      runtime: RuntimeConnection.forSpawnedStdio({
+        baseDirectory: path.join(tmpdir(), `claudian-missing-cli-state-${randomUUID()}`),
+        env: {},
+        path: missingPath,
+      }),
     });
     try {
       const failure = await client.start().then(() => undefined, (error: unknown) => error);

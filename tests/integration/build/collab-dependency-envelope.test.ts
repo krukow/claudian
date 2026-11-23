@@ -337,7 +337,7 @@ describe('Collab dependency envelope', () => {
     expect(script).toContain('preStep11BundleHealthBaselineBytes = 4_896_000');
     expect(script).toContain('preCopilotSdkBaselineMainBytes = 4_963_797');
     expect(script).toContain('upstreamMainBudgetBytes = 5_000_000');
-    expect(script).toContain('mainBudgetBytes = 5_250_000');
+    expect(script).toContain('mainBudgetBytes = 5_400_000');
     expect(script).toContain('evaluationReviewThresholdMs = 150');
     expect(script).toContain('pre-Collab reference delta');
     expect(script).toContain('pre-Step-11 health baseline delta');

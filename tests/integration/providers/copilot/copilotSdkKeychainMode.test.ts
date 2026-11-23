@@ -2,12 +2,12 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 const sdkClientSource = readFileSync(
-  path.resolve(__dirname, '../../../../node_modules/@github/copilot-sdk/dist/client.js'),
+  path.resolve(__dirname, '../../../../node_modules/@microsoft/copilot-sdk/dist/client.js'),
   'utf8',
 );
 
 /**
- * Every place `@github/copilot-sdk` writes the switch that shuts the CLI out of its
+ * Every place `@microsoft/copilot-sdk` writes the switch that shuts the CLI out of its
  * credential store, with the condition guarding it.
  *
  * The SDK writes it into the environment it builds for the runtime it spawns, after the
@@ -33,7 +33,7 @@ function keychainSwitchGuards(): string[] {
  * the keychain for another mode has to be read before it is taken, because the mode
  * `sdk/CopilotSdkRuntime` picks would no longer mean what it means here.
  */
-describe('@github/copilot-sdk keychain mode', () => {
+describe('@microsoft/copilot-sdk keychain mode', () => {
   it('disables the CLI keychain only in empty mode', () => {
     const guards = keychainSwitchGuards();
 
@@ -47,16 +47,15 @@ describe('@github/copilot-sdk keychain mode', () => {
    * runtime's own `COPILOT_HOME`, which is why Claudian's has to be one of its own.
    */
   it('clears installed plugins only in empty mode', () => {
-    const [, guarded] = sdkClientSource.split('patch.installedPlugins = [];');
-
-    expect(guarded).toBeDefined();
-    expect(sdkClientSource).toContain(
-      'if (this.options.mode === "empty") {\n      patch.skipCustomInstructions',
-    );
+    const patch = 'patch.plugins = { installed: [] };';
+    const emptyMode = /if \(this\.options\.mode === "empty"\) \{\n\s+patch\.instructions[\s\S]*?\n\s+\} else \{/
+      .exec(sdkClientSource)?.[0];
+    expect(emptyMode).toContain(patch);
+    expect(sdkClientSource.split(patch)).toHaveLength(2);
   });
 
   /**
-   * `builtinPluginDirectories: []` cannot be used to clear anything: the SDK only sends
+   * `plugins.builtinDirectories: []` cannot be used to clear anything: the SDK only sends
    * `plugins.builtin.set` when the list it was given is non-empty, so an empty one is a
    * no-op rather than a denial. There is no client option that empties that set.
    */

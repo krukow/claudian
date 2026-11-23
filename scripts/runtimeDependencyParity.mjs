@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 export const bundleCriticalRuntimeDependencies = Object.freeze([
   '@anthropic-ai/claude-agent-sdk',
-  '@github/copilot-sdk',
+  '@microsoft/copilot-sdk',
   'smol-toml',
 ]);
 

@@ -10,7 +10,7 @@ import {
 } from '../sdk/FakeCopilotSdkRuntime';
 
 /**
- * The real `@github/copilot-sdk` client, restated with only the surface the probe drives.
+ * The real `@microsoft/copilot-sdk` client, restated with only the surface the probe drives.
  * Used by the shutdown-budget case below, which needs the runtime's own client rather
  * than a fake that already settles.
  */
@@ -47,7 +47,7 @@ class WedgedSdkCopilotClient {
 
 jest.mock('@/providers/copilot/sdk/copilotSdkModule', () => ({
   CopilotClient: WedgedSdkCopilotClient,
-  RuntimeConnection: { forStdio: (options: unknown) => options },
+  RuntimeConnection: { forSpawnedStdio: (options: unknown) => options },
 }));
 
 function createHost(cliPath: string | null = '/usr/local/bin/copilot'): ProviderHost {
@@ -60,7 +60,7 @@ function createHost(cliPath: string | null = '/usr/local/bin/copilot'): Provider
   } as unknown as ProviderHost;
 }
 
-function sdkModel(overrides: Record<string, unknown> = {}): CopilotSdkModel {
+function sdkModel(overrides: Partial<CopilotSdkModel> = {}): CopilotSdkModel {
   return {
     capabilities: {
       limits: { max_context_window_tokens: 272_000 },
@@ -71,7 +71,7 @@ function sdkModel(overrides: Record<string, unknown> = {}): CopilotSdkModel {
     name: 'GPT-5',
     supportedReasoningEfforts: ['low', 'medium', 'high'],
     ...overrides,
-  } as unknown as CopilotSdkModel;
+  };
 }
 
 function createRuntime(models: readonly CopilotSdkModel[]): FakeCopilotSdkRuntime {

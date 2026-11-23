@@ -18,18 +18,13 @@ export const preStep11BundleHealthBaselineBytes = 4_896_000;
 export const preCopilotSdkBaselineMainBytes = 4_963_797;
 
 /**
- * Upstream ships `main.js` under a 5 MB ceiling and this fork keeps reporting against it, but
- * the fork also carries a dependency upstream does not: the Copilot SDK measures ~147 KB
- * through the production bundle path
- * (`tests/integration/build/copilot-sdk-bundle-envelope.test.ts`), which the pre-Copilot
- * 4_963_797-byte artifact has no room for. The budget adds 250 KB for that one consumer, so
- * the first Copilot import lands inside a number that was reviewed rather than discovered on
- * a red build. Crossing the upstream ceiling is reported on every run; crossing the fork
- * budget fails it. Raise the budget only against a measured contribution, never to make a
- * build pass.
+ * Report the upstream 5 MB ceiling separately from this fork's hard limit. With the
+ * protocol-4 SDK, main.js measures 5.374 MB, including about 272 KB for the SDK and
+ * stdio transport. Keep the upstream RPC implementation intact rather than rewriting it
+ * to save space. Revisit this limit only against a measured production build.
  */
 export const upstreamMainBudgetBytes = 5_000_000;
-export const mainBudgetBytes = 5_250_000;
+export const mainBudgetBytes = 5_400_000;
 export const evaluationIndicatorMs = 50;
 export const evaluationReviewThresholdMs = 150;
 const pluginArtifactNames = ['main.js', 'manifest.json'];
