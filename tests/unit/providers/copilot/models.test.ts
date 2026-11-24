@@ -121,11 +121,10 @@ describe('normalizeCopilotDiscoveredModels', () => {
 });
 
 describe('isCopilotReasoningEffort', () => {
-  it('accepts exactly the efforts the SDK reasoning union declares', () => {
-    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+  it('accepts the known reasoning efforts', () => {
+    for (const effort of ['none', 'low', 'medium', 'high', 'xhigh', 'max']) {
       expect(isCopilotReasoningEffort(effort)).toBe(true);
     }
-    expect(isCopilotReasoningEffort('none')).toBe(false);
     expect(isCopilotReasoningEffort('ultra')).toBe(false);
     expect(isCopilotReasoningEffort(undefined)).toBe(false);
   });
@@ -139,6 +138,16 @@ describe('resolveCopilotDefaultReasoningEffort', () => {
     supportsReasoning: true,
     supportsVision: false,
   };
+
+  it('keeps reasoning off when the catalog advertises none as its default', () => {
+    const [model] = normalizeCopilotDiscoveredModels([{
+      id: 'copilot-model',
+      defaultReasoningEffort: 'none',
+      supportedReasoningEfforts: ['high', 'none', 'low'],
+    }]);
+    expect(getCopilotReasoningOptions(model)).toEqual(['none', 'low', 'high']);
+    expect(resolveCopilotDefaultReasoningEffort(model)).toBe('none');
+  });
 
   it('prefers a stored preference the model advertises', () => {
     expect(resolveCopilotDefaultReasoningEffort(

@@ -39,7 +39,7 @@ export const NATIVE_OPERATION_TIMEOUT_SECONDS = NATIVE_OPERATION_TIMEOUT_MS / 1_
  * A start is not a release. Spawning the executable, waiting for its server to listen, and
  * agreeing a protocol version is cold work that a first launch of the day, a slow disk, or
  * a virus scanner routinely stretches past every other native call's budget.
- * `@github/copilot-sdk` allows thirty seconds for its own half of that wait, so ending the
+ * `@microsoft/copilot-sdk` allows thirty seconds for its own half of that wait, so ending the
  * start any sooner only reports a CLI that was still coming up as one that went silent.
  */
 export const NATIVE_STARTUP_TIMEOUT_MS = 30_000;

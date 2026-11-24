@@ -28,7 +28,7 @@ const signedInHome = process.env.CLAUDIAN_COPILOT_KEYCHAIN_SMOKE_HOME?.trim();
 
 /**
  * Runs one real turn end to end: the production execution session, the real
- * `@github/copilot-sdk`, and the user-installed `copilot` CLI.
+ * `@microsoft/copilot-sdk`, and the user-installed `copilot` CLI.
  *
  * Nothing here is faked except where the CLI keeps its state. `CopilotClientFactory`
  * derives `COPILOT_HOME` from the vault, and a synthetic vault has never been signed in

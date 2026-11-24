@@ -2,10 +2,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import type * as CopilotSdk from '@github/copilot-sdk';
+import type * as CopilotSdk from '@microsoft/copilot-sdk';
 
 import type { ProviderApprovalInteractionRequest, ProviderInteractionPort } from '@/core/execution';
 import { CopilotInteractionHandler } from '@/providers/copilot/execution/CopilotInteractionHandler';
+import { encodeToolSelection } from '@/providers/copilot/execution/CopilotRequestEncoder';
 import { resolveCopilotSelectedResources } from '@/providers/copilot/resources/CopilotResourceResolver';
 import { normalizeCopilotResourceSettings } from '@/providers/copilot/resources/CopilotResourceSettings';
 import { CopilotCliResolver } from '@/providers/copilot/runtime/CopilotCliResolver';
@@ -21,7 +22,7 @@ import { copilotSdkRuntime } from '@/providers/copilot/sdk/CopilotSdkRuntime';
 
 import { type LocalModelServer, startLocalModelServer } from './native-fixtures/LocalModelServer';
 
-let mockModelProvider: CopilotSdk.SessionConfig['provider'];
+let mockModelProvider: CopilotSdk.NamedProviderConfig | undefined;
 let mockHomeDirectory = '/synthetic-copilot-home';
 
 jest.mock('node:os', () => ({
@@ -30,21 +31,31 @@ jest.mock('node:os', () => ({
 }));
 
 // Only the external model endpoint is replaced; SDK transport and native sessions stay real.
-jest.mock('@github/copilot-sdk', () => {
-  const actual = jest.requireActual<typeof CopilotSdk>('@github/copilot-sdk');
+jest.mock('@microsoft/copilot-sdk', () => {
+  const actual = jest.requireActual<typeof CopilotSdk>('@microsoft/copilot-sdk');
+  function withLocalModel(config: CopilotSdk.SessionOptionsBase): CopilotSdk.SessionOptionsBase {
+    if (!mockModelProvider) return config;
+    const id = config.model;
+    if (!id) throw new Error('The loopback provider requires an explicit model.');
+    return {
+      ...config,
+      inference: {
+        ...config.inference,
+        models: [{ id, provider: mockModelProvider.name }],
+        providers: [mockModelProvider],
+      },
+      model: `${mockModelProvider.name}/${id}`,
+    };
+  }
   return {
     ...actual,
     CopilotClient: class extends actual.CopilotClient {
-      override createSession(config: CopilotSdk.SessionConfig) {
-        return super.createSession(mockModelProvider
-          ? { ...config, provider: mockModelProvider }
-          : config);
+      override createSession(config: CopilotSdk.CreateSessionOptions) {
+        return super.createSession(withLocalModel(config));
       }
 
-      override resumeSession(sessionId: string, config: CopilotSdk.ResumeSessionConfig) {
-        return super.resumeSession(sessionId, mockModelProvider
-          ? { ...config, provider: mockModelProvider }
-          : config);
+      override resumeSession(sessionId: string, config: CopilotSdk.ResumeSessionOptions) {
+        return super.resumeSession(sessionId, withLocalModel(config));
       }
     },
   };
@@ -107,6 +118,7 @@ describeWithCli('Copilot native resource isolation', () => {
     mockModelProvider = {
       apiKey: 'synthetic-only',
       baseUrl: started.baseUrl,
+      name: 'fixture',
       type: 'openai',
       wireApi: 'completions',
     };
@@ -129,6 +141,23 @@ describeWithCli('Copilot native resource isolation', () => {
       root = '';
     }
     mockHomeDirectory = '/synthetic-copilot-home';
+  });
+
+  it('offers ordinary chat tools but no background workflow tools to the model', async () => {
+    const localModel = await useLocalModel();
+    const started = await startClient();
+    const session = await started.createSession({
+      ...sessionConfig(vault),
+      ...encodeToolSelection({ kind: 'provider-default' }),
+      model: 'gpt-4o',
+    });
+    await session.send('Return the synthetic completion.');
+
+    const request: { tools: { function: { name: string } }[] } = JSON.parse(localModel.completionRequests[0]);
+    const names = request.tools.map(tool => tool.function.name);
+    expect(names).toContain('view');
+    expect(names.filter(name => ['dynamic_workflows_manage', 'run_dynamic_workflow'].includes(name)))
+      .toEqual([]);
   });
 
   it('starts only the selected server, not home or workspace MCP definitions', async () => {

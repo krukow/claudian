@@ -2,19 +2,16 @@ import {
   formatReasoningValueLabel,
   resolvePreferredReasoningDefault,
 } from '../../core/providers/reasoning';
-import type { ReasoningEffort as SdkReasoningEffort } from './sdk/copilotSdkModule';
 
-/**
- * The exact `ReasoningEffort` union the Copilot SDK accepts. Persisted and discovered
- * values are validated against it so an unknown effort can never reach `setModel`.
- */
+/** Reasoning efforts Claudian recognizes in the CLI catalog and persisted settings. */
 export const COPILOT_REASONING_EFFORTS = [
+  'none',
   'low',
   'medium',
   'high',
   'xhigh',
   'max',
-] as const satisfies readonly SdkReasoningEffort[];
+] as const;
 
 export type CopilotReasoningEffort = (typeof COPILOT_REASONING_EFFORTS)[number];
 

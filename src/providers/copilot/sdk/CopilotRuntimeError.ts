@@ -98,11 +98,11 @@ const CONFIGURATION_PATTERN =
   /\b(?:enoent|eacces|not found on PATH|unsupported protocol|protocol version|invalid configuration)\b/i;
 
 /**
- * The shape `CopilotSession.sendAndWait` rejects with when the CLI never reaches idle.
+ * The SDK's completion RPC and its event-based fallback use different timeout messages.
  * The SDK has no typed timeout error, so it is recognized at the one call site that owns
  * the budget rather than by a downstream message match.
  */
-const SEND_TIMEOUT_PATTERN = /^Timeout after \d+ms waiting for session\.idle$/;
+const SEND_TIMEOUT_PATTERN = /^Timeout after \d+ms waiting for (?:session\.idle|response completion)$/;
 
 /**
  * The shape `CopilotClient.start` throws with when the path it was handed names nothing.

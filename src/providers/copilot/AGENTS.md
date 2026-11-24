@@ -1,6 +1,6 @@
 # Copilot Provider
 
-`src/providers/copilot/` adapts the GitHub Copilot CLI through `@github/copilot-sdk` over
+`src/providers/copilot/` adapts the GitHub Copilot CLI through `@microsoft/copilot-sdk` over
 a stdio JSON-RPC subprocess.
 
 The provider is reachable from `src/main.ts` and ships switched off. It streams text,
@@ -11,7 +11,7 @@ them as pending here.
 
 ## Dependency Boundary
 
-- `sdk/CopilotSdkPort.ts` is the only description of `@github/copilot-sdk` the rest of the
+- `sdk/CopilotSdkPort.ts` is the only description of `@microsoft/copilot-sdk` the rest of the
   provider may depend on. `sdk/copilotSdkModule.ts` and `sdk/CopilotSdkRuntime.ts` are the
   only modules that import the SDK. Tests substitute a runtime through that port, so the
   SDK and the `copilot` CLI stay the only mocked boundary.
@@ -125,13 +125,15 @@ them as pending here.
   addon out of the bundle. `sdk/CopilotSdkRuntime` is written against that envelope, so
   adding an SDK feature that reaches those modules requires revisiting it, not deleting
   it.
+- The v2 SDK dispatches even the `connect` reply through `AsyncLocalStorage.run`. Never use Node async hooks in its renderer bundle: Node and Blink share the V8 continuation slot. The bundle envelope tracks the SDK's initialization callback tokens per client until response or disposal and rejects ambiguous re-entry. Workflow execution contexts are unsupported. Check both SDK imports and callback lifetimes when upgrading; do not replace all renderer imports or use a synchronous context stack.
 - SDK lockfile entries use canonical public-registry URLs with verified integrity hashes. Contributor-specific registry mirrors belong in installation configuration, not the committed SDK artifact locations.
-- The client is constructed with `mode: 'copilot-cli'`, because `mode: 'empty'` is the one
+- Use `RuntimeConnection.forSpawnedStdio` with the resolved CLI, environment, vault working directory, and per-vault base directory. Omitting `runtime` lets SDK v2 select its in-process native runtime.
+- The client is constructed with `mode: 'coding-agent'`, because `mode: 'empty'` is the one
   thing that writes `COPILOT_DISABLE_KEYTAR=1` into the environment the CLI is spawned
   with. The SDK writes it after the caller's own environment, so no entry can take it back
   out, and a CLI that cannot open its credential store reports itself signed out however
   recently the user signed in — leaving only the `gh` CLI or an explicit token to answer
-  the auth gate, neither of which Claudian promises or owns. `useLoggedInUser` is stated
+  the auth gate, neither of which Claudian promises or owns. `github.useLoggedInUser` is stated
   for the same reason: it is what decides whether the CLI may use the sign-in it already
   has. `baseDirectory` is still checked for absoluteness before a client is built, and
   that check now matters more, not less: outside empty mode the SDK makes no persistence
@@ -152,24 +154,21 @@ them as pending here.
 - A session's installed plugins are the exception, and the reason `COPILOT_HOME` isolation
   is load-bearing rather than tidy. The SDK clears them only in empty mode, through the
   options patch it sends after create and resume, and exposes no session field for them;
-  `builtinPluginDirectories: []` clears nothing either, because the SDK only sends
+  `plugins.builtinDirectories: []` clears nothing either, because the SDK only sends
   `plugins.builtin.set` when the list is non-empty. What a session loads is read from the
   runtime's `COPILOT_HOME`, where both the registry in `config.json` and the plugin cache
   live, so a per-vault directory of Claudian's own is what makes the list empty. Never
   point that directory at a shared Copilot install.
   `tests/integration/providers/copilot/copilotSdkKeychainMode.test.ts` pins all three SDK
   rules; check it when the SDK moves.
-- Tool filter precedence is deny-wins for every client the SDK builds — it always sends
-  `toolFilterPrecedence: 'excluded'` — so an `excludedTools` entry overrides the same tool
-  in `availableTools`. A later execution layer reads its own tool list that way rather than
-  the other way round. This is not a mode difference; do not treat it as one.
+- Before publishing a created or resumed session, disable remote export and steering with `session.rpc.remote.disable()` and set `tools.filterPrecedence` to `excluded`. Omitting a filter update on resume preserves the session's existing precedence; an `excludedTools` entry must always win over `availableTools`.
 - `availableTools` is required by the port rather than left to a later layer. Omitting it
   reads as "keep the CLI's own defaults", which is the ambient behaviour everything above
   exists to keep out, and the caller would not find out until a turn ran.
 - Every tool policy therefore names an allow-list. A policy that restricts nothing says so
   as `builtin:*` — every builtin, and nothing an MCP server or a custom agent registered —
   rather than by staying silent, and it is the only shape that needs `excludedTools`,
-  because it is the only one that would otherwise match the agent and factory families.
+  because it is the only one that would otherwise match the background-agent and workflow tools. Deny the protocol-4 workflow names as well as their factory aliases.
   The narrower policies name those families nowhere, so a second deny-list on them would
   restate one rule twice.
 - The CLI does not inherit `process.env`. It receives a small forwarded base, then the
@@ -370,7 +369,7 @@ them as pending here.
   cannot be spawned is fixed in settings, not by retrying.
 - Two SDK failures carry no category and no keyword the categorizer reads, so each is
   matched by its whole message shape rather than by a word in it: the turn that never
-  reached `session.idle`, and `Copilot CLI not found at <path>.`, which the SDK throws
+  reached completion (`waiting for session.idle` or `waiting for response completion`), and `Copilot CLI not found at <path>.`, which the SDK throws
   when the path it was handed names nothing. The second is a configuration failure, not
   the transport failure its call site would otherwise report — the CLI cannot be
   reinstalled by sending the turn again. Both shapes are quoted from the SDK; an SDK
@@ -404,7 +403,7 @@ them as pending here.
 - Starting a client is the exception, and runs on the longer startup budget instead. A
   start is not a release: spawning the CLI, waiting for it to listen, and handshaking
   versions is cold work a first launch, a slow disk, or a virus scanner stretches well
-  past what a running runtime would ever take to answer, and `@github/copilot-sdk` allows
+  past what a running runtime would ever take to answer, and `@microsoft/copilot-sdk` allows
   thirty seconds for its own half of it. Bounding a start on the release budget would
   abandon CLIs that were about to answer.
 - A shutdown is bounded inside `sdk/CopilotSdkRuntime` rather than by its caller: a client
@@ -440,16 +439,17 @@ them as pending here.
   disposal waits; every later one repeats what that first one reported.
 - A turn ends exactly once. A cancellation that is followed by a failure, a late native
   answer, or a disposal does not end it a second time.
+- A main-agent `session.warning` with `warningType: "policy_blocked"` can be the only refusal signal even when the send succeeds. Report the refusal for that send, not a completed turn. Keep the client usable.
 - Native session data is provider-owned and read-only. The only ids this layer deletes are
   the ephemeral ones it created itself, for a lease it promised to clean up; a deletion
   that fails is retried through the next client and reported when no next client can exist.
-- History hydration reads `session-state/<sessionId>/events.jsonl` under the same `resolveCopilotHomeDirectory(vaultPath)` used by execution. Never use provider-configured environment values, persisted absolute paths, another vault's store, or a CLI launch to locate history. Reject escaping references, symlinks outside the home, mismatched session headers, and malformed records; surface read failures without deleting or resetting the conversation.
+- History hydration starts at `session-state/<sessionId>/events.jsonl` under `resolveCopilotHomeDirectory(vaultPath)`. Follow `session.journal_link` only to numbered predecessors in that session's directory; checkpoint copies are replay state, not additional chat messages. Never use provider-configured paths, another session's files, or a CLI launch. Reject escaping references, mismatched sessions, and malformed journals without deleting or resetting the conversation.
 - Native aggregate events, not live deltas or the execution normalizer, are the history source. Group the main agent's text, readable reasoning, and tools between canonical user messages; exclude internal skill/agent prompts and subagent output. Preserve populated in-memory messages, leave incomplete historical tools non-running, and let the application repository correlate accepted-input context after hydration.
 - Approvals, questions, and events all carry the identity of the live session they came
   from, so a session Claudian dropped can never answer for the run that replaced it.
 - Permission modes are host-scoped and apply only to persistent chat with a `provider-default` or `unrestricted` tool policy. `CopilotExecutionSession` snapshots the effective mode before asynchronous acquisition and includes it in session identity; auxiliary and restricted turns always use Ask. Approval modes never widen available or excluded tools.
-- Before publishing a created or resumed session, the SDK boundary calls `session.rpc.options.update({ featureFlags: { AUTO_APPROVAL: mode === 'judge' } })`, then `session.rpc.commands.invoke({ name: 'permissions', input })`, where input is `default`, `assisted`, or `allow-all`. Generated permission RPCs are not a compatibility substitute for this native command; changing that path requires a native CLI compatibility check. Do not enable general experimental mode.
-- Assisted approvals have one event-aware response owner: the SDK invokes its ordinary callback before public events and omits prompt metadata. Only while that owner is attached in judge mode does the callback return `no-result`. Normalize native `assistedApproval` and SDK `autoApproval`; only an affirmative recommendation without a managed-human requirement may approve once. Keep request, turn, cancellation, and disposal fences, and never attribute an AI or standing approval with `approvedInteractively`.
+- Before publishing a created or resumed session, the SDK boundary sets `experiments.flags.AUTO_APPROVAL` through `session.rpc.options.update`, then calls `session.rpc.commands.invoke({ name: 'permissions', input })`, where input is `default`, `assisted`, or `allow-all`. Generated permission RPCs are not a compatibility substitute for this native command; changing that path requires a native CLI compatibility check. Do not enable general experimental mode.
+- Assisted approvals have one event-aware response owner. The SDK invokes its ordinary callback before public events and does not give the callback the event's request ID. Only while the event owner is attached in judge mode does the callback return `no-result`. Only an affirmative recommendation without a managed-human requirement may approve once. Keep request, turn, cancellation, and disposal fences, and never attribute an AI or standing approval with `approvedInteractively`.
 - Input the provider cannot carry is reported on the turn rather than dropped. An image
   reaches nothing — the CLI receives a text prompt and `capabilities.ts` advertises no
   image support — so the turn says which attachments were not sent.
@@ -458,9 +458,7 @@ them as pending here.
 ## Model and Settings Rules
 
 - Connection confirmation persists catalog, enablement, and model choices through `ProviderHost.mutateSettings`, then commits the future-chat seed through the app-owned `chatModelSelection` port. These writes do not change runtime inputs and must not quiesce existing execution leases. CLI and environment edits retain the runtime-settings transition boundary.
-- `COPILOT_REASONING_EFFORTS` mirrors the SDK's `ReasoningEffort` union exactly. Persisted
-  and discovered efforts are validated against it so an unknown value never reaches
-  `setModel`.
+- SDK v2 accepts arbitrary reasoning-effort strings. Keep `COPILOT_REASONING_EFFORTS` as the provider's allow-list for persisted and discovered values; do not send an unrecognized value to `setModel`.
 - Only explicitly enabled models are selectable. There is no synthetic entry, no hidden
   session model, and no provider-default fallback when the enabled list is empty.
 - Persisted provider configuration is untrusted input. Every field is decoded, and an

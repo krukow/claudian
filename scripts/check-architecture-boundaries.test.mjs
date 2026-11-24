@@ -1060,8 +1060,8 @@ test('performance policy enforces the main bundle budget and reports health delt
   assert.equal(preStep11BundleHealthBaselineBytes, 4_896_000);
   assert.equal(preCopilotSdkBaselineMainBytes, 4_963_797);
   assert.equal(upstreamMainBudgetBytes, 5_000_000);
-  assert.equal(mainBudgetBytes, 5_250_000);
-  assert.equal(mainBudgetBytes - upstreamMainBudgetBytes, 250_000);
+  assert.equal(mainBudgetBytes, 5_400_000);
+  assert.equal(mainBudgetBytes - upstreamMainBudgetBytes, 400_000);
   assert.deepEqual(inspectArtifactSize(mainBudgetBytes), {
     budgetExceeded: false,
     copilotSdkBaselineDeltaBytes: mainBudgetBytes - preCopilotSdkBaselineMainBytes,
@@ -1100,6 +1100,7 @@ test('production bundle policy rejects Copilot SDK code the envelope excludes', 
     '@github/copilot-darwin',
     '@github/copilot-linux',
     '@github/copilot-win32',
+    '@microsoft/copilot-sdk-',
     'Could not resolve a @github/copilot platform package',
   ]) {
     const inspected = inspectCopilotBundleEnvelope(`const plugin = {};\n${marker}`);
@@ -1112,7 +1113,7 @@ test('the Copilot SDK resolves bundled runtimes only through the stubbed boundar
   const { unsupportedSdkModules } = copilotSdkBundleEnvelopeHelpers;
   const clientPath = path.join(
     process.cwd(),
-    'node_modules/@github/copilot-sdk/dist/client.js',
+    'node_modules/@microsoft/copilot-sdk/dist/client.js',
   );
   assert.match(
     fs.readFileSync(clientPath, 'utf8'),
@@ -1124,13 +1125,13 @@ test('the Copilot SDK resolves bundled runtimes only through the stubbed boundar
 test('bundle-critical runtime dependencies require exact manifest and lock agreement', () => {
   assert.deepEqual(bundleCriticalRuntimeDependencies, [
     '@anthropic-ai/claude-agent-sdk',
-    '@github/copilot-sdk',
+    '@microsoft/copilot-sdk',
     'smol-toml',
   ]);
   const packageJson = {
     dependencies: {
       '@anthropic-ai/claude-agent-sdk': '0.3.226',
-      '@github/copilot-sdk': '1.0.11',
+      '@microsoft/copilot-sdk': '2.0.1',
       'smol-toml': '1.7.1',
     },
   };
@@ -1138,7 +1139,7 @@ test('bundle-critical runtime dependencies require exact manifest and lock agree
     packages: {
       '': { dependencies: { ...packageJson.dependencies } },
       'node_modules/@anthropic-ai/claude-agent-sdk': { version: '0.3.226' },
-      'node_modules/@github/copilot-sdk': { version: '1.0.11' },
+      'node_modules/@microsoft/copilot-sdk': { version: '2.0.1' },
       'node_modules/smol-toml': { version: '1.7.1' },
     },
   };
@@ -1148,7 +1149,7 @@ test('bundle-critical runtime dependencies require exact manifest and lock agree
     },
     packages: {
       '@anthropic-ai/claude-agent-sdk': ['@anthropic-ai/claude-agent-sdk@0.3.226'],
-      '@github/copilot-sdk': ['@github/copilot-sdk@1.0.11'],
+      '@microsoft/copilot-sdk': ['@microsoft/copilot-sdk@2.0.1'],
       'smol-toml': ['smol-toml@1.7.1'],
     },
   };
@@ -1168,7 +1169,7 @@ test('bundle-critical runtime dependencies require exact manifest and lock agree
   );
 
   const rangedCopilotManifest = structuredClone(packageJson);
-  rangedCopilotManifest.dependencies['@github/copilot-sdk'] = '^1.0.11';
+  rangedCopilotManifest.dependencies['@microsoft/copilot-sdk'] = '^2.0.1';
   assert.deepEqual(
     inspectRuntimeDependencyParity({
       bunLock,
@@ -1176,8 +1177,8 @@ test('bundle-critical runtime dependencies require exact manifest and lock agree
       packageLock,
     }),
     [{
-      actual: '^1.0.11',
-      dependency: '@github/copilot-sdk',
+      actual: '^2.0.1',
+      dependency: '@microsoft/copilot-sdk',
       expected: 'an exact version',
       source: 'package.json',
     }],

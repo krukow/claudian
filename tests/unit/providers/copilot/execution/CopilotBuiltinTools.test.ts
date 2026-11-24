@@ -11,12 +11,13 @@ import {
 /**
  * The expected names are written out here rather than derived from the catalog, so a
  * change to what the provider believes the CLI offers has to be re-stated deliberately.
- * Recapture with `session.tools.getCurrentMetadata` before changing them.
+ * The native resource smoke also checks what a default chat actually offers the model.
  */
 const CAPTURED_BUILTIN_TOOLS = [
   'ask_user',
   'bash',
   'create',
+  'dynamic_workflows_manage',
   'edit',
   'factories_manage',
   'glob',
@@ -25,6 +26,7 @@ const CAPTURED_BUILTIN_TOOLS = [
   'list_bash',
   'read_agent',
   'read_bash',
+  'run_dynamic_workflow',
   'run_factory',
   'sql',
   'stop_bash',
@@ -40,20 +42,22 @@ const CAPTURED_BUILTIN_TOOLS = [
  * capability and renders nothing either of them would produce.
  */
 const CAPTURED_UNSUPPORTED_TOOLS = [
+  'dynamic_workflows_manage',
   'factories_manage',
   'list_agents',
   'read_agent',
+  'run_dynamic_workflow',
   'run_factory',
   'task',
   'write_agent',
 ];
 
 describe('Copilot builtin tool catalog', () => {
-  it('records the tools Copilot CLI 1.0.83 registers for a Claudian session', () => {
+  it('records the built-in tool names covered by Claudian policy', () => {
     expect([...COPILOT_BUILTIN_TOOL_CATALOG].sort()).toEqual(CAPTURED_BUILTIN_TOOLS);
   });
 
-  it('names the task and factory families the provider does not support', () => {
+  it('names the background-agent, workflow and factory tools the provider does not support', () => {
     expect([...COPILOT_UNSUPPORTED_BUILTIN_TOOLS].sort()).toEqual(CAPTURED_UNSUPPORTED_TOOLS);
   });
 

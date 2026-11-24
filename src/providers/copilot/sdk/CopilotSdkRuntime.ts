@@ -26,7 +26,7 @@ import type * as copilotSdkModule from './copilotSdkModule';
 import type {
   CopilotClientOptions,
   CopilotSession,
-  SessionConfig,
+  SessionOptionsBase,
 } from './copilotSdkModule';
 import type {
   CopilotMcpReadiness,
@@ -59,9 +59,9 @@ function loadCopilotSdk(): Promise<CopilotSdkModule> {
 }
 
 /**
- * The single place `@github/copilot-sdk` is constructed.
+ * The single place `@microsoft/copilot-sdk` is constructed.
  *
- * The client runs in the SDK's `copilot-cli` defaulting mode, because that is the only
+ * The client runs in the SDK's `coding-agent` mode, because that is the only
  * mode which leaves the CLI able to reach its own credential store. `mode: 'empty'` writes
  * `COPILOT_DISABLE_KEYTAR=1` into the environment the CLI is spawned with — after the
  * caller's own environment, so nothing can take it back out — and a CLI that cannot open
@@ -113,16 +113,15 @@ export const copilotSdkRuntime: CopilotSdkRuntime = {
 
     const { CopilotClient, RuntimeConnection } = await loadCopilotSdk();
     const client = new CopilotClient({
-      baseDirectory: options.baseDirectory,
-      connection: RuntimeConnection.forStdio({
+      github: { useLoggedInUser: true },
+      mode: 'coding-agent',
+      observability: { logLevel: 'error' },
+      runtime: RuntimeConnection.forSpawnedStdio({
+        baseDirectory: options.baseDirectory,
         env: { ...options.environment },
         path: options.cliPath,
+        workingDirectory: options.workingDirectory,
       }),
-      enableRemoteSessions: false,
-      logLevel: 'error',
-      mode: 'copilot-cli',
-      useLoggedInUser: true,
-      workingDirectory: options.workingDirectory,
     } satisfies CopilotClientOptions);
 
     const outcome = await settleNativeWithin(client.start(), NATIVE_STARTUP_TIMEOUT_MS);
@@ -257,7 +256,8 @@ class SdkBackedClient implements CopilotSdkClient {
       cancellation.signal.throwIfAborted();
       return result;
     };
-    const preparation = applyNativePermissionMode(session, config.permissionMode ?? 'ask', call)
+    const preparation = call(() => session.rpc.remote.disable(), 'disabling remote session export')
+      .then(() => applyNativePermissionMode(session, config.permissionMode ?? 'ask', call))
       .then(() => prepareSessionResources(session, config, call));
     const outcome = await acquireNativeWithin(
       permissions ? permissions.withFailure(preparation) : preparation,
@@ -421,7 +421,8 @@ async function applyNativePermissionMode(
   const input = permissionMode === 'judge' ? 'assisted' : permissionMode === 'ask' ? 'default' : 'allow-all';
   try {
     const updated = await call(() => session.rpc.options.update({
-      featureFlags: { AUTO_APPROVAL: permissionMode === 'judge' },
+      experiments: { flags: { AUTO_APPROVAL: permissionMode === 'judge' } },
+      tools: { filterPrecedence: 'excluded' },
     }), 'applying Copilot approval settings');
     if (!updated.success) {
       throw copilotConfigurationError('The CLI did not apply the approval feature setting.');
@@ -449,7 +450,7 @@ interface PendingPermission {
   readonly turn: object | null;
 }
 
-/** Auto mode needs event metadata the SDK discards before calling its permission handler. */
+/** Judge mode uses the event request ID to fence cancellation and deliver one response. */
 class SdkPermissionResponder {
   private session: CopilotSession | null = null;
   private turn: object | null = null;
@@ -565,7 +566,7 @@ function decodePermissionPrompt(value: unknown): CopilotSdkPermissionPrompt {
       ? { managedApprovalRequired: true }
       : {}),
   };
-  // The CLI uses assistedApproval; the SDK's generated event contract uses autoApproval.
+  // Older transcripts and runtimes can name the assessment autoApproval.
   const auto = prompt.assistedApproval ?? prompt.autoApproval;
   if (!auto || typeof auto !== 'object' || Array.isArray(auto)) return result;
   const recommendation = auto as Record<string, unknown>;
@@ -620,12 +621,22 @@ class SdkBackedSession implements CopilotSdkSession {
 
   async send(prompt: string): Promise<void> {
     const turn = this.permissions?.beginTurn();
+    let refusal: string | undefined;
+    let unsubscribe: (() => void) | undefined;
     try {
+      unsubscribe = this.session.on('session.warning', event => {
+        if (!event.agentId && event.data.warningType === 'policy_blocked') {
+          refusal = event.data.message || 'The Copilot CLI blocked this prompt by policy.';
+        }
+      });
       const sending = this.session.sendAndWait(prompt, TURN_TIMEOUT_MS);
-      await (this.permissions ? this.permissions.withFailure(sending) : sending);
+      const response = await (this.permissions ? this.permissions.withFailure(sending) : sending);
+      // A blocked prompt reaches idle without a user or assistant message.
+      if (!response && refusal !== undefined) throw new CopilotRuntimeError('provider', refusal);
     } catch (error) {
       throw toCopilotSendError(error, TURN_TIMEOUT_MS);
     } finally {
+      unsubscribe?.();
       this.permissions?.endTurn(turn);
     }
   }
@@ -813,7 +824,7 @@ async function prepareSessionResources(
   const mcp = await collectSelectedMcpTools(session, config, resources, call);
   if (mcp.tools.length > 0) {
     await call(() => session.rpc.options.update({
-        availableTools: [...config.availableTools, ...mcp.tools],
+      tools: { availableTools: [...config.availableTools, ...mcp.tools] },
     }), 'enabling selected MCP tools');
   }
   return { resourceDiagnostics: mcp.diagnostics, skillCommandNames };
@@ -1067,55 +1078,60 @@ function toSessionConfig(
   config: CopilotSdkSessionConfig,
   disabledMcpServers: readonly string[],
   permissions?: SdkPermissionResponder,
-): SessionConfig {
+): SessionOptionsBase {
   const resources = config.resources;
   return {
-    ...(config.additionalDirectories?.length
-      ? { additionalDirectories: [...config.additionalDirectories] }
-      : {}),
-    ...(config.excludedTools?.length ? { excludedTools: [...config.excludedTools] } : {}),
-    ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
-    ...(resources?.skillDirectories.length
-      ? { skillDirectories: [...resources.skillDirectories] }
-      : {}),
-    availableTools: [...config.availableTools],
+    agents: { localDiscoveryOnly: true },
     clientName: 'Claudian',
-    coauthorEnabled: false,
-    customAgentsLocalOnly: true,
-    disabledMcpServers: [...disabledMcpServers],
-    embeddingCacheStorage: 'in-memory',
     enableConfigDiscovery: false,
-    enableExperimentalMode: false,
-    enableFileHooks: false,
-    enableHostGitOperations: false,
-    enableMcpApps: false,
-    enableOnDemandInstructionDiscovery: false,
-    enableSessionStore: false,
-    enableSessionTelemetry: false,
-    enableSkills: (resources?.skillDirectories.length ?? 0) > 0,
-    includeSubAgentStreamingEvents: false,
-    infiniteSessions: { enabled: false },
-    manageScheduleEnabled: false,
-    mcpOAuthTokenStorage: resources?.mcpOAuthTokenStorage ?? 'in-memory',
-    mcpServers: { ...resources?.mcpServers },
-    memory: { enabled: false },
+    events: {
+      includeSubAgentStreamingEvents: false,
+      onEvent: permissions
+        ? event => {
+          permissions.onEvent(event);
+          config.onEvent(event);
+        }
+        : config.onEvent,
+      streaming: true,
+    },
+    experiments: { enableExperimentalMode: false },
+    ...(config.additionalDirectories?.length
+      ? { filesystem: { additionalDirectories: [...config.additionalDirectories] } }
+      : {}),
+    git: { coauthorEnabled: false, enableHostGitOperations: false },
+    github: { telemetryEnabled: false },
+    hooks: { enableRepositoryHooks: false },
+    ...(config.reasoningEffort ? { inference: { reasoningEffort: config.reasoningEffort } } : {}),
+    instructions: { onDemandDiscovery: false, skipCustomInstructions: true },
+    interaction: { onUserInputRequest: request => config.onUserInputRequest(request) },
+    mcp: {
+      disabledServers: [...disabledMcpServers],
+      enableApps: false,
+      oauthTokenStorage: resources?.mcpOAuthTokenStorage ?? 'in-memory',
+      servers: { ...resources?.mcpServers },
+    },
     model: config.model,
-    onEvent: permissions
-      ? event => {
-        permissions.onEvent(event);
-        config.onEvent(event);
-      }
-      : config.onEvent,
-    onPermissionRequest: request => (
-      permissions ? permissions.sdkCallback() : config.onPermissionRequest(request)
-    ),
-    onUserInputRequest: request => config.onUserInputRequest(request),
-    pluginDirectories: [],
-    remoteSession: 'off',
-    skipCustomInstructions: true,
-    skipEmbeddingRetrieval: true,
-    streaming: true,
+    permissions: {
+      onRequest: request => permissions ? permissions.sdkCallback() : config.onPermissionRequest(request),
+    },
+    plugins: { directories: [] },
+    skills: {
+      ...(resources?.skillDirectories.length ? { directories: [...resources.skillDirectories] } : {}),
+      enabled: (resources?.skillDirectories.length ?? 0) > 0,
+    },
+    state: {
+      embeddingCacheStorage: 'in-memory',
+      enableCrossSessionStore: false,
+      infiniteSessions: { enabled: false },
+      memory: { enabled: false },
+      skipEmbeddingRetrieval: true,
+    },
     systemMessage: toSystemMessageConfig(config.systemMessage),
+    tools: {
+      availableTools: [...config.availableTools],
+      ...(config.excludedTools?.length ? { excludedTools: [...config.excludedTools] } : {}),
+      manageScheduleEnabled: false,
+    },
     workingDirectory: config.workingDirectory,
   };
 }
@@ -1131,7 +1147,7 @@ function toSessionConfig(
  */
 function toSystemMessageConfig(
   systemMessage: CopilotSdkSystemMessage,
-): SessionConfig['systemMessage'] {
+): SessionOptionsBase['systemMessage'] {
   return systemMessage.mode === 'replace'
     ? { content: systemMessage.content, mode: 'replace' }
     : {

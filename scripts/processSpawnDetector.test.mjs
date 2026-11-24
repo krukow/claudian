@@ -144,5 +144,5 @@ test('a module specifier the gate cannot read is reported', () => {
 
 test('a static module specifier is read rather than reported', () => {
   assert.deepEqual(reasons("const sdk = await import('./copilotSdkModule');"), []);
-  assert.deepEqual(reasons("export { CopilotClient } from '@github/copilot-sdk';"), []);
+  assert.deepEqual(reasons("export { CopilotClient } from '@microsoft/copilot-sdk';"), []);
 });

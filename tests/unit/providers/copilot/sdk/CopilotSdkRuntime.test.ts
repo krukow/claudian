@@ -9,7 +9,7 @@ import {
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import type { CopilotClientOptions, SessionConfig, SessionEvent } from '@github/copilot-sdk';
+import type { CopilotClientOptions, CopilotSession, SessionEvent, SessionOptionsBase } from '@microsoft/copilot-sdk';
 
 import type { ProviderApprovalInteractionRequest, ProviderInteractionPort } from '@/core/execution';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
@@ -29,6 +29,8 @@ import type { CopilotPermissionMode } from '@/providers/copilot/settings';
 import { createDeferred, type Deferred } from './FakeCopilotSdkRuntime';
 
 type NativePermissionMode = 'off' | 'on' | 'auto';
+type NativeOptionsUpdate = Parameters<CopilotSession['rpc']['options']['update']>[0];
+type NativeWarning = Extract<SessionEvent, { type: 'session.warning' }>;
 interface NativeMcpSignInRequest {
   readonly serverName: string;
   readonly clientName: string;
@@ -42,11 +44,11 @@ class FakeSdkCopilotSession {
   disconnected = 0;
   readonly disabledSkills: string[] = [];
   readonly invocations: Array<{ input?: string; name: string }> = [];
-  readonly optionUpdates: Array<Record<string, unknown>> = [];
+  readonly optionUpdates: NativeOptionsUpdate[] = [];
   serverListings = 0;
   readonly toolListings: string[] = [];
   readonly permissionInputs: string[] = [];
-  readonly featureUpdates: Array<Record<string, boolean>> = [];
+  readonly policyUpdates: NativeOptionsUpdate[] = [];
   readonly permissionResponses: Array<{
     requestId: string;
     result: Exclude<CopilotSdkPermissionResult, { kind: 'no-result' }>;
@@ -56,8 +58,9 @@ class FakeSdkCopilotSession {
   readonly modelChanges: string[] = [];
   readonly mcpSignInRequests: NativeMcpSignInRequest[] = [];
   private readonly permissionWaiters = new Map<string, Deferred<void>>();
+  private readonly warningListeners = new Set<(event: NativeWarning) => void>();
 
-  constructor(readonly sessionId: string, public config?: SessionConfig) {
+  constructor(readonly sessionId: string, public config?: SessionOptionsBase) {
     FakeSdkCopilotSession.instances.push(this);
   }
 
@@ -98,15 +101,18 @@ class FakeSdkCopilotSession {
       },
     },
     options: {
-      update: async (params: Record<string, unknown>) => {
-        if (params.featureFlags) {
-          this.featureUpdates.push(params.featureFlags as Record<string, boolean>);
+      update: async (params: NativeOptionsUpdate) => {
+        if (params.experiments) {
+          this.policyUpdates.push(params);
         } else {
           this.optionUpdates.push(params);
           await FakeSdkCopilotClient.behavior.updateOptions?.();
         }
         return { success: true, pluginHookCount: 0 };
       },
+    },
+    remote: {
+      disable: async () => { await FakeSdkCopilotClient.behavior.disableRemote?.(); },
     },
     permissions: {
       handlePendingPermissionRequest: async (params: {
@@ -137,18 +143,26 @@ class FakeSdkCopilotSession {
     await FakeSdkCopilotClient.behavior.send?.(this, prompt);
   }
 
+  on(_type: 'session.warning', listener: (event: NativeWarning) => void): () => void {
+    this.warningListeners.add(listener);
+    return () => { this.warningListeners.delete(listener); };
+  }
+
   async setModel(model: string): Promise<void> {
     this.modelChanges.push(model);
     await FakeSdkCopilotClient.behavior.setModel?.();
   }
 
   async dispatchEvent(event: SessionEvent): Promise<void> {
+    if (event.type === 'session.warning') this.warningListeners.forEach(listener => listener(event));
     // The SDK invokes its permission callback before public event subscribers.
     const response = event.type === 'permission.requested' && !event.data.resolvedByHook
       && this.disconnected === 0
-      ? this.config?.onPermissionRequest?.(event.data.permissionRequest, { sessionId: this.sessionId })
+      ? this.config?.permissions?.onRequest?.(event.data.permissionRequest, {
+        sessionId: this.sessionId, promptRequest: event.data.promptRequest,
+      })
       : undefined;
-    this.config?.onEvent?.(event);
+    this.config?.events?.onEvent?.(event);
     const attributed = await response;
     const result = attributed?.kind === 'attributed' ? attributed.result : attributed;
     if (event.type === 'permission.requested' && result && result.kind !== 'no-result'
@@ -178,7 +192,7 @@ class FakeSdkCopilotSession {
 }
 
 /**
- * The real `@github/copilot-sdk` client, restated with only the shutdown surface these
+ * The real `@microsoft/copilot-sdk` client, restated with only the shutdown surface these
  * tests exercise. `stop` resolves with the errors it could not recover from instead of
  * rejecting, which is the behaviour the wrapper has to account for.
  */
@@ -187,9 +201,10 @@ class FakeSdkCopilotClient {
   static behavior: {
     abort?: () => Promise<void>;
     commands?: Array<{ description?: string; kind: string; name: string }>;
-    createSession?: (config: SessionConfig) => Promise<FakeSdkCopilotSession>;
+    createSession?: (config: SessionOptionsBase) => Promise<FakeSdkCopilotSession>;
     deleteSession?: () => Promise<void>;
     disconnect?: () => Promise<void>;
+    disableRemote?: () => Promise<void>;
     disableSkill?: () => Promise<void>;
     discoverMcp?: () => Promise<{ servers: Array<{ name: string }> }>;
     ensureSkills?: () => Promise<void>;
@@ -222,7 +237,7 @@ class FakeSdkCopilotClient {
   started = 0;
   stopped = 0;
   readonly discoveryRequests: Array<{ workingDirectory?: string }> = [];
-  readonly sessionConfigs: SessionConfig[] = [];
+  readonly sessionConfigs: SessionOptionsBase[] = [];
   readonly deletedSessions: string[] = [];
 
   constructor(readonly options: CopilotClientOptions) {
@@ -247,7 +262,7 @@ class FakeSdkCopilotClient {
     return { isAuthenticated: true };
   }
 
-  async createSession(config: SessionConfig): Promise<FakeSdkCopilotSession> {
+  async createSession(config: SessionOptionsBase): Promise<FakeSdkCopilotSession> {
     this.sessionConfigs.push(config);
     const session = (await FakeSdkCopilotClient.behavior.createSession?.(config))
       ?? new FakeSdkCopilotSession('copilot-session-1');
@@ -257,7 +272,7 @@ class FakeSdkCopilotClient {
 
   async resumeSession(
     sessionId: string,
-    config: SessionConfig,
+    config: SessionOptionsBase,
   ): Promise<FakeSdkCopilotSession> {
     this.sessionConfigs.push(config);
     const session = (await FakeSdkCopilotClient.behavior.resumeSession?.())
@@ -284,7 +299,7 @@ class FakeSdkCopilotClient {
 
 jest.mock('@/providers/copilot/sdk/copilotSdkModule', () => ({
   CopilotClient: FakeSdkCopilotClient,
-  RuntimeConnection: { forStdio: (options: unknown) => options },
+  RuntimeConnection: { forSpawnedStdio: (options: object) => ({ kind: 'spawned-stdio', ...options }) },
 }));
 
 /** A native call that never answers, used to prove the budget bounds it. */
@@ -337,6 +352,25 @@ beforeEach(() => {
   FakeSdkCopilotClient.behavior = {};
 });
 
+it('rejects a policy-blocked send with its reason without poisoning the next send', async () => {
+  const warning: NativeWarning = {
+    type: 'session.warning', id: 'warning', parentId: null, timestamp: '2026-01-01T00:00:00Z',
+    data: { message: 'This prompt is blocked by policy.', warningType: 'policy_blocked', originatingMessageId: 'm1' },
+  };
+  FakeSdkCopilotClient.behavior.send = async (native, prompt) => {
+    await native.dispatchEvent(prompt === 'first' ? warning : { ...warning, agentId: 'child' });
+  };
+  const session = await createSession();
+  try {
+    await expect(session.send('first')).rejects.toMatchObject({
+      category: 'provider', message: warning.data.message, nativeReset: 'none',
+    });
+    await expect(session.send('second')).resolves.toBeUndefined();
+  } finally {
+    await session.disconnect();
+  }
+});
+
 it('holds factory startup ownership until the timed-out SDK client finishes cleanup', async () => {
   await withFakeTimers(async () => {
     const release = createDeferred();
@@ -386,7 +420,7 @@ describe('copilotSdkRuntime MCP sign-in primitive', () => {
     await created.disconnect();
     const resumed = await client.resumeSession(created.sessionId, config);
 
-    expect(FakeSdkCopilotClient.instances[0].sessionConfigs.map(value => value.mcpOAuthTokenStorage))
+    expect(FakeSdkCopilotClient.instances[0].sessionConfigs.map(value => value.mcp?.oauthTokenStorage))
       .toEqual([expected, expected]);
     await resumed.disconnect();
   });
@@ -486,8 +520,11 @@ describe('copilotSdkRuntime native permission modes', () => {
     expect(native.permissionInputs).toEqual([
       mode === 'auto' ? 'assisted' : mode === 'on' ? 'allow-all' : 'default',
     ]);
-    expect(native.featureUpdates).toEqual([{ AUTO_APPROVAL: mode === 'auto' }]);
-    expect(native.config?.availableTools).toEqual(['builtin:view']);
+    expect(native.policyUpdates).toEqual([{
+      experiments: { flags: { AUTO_APPROVAL: mode === 'auto' } },
+      tools: { filterPrecedence: 'excluded' },
+    }]);
+    expect(native.config?.tools?.availableTools).toEqual(['builtin:view']);
     expect(native.optionUpdates).toEqual([]);
     await session.disconnect();
   });
@@ -940,7 +977,7 @@ describe('copilotSdkRuntime judge event ownership', () => {
 });
 
 /**
- * The client is constructed in the SDK's `copilot-cli` defaulting mode, because
+ * The client is constructed in the SDK's `coding-agent` mode, because
  * `mode: 'empty'` is the one thing that puts `COPILOT_DISABLE_KEYTAR=1` into the spawned
  * CLI's environment. With the keychain shut off the CLI never opens its credential store,
  * so the sign-in the user already performed is invisible to it and only the `gh` CLI or an
@@ -962,12 +999,15 @@ describe('copilotSdkRuntime client construction', () => {
     const options = FakeSdkCopilotClient.instances[0]?.options;
 
     expect(options).toMatchObject({
-      baseDirectory: '/state/copilot',
-      connection: { env: { COPILOT_HOME: '/state/copilot' }, path: '/usr/local/bin/copilot' },
-      enableRemoteSessions: false,
-      mode: 'copilot-cli',
-      useLoggedInUser: true,
-      workingDirectory: '/vault',
+      github: { useLoggedInUser: true },
+      mode: 'coding-agent',
+      runtime: {
+        baseDirectory: '/state/copilot',
+        env: { COPILOT_HOME: '/state/copilot' },
+        kind: 'spawned-stdio',
+        path: '/usr/local/bin/copilot',
+        workingDirectory: '/vault',
+      },
     });
   });
 
@@ -981,7 +1021,7 @@ describe('copilotSdkRuntime client construction', () => {
     const options = FakeSdkCopilotClient.instances[0]?.options;
 
     expect(options?.mode).not.toBe('empty');
-    expect(options?.gitHubToken).toBeUndefined();
+    expect(options?.github?.token).toBeUndefined();
   });
 
   /**
@@ -1031,7 +1071,7 @@ describe('copilotSdkRuntime client construction', () => {
     );
 
     expect(FakeSdkCopilotClient.instances[0]?.sessionConfigs.map(
-      config => config.availableTools,
+      config => config.tools?.availableTools,
     )).toEqual([[], ['builtin:view']]);
   });
 
@@ -1057,61 +1097,27 @@ describe('copilotSdkRuntime client construction', () => {
  * MCP OAuth tokens are written to the OS keychain, and the commit co-author trailer is
  * added. So every entry is now sent by Claudian with each create and resume.
  */
-const COPILOT_SESSION_FLOOR: Readonly<Record<string, unknown>> = {
-  coauthorEnabled: false,
-  customAgentsLocalOnly: true,
-  embeddingCacheStorage: 'in-memory',
+const COPILOT_SESSION_FLOOR = {
+  agents: { localDiscoveryOnly: true },
   enableConfigDiscovery: false,
-  enableExperimentalMode: false,
-  enableFileHooks: false,
-  enableHostGitOperations: false,
-  enableMcpApps: false,
-  enableOnDemandInstructionDiscovery: false,
-  enableSessionStore: false,
-  enableSessionTelemetry: false,
-  enableSkills: false,
-  includeSubAgentStreamingEvents: false,
-  infiniteSessions: { enabled: false },
-  manageScheduleEnabled: false,
-  mcpOAuthTokenStorage: 'in-memory',
-  mcpServers: {},
-  memory: { enabled: false },
-  pluginDirectories: [],
-  remoteSession: 'off',
-  skipCustomInstructions: true,
-  skipEmbeddingRetrieval: true,
-};
-
-/** The floor fields a caller must not be able to reach, and so weaken, through the port. */
-type CopilotSessionFloorField =
-  | 'clientName'
-  | 'coauthorEnabled'
-  | 'configDirectory'
-  | 'customAgents'
-  | 'customAgentsLocalOnly'
-  | 'embeddingCacheStorage'
-  | 'enableConfigDiscovery'
-  | 'enableExperimentalMode'
-  | 'enableFileHooks'
-  | 'enableHostGitOperations'
-  | 'enableMcpApps'
-  | 'enableOnDemandInstructionDiscovery'
-  | 'enableSessionStore'
-  | 'enableSessionTelemetry'
-  | 'enableSkills'
-  | 'gitHubToken'
-  | 'hooks'
-  | 'infiniteSessions'
-  | 'instructionDirectories'
-  | 'manageScheduleEnabled'
-  | 'mcpOAuthTokenStorage'
-  | 'mcpServers'
-  | 'memory'
-  | 'pluginDirectories'
-  | 'remoteSession'
-  | 'skillDirectories'
-  | 'skipCustomInstructions'
-  | 'skipEmbeddingRetrieval';
+  events: { includeSubAgentStreamingEvents: false, streaming: true },
+  experiments: { enableExperimentalMode: false },
+  git: { coauthorEnabled: false, enableHostGitOperations: false },
+  github: { telemetryEnabled: false },
+  hooks: { enableRepositoryHooks: false },
+  instructions: { onDemandDiscovery: false, skipCustomInstructions: true },
+  mcp: { enableApps: false, oauthTokenStorage: 'in-memory', servers: {} },
+  plugins: { directories: [] },
+  skills: { enabled: false },
+  state: {
+    embeddingCacheStorage: 'in-memory',
+    enableCrossSessionStore: false,
+    infiniteSessions: { enabled: false },
+    memory: { enabled: false },
+    skipEmbeddingRetrieval: true,
+  },
+  tools: { manageScheduleEnabled: false },
+} satisfies SessionOptionsBase;
 
 describe('copilotSdkRuntime session floor', () => {
   it.each([
@@ -1127,6 +1133,15 @@ describe('copilotSdkRuntime session floor', () => {
     const config = FakeSdkCopilotClient.instances[0]?.sessionConfigs[0];
 
     expect(config).toMatchObject(COPILOT_SESSION_FLOOR);
+    expect(config).not.toHaveProperty('cloud');
+  });
+
+  it('does not hand back a resumed session when remote export cannot be disabled', async () => {
+    FakeSdkCopilotClient.behavior.disableRemote = async () => { throw new Error('Remote policy unavailable'); };
+    const client = await createClient();
+    await expect(client.resumeSession('saved-session', sessionConfig())).rejects.toThrow('Remote policy unavailable');
+    expect(FakeSdkCopilotSession.instances[0].disconnected).toBe(1);
+    expect(FakeSdkCopilotClient.instances[0].deletedSessions).toEqual([]);
   });
 
   /**
@@ -1168,7 +1183,7 @@ describe('copilotSdkRuntime session floor', () => {
    */
   it('leaves no consumer able to weaken the floor', () => {
     type NoFloorFieldIsReachable =
-      Extract<keyof CopilotSdkSessionConfig, CopilotSessionFloorField> extends never
+      Extract<keyof CopilotSdkSessionConfig, keyof typeof COPILOT_SESSION_FLOOR | 'cloud'> extends never
         ? true
         : false;
     const proven: NoFloorFieldIsReachable = true;
@@ -1431,7 +1446,7 @@ describe('copilotSdkRuntime shutdown budget', () => {
  *
  * It is bounded on its own deadline rather than the one every release shares. Spawning a
  * CLI, waiting for its server, and agreeing a protocol version is not the same kind of
- * wait as letting go of a runtime that is already running, and `@github/copilot-sdk`
+ * wait as letting go of a runtime that is already running, and `@microsoft/copilot-sdk`
  * allows thirty seconds for its own half of it.
  */
 describe('copilotSdkRuntime startup budget', () => {
@@ -1953,9 +1968,8 @@ describe('copilotSdkRuntime session resources', () => {
       { workingDirectory: '/vault' },
     ]);
     expect(config).toMatchObject({
-      disabledMcpServers: ['home-server', 'plugin-server'],
-      enableSkills: false,
-      mcpServers: {},
+      mcp: { disabledServers: ['home-server', 'plugin-server'], servers: {} },
+      skills: { enabled: false },
     });
   });
 
@@ -1969,10 +1983,8 @@ describe('copilotSdkRuntime session resources', () => {
 
     for (const config of FakeSdkCopilotClient.instances[0]?.sessionConfigs ?? []) {
       expect(config).toMatchObject({
-        disabledMcpServers: ['home-server'],
-        enableSkills: true,
-        mcpServers: { notes: notesServer },
-        skillDirectories: ['/skills/review'],
+        mcp: { disabledServers: ['home-server'], servers: { notes: notesServer } },
+        skills: { directories: ['/skills/review'], enabled: true },
       });
     }
   });
@@ -2025,7 +2037,7 @@ describe('copilotSdkRuntime session resources', () => {
 
     expect(session.resourceDiagnostics).toEqual([]);
     expect(FakeSdkCopilotSession.instances[0]?.optionUpdates).toEqual([
-      { availableTools: ['builtin:read', 'mcp:notes-search'] },
+      { tools: { availableTools: ['builtin:read', 'mcp:notes-search'] } },
     ]);
   });
 
@@ -2117,7 +2129,7 @@ describe('copilotSdkRuntime selected server connections', () => {
 
       expect(session.resourceDiagnostics).toEqual([]);
       expect(FakeSdkCopilotSession.instances[0]?.optionUpdates).toEqual([
-        { availableTools: ['builtin:read', 'mcp:notes-search'] },
+        { tools: { availableTools: ['builtin:read', 'mcp:notes-search'] } },
       ]);
     });
   });
@@ -2274,7 +2286,7 @@ describe('copilotSdkRuntime unreported server state', () => {
 
     expect(session.resourceDiagnostics).toEqual([]);
     expect(FakeSdkCopilotSession.instances[0]?.optionUpdates).toEqual([
-      { availableTools: ['builtin:read', 'mcp:notes-search'] },
+      { tools: { availableTools: ['builtin:read', 'mcp:notes-search'] } },
     ]);
   });
 });
@@ -2299,8 +2311,8 @@ describe('copilotSdkRuntime deny-all sessions with resources', () => {
     }));
 
     expect(FakeSdkCopilotClient.instances[0]?.sessionConfigs[0]).toMatchObject({
-      availableTools: [],
-      mcpServers: { notes: { command: '/usr/bin/notes-mcp' } },
+      tools: { availableTools: [] },
+      mcp: { servers: { notes: { command: '/usr/bin/notes-mcp' } } },
     });
     expect(FakeSdkCopilotSession.instances[0]?.optionUpdates).toEqual([]);
     expect(FakeSdkCopilotSession.instances[0]?.toolListings).toEqual([]);

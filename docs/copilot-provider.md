@@ -7,7 +7,7 @@ The Copilot provider is disabled until you turn it on.
 ## Requirements
 
 - The GitHub Copilot CLI, installed by you. Claudian never bundles, downloads, or updates it.
-- A current Copilot CLI. Claudian uses `@github/copilot-sdk` 1.0.19, paired upstream with CLI 1.0.95. An older CLI may not implement these APIs even if the SDK exposes them.
+- A CLI that speaks SDK protocol 4. Claudian bundles `@microsoft/copilot-sdk` 2.0.1, paired upstream with CLI 1.0.114. Protocol 3 CLIs cannot connect to this build.
 - A GitHub account with an active Copilot subscription. **Connect Copilot** handles sign-in.
 - In-app connection requires a CLI whose `login` command supports `--web-flow`. Claudian checks this capability before starting sign-in.
 - The same Obsidian and desktop requirements as the rest of Claudian.
@@ -85,9 +85,9 @@ Leave **CLI path** empty for automatic discovery. Set an absolute path only when
 ## Using it
 
 - **Chat**: pick a Copilot model in the chat model selector and send a message. Text and reasoning stream as they arrive, tool calls appear as they start and finish, and usage is reported against the model's context window.
-- **History**: select a chat from **Chat history**, the session sidebar, or `/resume` to restore its messages, readable reasoning, and tool results from Copilot's local transcript. Loading history does not start the CLI, connect MCP servers, or send a model request. The transcript must still exist on this computer under this vault's Copilot home.
+- **History**: select a chat from **Chat history**, the session sidebar, or `/resume` to restore its messages, readable reasoning, and tool results from Copilot's local transcript. If the CLI split the transcript into numbered journals, keep those files alongside `events.jsonl` in this vault's Copilot home. Loading history does not start the CLI, connect MCP servers, or send a model request.
 - **Stop a response**: select **Stop** in the active chat's composer, or press **Esc**. This cancels only that tab's foreground response, including reasoning and tool approval waits, without deleting the conversation or losing queued or draft input. **Stopping...** remains disabled until the turn settles; stopping during preparation prevents the turn from being sent. Rewind is not interruptible through this control.
-- **Tools**: Copilot runs its own built-in tools with the vault as its working directory, not a filesystem sandbox. Claudian narrows them to the ones it can render, and the background-agent and factory families are never available.
+- **Tools**: Copilot runs its own built-in tools with the vault as its working directory, not a filesystem sandbox. Claudian excludes tools that manage background agents or create and run workflows.
 - **Approvals**: use the single **Tool approvals** dropdown to choose **Ask**, **LLM judge**, or **Allow all** under Copilot's permission settings. The choice applies to chat on this computer, not auxiliary or restricted turns. Requests without a live owning turn are refused.
 - **Deleting a chat**: choose the trash button on a session row, or right-click the row and choose **Delete**. Confirm the named chat to remove it from Claudian; archiving first is not required. Stop running work and wait for any rewind to finish before deleting the chat, including work in another pane. Your notes and provider-native history remain untouched, and deletion cannot be undone in Claudian.
 - **Questions**: when the CLI asks a question, Claudian shows it with the choices the CLI offered.
@@ -209,9 +209,11 @@ An MCP configuration file is the format the Copilot CLI uses: a JSON document wi
 
 ## Install footprint
 
-Claudian depends on `@github/copilot-sdk`, which declares the native `koffi` FFI addon and optional `@github/copilot-sdk-<platform>-<arch>` runtime packages. Development installs may therefore include native runtime assets that Claudian never uses. That cost is contributor and CI disk only: the published plugin bundles neither, and the SDK's runtime loader is replaced with a fail-closed stub so it cannot resolve or unpack those assets. Claudian always runs the CLI you installed yourself.
+Claudian depends on `@microsoft/copilot-sdk`, which declares the native `koffi` FFI addon and optional `@microsoft/copilot-sdk-<platform>-<arch>` runtime packages. Development installs may include these assets. The plugin does not bundle or load them. It starts the CLI you installed as a separate process and communicates over standard input and output.
 
 ## Troubleshooting
+
+**"SDK protocol version mismatch"** — this happens before sign-in. If the SDK supports `3-3` and the server reports `4`, update Claudian and reload the plugin. If the SDK supports `4-4` and the server reports `3`, update the CLI selected in Settings > Claudian > Providers > Copilot. Retrying with the same pair will not help.
 
 **"The Copilot CLI could not be launched" / "The Copilot CLI was not found"** — the path in settings does not resolve, or nothing named `copilot` is on this computer's PATH. Fix the path in Settings > Claudian > Providers > Copilot, or clear it to let Claudian search. Do not add `COPILOT_CLI_PATH` to the provider's environment settings; that key is intentionally ignored. The path must be absolute; a relative one would be read against the vault. On Windows, point it at `copilot.exe` or at the npm install rather than at a `.cmd` launcher, and name a JavaScript entry with a lowercase `.js`.
 

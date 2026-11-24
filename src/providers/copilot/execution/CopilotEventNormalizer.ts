@@ -51,7 +51,7 @@ export class CopilotEventNormalizer {
         return this.normalizeReasoning(event.data);
       case 'tool.execution_start':
         return this.normalizeToolStart(event.data);
-      case 'tool.execution_partial_result':
+      case 'tool.shell_output':
         return this.normalizeToolOutput(event.data);
       case 'tool.execution_complete':
         return this.normalizeToolComplete(event.data);
@@ -118,13 +118,13 @@ export class CopilotEventNormalizer {
   }
 
   private normalizeToolOutput(
-    data: Extract<CopilotSdkEvent, { type: 'tool.execution_partial_result' }>['data'],
+    data: Extract<CopilotSdkEvent, { type: 'tool.shell_output' }>['data'],
   ): ProviderExecutionEvent[] {
-    if (!data.partialOutput) {
+    if (!data.text) {
       return [];
     }
     return [this.event({
-      content: data.partialOutput,
+      content: data.text,
       toolCallId: data.toolCallId,
       toolScope: { kind: 'main' },
       type: 'tool_output',
