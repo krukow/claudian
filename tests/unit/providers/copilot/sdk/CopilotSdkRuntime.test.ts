@@ -65,6 +65,10 @@ class FakeSdkCopilotSession {
   }
 
   readonly rpc = {
+    abort: async () => {
+      this.aborted += 1;
+      return await FakeSdkCopilotClient.behavior.abort?.() ?? { success: true };
+    },
     commands: {
       invoke: async (params: { input?: string; name: string }) => {
         if (params.name === 'permissions') {
@@ -180,11 +184,6 @@ class FakeSdkCopilotSession {
     return waiter.promise;
   }
 
-  async abort(): Promise<void> {
-    this.aborted += 1;
-    await FakeSdkCopilotClient.behavior.abort?.();
-  }
-
   async disconnect(): Promise<void> {
     this.disconnected += 1;
     await FakeSdkCopilotClient.behavior.disconnect?.();
@@ -199,7 +198,7 @@ class FakeSdkCopilotSession {
 class FakeSdkCopilotClient {
   static readonly instances: FakeSdkCopilotClient[] = [];
   static behavior: {
-    abort?: () => Promise<void>;
+    abort?: () => Promise<{ success: boolean; error?: string }>;
     commands?: Array<{ description?: string; kind: string; name: string }>;
     createSession?: (config: SessionOptionsBase) => Promise<FakeSdkCopilotSession>;
     deleteSession?: () => Promise<void>;
@@ -1769,6 +1768,15 @@ describe('copilotSdkRuntime turn aborts', () => {
     const session = await createSession();
 
     await expect(session.abort()).rejects.toThrow(/session connection was closed/);
+  });
+
+  it('rejects a negative acknowledgement so a stopped turn cannot reuse that native session', async () => {
+    FakeSdkCopilotClient.behavior.abort = async () => ({ success: false, error: 'Fixture abort refused' });
+    const session = await createSession();
+
+    await expect(session.abort()).rejects.toMatchObject({
+      category: 'transport', message: 'Fixture abort refused',
+    });
   });
 
   it('resolves an abort the runtime acknowledged', async () => {

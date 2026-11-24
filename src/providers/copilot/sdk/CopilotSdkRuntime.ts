@@ -738,16 +738,14 @@ class SdkBackedSession implements CopilotSdkSession {
     return { phase: 'connected', toolCount: listing.tools.length };
   }
 
-  /**
-   * The SDK resolves once the runtime acknowledges the abort, and rejects when the session
-   * is disconnected or the connection failed. Which of the two happened decides whether
-   * the caller may reuse the session for another turn, so it is reported rather than
-   * flattened into a resolved promise here.
-   */
   async abort(): Promise<void> {
     this.permissions?.endTurn();
     try {
-      await this.session.abort();
+      // The SDK convenience method discards a negative acknowledgement.
+      const result = await this.session.rpc.abort({});
+      if (!result.success) {
+        throw new CopilotRuntimeError('transport', result.error || 'The Copilot CLI did not confirm the abort.');
+      }
     } catch (error) {
       throw toCopilotRuntimeError(error, 'transport');
     }

@@ -1789,7 +1789,7 @@ async function withFakeTimers(body: () => Promise<void>): Promise<void> {
  * open, and what it could not do is reported rather than dropped.
  */
 describe('CopilotExecutionSession bounded native shutdown', () => {
-  it('cancels a turn whose disconnect never answers', async () => {
+  it('retires a CLI that ignored Stop and detach so the first retry resumes on a fresh client', async () => {
     await withFakeTimers(async () => {
       const sending = createDeferred();
       const blocked = createDeferred();
@@ -1801,7 +1801,7 @@ describe('CopilotExecutionSession bounded native shutdown', () => {
           wedgeShutdown(created);
         },
       });
-      const runtime = new FakeCopilotSdkRuntime(() => client);
+      const runtime = new FakeCopilotSdkRuntime(() => client.stopped ? new FakeCopilotSdkClient() : client);
       const session = new CopilotExecutionBackend(createHost(), { runtime })
         .createSession(createSessionConfig());
 
@@ -1814,10 +1814,13 @@ describe('CopilotExecutionSession bounded native shutdown', () => {
       expect(turnFlow(await cancelled).filter(event => event.type === 'cancelled'))
         .toHaveLength(1);
       expect(client.createdSessions[0]?.disconnected).toBe(1);
+      expect(client.stopped).toBe(1);
 
       const retry = turnFlow(await collect(session.execute(createRequest()).events));
 
       expect(retry.at(-1)).toMatchObject({ reason: 'completed', type: 'turn_completed' });
+      expect(runtime.lastClient?.resumedSessionIds).toEqual(['copilot-session-1']);
+      expect(client.resumedSessionIds).toEqual([]);
       blocked.resolve();
       const disposal = disposalFailure(session);
       await jest.advanceTimersByTimeAsync(10_000);

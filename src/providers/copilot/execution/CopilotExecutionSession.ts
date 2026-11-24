@@ -875,7 +875,10 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
       return;
     }
     this.live = null;
-    await this.releaseNativeSession(live.session, context);
+    if (!await this.releaseNativeSession(live.session, context)) {
+      // Detaching did not release the pending SDK wait. Do not resume on this CLI.
+      await this.teardownNative({ final: false });
+    }
   }
 
   /**
@@ -1084,14 +1087,15 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
   private async releaseNativeSession(
     session: CopilotSdkSession,
     context: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const outcome = await settleNativeWithin(session.disconnect());
     if (outcome.kind === 'settled') {
-      return;
+      return true;
     }
     this.recordCleanupFailure(outcome.kind === 'rejected'
       ? describeCleanupFailure(context, outcome.error, 'transport')
       : copilotNativeSilenceError(context));
+    return false;
   }
 
   /**
