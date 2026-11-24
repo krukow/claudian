@@ -24,39 +24,7 @@ export class CopilotHistoryStore {
     try {
       // Resolve host aliases, but do not let the vault key or session directory alias another owner.
       const session = path.join(await fs.realpath(path.dirname(home)), path.basename(home), 'session-state', sessionId);
-      const journals: Iterable<HistoryEvent>[] = [];
-      let segment: bigint | undefined;
-      for (;;) {
-        const filename = segment === undefined ? 'events.jsonl' : `events.${segment}.jsonl`;
-        const resolved = await fs.realpath(path.join(session, filename));
-        if (!isCopilotPathWithinRoot(resolved, session)) {
-          throw new CopilotHistoryError('Copilot history is outside this vault\'s session store.');
-        }
-        const content = await fs.readFile(resolved, 'utf8');
-        if (segment !== undefined && !content.endsWith('\n')) {
-          throw new CopilotHistoryError('Incomplete numbered Copilot journal.');
-        }
-        const lines = content.split('\n');
-        const first = lines.findIndex(line => line.trim() !== '');
-        if (first < 0) throw new CopilotHistoryError('Copilot history has no session header.');
-        const header = parseEvent(lines[first], first + 1);
-        if (header.type !== 'session.journal_link') {
-          validateBoundary(header, sessionId, segment !== undefined);
-          journals.push(originalEvents(lines, first + 1, false));
-          break;
-        }
-
-        segment = predecessorNumber(header, sessionId, segment);
-        const next = first + 1;
-        if (next >= lines.length - 1 || !lines[next].trim()) {
-          throw new CopilotHistoryError('Missing Copilot journal checkpoint header.');
-        }
-        const checkpoint = parseEvent(lines[next], next + 1);
-        if (!checkpoint.checkpoint) throw new CopilotHistoryError('Missing Copilot journal checkpoint header.');
-        validateBoundary(checkpoint, sessionId, true);
-        journals.push(originalEvents(lines, next + 1, true));
-      }
-      return projectHistory(flattenJournals(journals.reverse()));
+      return await projectHistory(readJournals(session, sessionId));
     } catch (error) {
       if (error instanceof CopilotHistoryError) throw error;
       throw new CopilotHistoryError(
@@ -67,7 +35,74 @@ export class CopilotHistoryStore {
   }
 }
 
-function predecessorNumber(header: HistoryEvent, sessionId: string, current?: bigint): bigint {
+async function journalPath(session: string, segment?: bigint): Promise<string> {
+  const filename = segment === undefined ? 'events.jsonl' : `events.${segment}.jsonl`;
+  const resolved = await fs.realpath(path.join(session, filename));
+  if (!isCopilotPathWithinRoot(resolved, session)) {
+    throw new CopilotHistoryError('Copilot history is outside this vault\'s session store.');
+  }
+  return resolved;
+}
+
+async function* readJournals(session: string, sessionId: string): AsyncGenerator<Iterable<HistoryEvent>> {
+  // The active head can rotate during a read. Keep its snapshot, but only the links of archived segments.
+  const head = await readJournal(session, sessionId);
+  const chain: bigint[] = [];
+  let segment = head.previous;
+  while (segment !== undefined) {
+    chain.push(segment);
+    segment = await readPredecessor(session, sessionId, segment);
+  }
+  for (let index = chain.length - 1; index >= 0; index--) {
+    const journal = await readJournal(session, sessionId, chain[index]);
+    if (journal.previous !== chain[index + 1]) {
+      throw new CopilotHistoryError('Copilot journal predecessor changed during restoration.');
+    }
+    yield journal.events;
+  }
+  yield head.events;
+}
+
+async function readPredecessor(session: string, sessionId: string, segment: bigint) {
+  const file = await fs.open(await journalPath(session, segment));
+  try {
+    let lineNumber = 0;
+    for await (const line of file.readLines()) {
+      lineNumber++;
+      if (line.trim()) return journalPredecessor(parseEvent(line, lineNumber), sessionId, segment);
+    }
+    throw new CopilotHistoryError('Copilot history has no session header.');
+  } finally {
+    await file.close();
+  }
+}
+
+async function readJournal(session: string, sessionId: string, segment?: bigint) {
+  const content = await fs.readFile(await journalPath(session, segment), 'utf8');
+  if (segment !== undefined && !content.endsWith('\n')) {
+    throw new CopilotHistoryError('Incomplete numbered Copilot journal.');
+  }
+  const lines = content.split('\n');
+  const first = lines.findIndex(line => line.trim() !== '');
+  if (first < 0) throw new CopilotHistoryError('Copilot history has no session header.');
+  const previous = journalPredecessor(parseEvent(lines[first], first + 1), sessionId, segment);
+  if (previous === undefined) return { previous, events: originalEvents(lines, first + 1, false) };
+
+  const next = first + 1;
+  if (next >= lines.length - 1 || !lines[next].trim()) {
+    throw new CopilotHistoryError('Missing Copilot journal checkpoint header.');
+  }
+  const checkpoint = parseEvent(lines[next], next + 1);
+  if (!checkpoint.checkpoint) throw new CopilotHistoryError('Missing Copilot journal checkpoint header.');
+  validateBoundary(checkpoint, sessionId, true);
+  return { previous, events: originalEvents(lines, next + 1, true) };
+}
+
+function journalPredecessor(header: HistoryEvent, sessionId: string, current?: bigint): bigint | undefined {
+  if (header.type !== 'session.journal_link') {
+    validateBoundary(header, sessionId, current !== undefined);
+    return undefined;
+  }
   const match = /^events\.([1-9]\d{0,19})\.jsonl$/.exec(requireString(header.data, 'previousFile'));
   const number = match && BigInt(match[1]);
   if (header.checkpoint || header.data.version !== 1 || header.data.sessionId !== sessionId
@@ -107,11 +142,7 @@ function* originalEvents(lines: string[], start: number, linked: boolean): Gener
   }
 }
 
-function* flattenJournals(journals: Iterable<HistoryEvent>[]): Generator<HistoryEvent> {
-  for (const journal of journals) yield* journal;
-}
-
-function projectHistory(events: Iterable<HistoryEvent>): ChatMessage[] {
+async function projectHistory(journals: AsyncIterable<Iterable<HistoryEvent>>): Promise<ChatMessage[]> {
   const messages: ChatMessage[] = [];
   const tools = new Map<string, ToolCallInfo>();
   let assistant: (ChatMessage & { contentBlocks: ContentBlock[]; toolCalls: ToolCallInfo[] }) | null = null;
@@ -131,9 +162,9 @@ function projectHistory(events: Iterable<HistoryEvent>): ChatMessage[] {
     }
     return assistant;
   };
-  const flushReasoning = (event: HistoryEvent, aggregate?: string) => {
+  const flushReasoning = (event: HistoryEvent | undefined = pendingReasoning?.event, aggregate?: string) => {
     const text = aggregate || pendingReasoning?.text;
-    if (text) getAssistant(event).contentBlocks.push({ type: 'thinking', content: text });
+    if (event && text) getAssistant(event).contentBlocks.push({ type: 'thinking', content: text });
     pendingReasoning = null;
   };
   const addTool = (
@@ -158,9 +189,9 @@ function projectHistory(events: Iterable<HistoryEvent>): ChatMessage[] {
     message.contentBlocks.push({ type: 'tool_use', toolId: id });
   };
 
-  for (const event of events) {
+  const projectEvent = (event: HistoryEvent) => {
     const { data } = event;
-    if (event.hidden) continue;
+    if (event.hidden) return;
 
     switch (event.type) {
       case 'user.message': {
@@ -227,8 +258,11 @@ function projectHistory(events: Iterable<HistoryEvent>): ChatMessage[] {
         flushReasoning(event);
         break;
     }
+  };
+  for await (const events of journals) {
+    for (const event of events) projectEvent(event);
   }
-  if (pendingReasoning) flushReasoning(pendingReasoning.event);
+  flushReasoning();
   return messages;
 }
 
