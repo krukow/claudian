@@ -41,7 +41,7 @@ it.each<[ProviderSessionLifecycle, string, number, unknown]>([
       .finally(() => { finished = true; });
     await asked.promise;
     await jest.advanceTimersByTimeAsync(elapsedMs);
-    if (lifecycle === 'persistent') expect(finished).toBe(false);
+    expect(finished).toBe(lifecycle === 'ephemeral');
     answer.resolve();
     expect(await result).toEqual(expected);
   } finally {
