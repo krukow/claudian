@@ -32,12 +32,15 @@ connection.onRequest('session.sendAndWait', async ({ sessionId, prompt }) => {
   await finishAfterInput(sessionId);
   return { completionEventId: 'idle' };
 });
-connection.onRequest('session.send', async ({ sessionId }) => {
+connection.onRequest('session.send', ({ sessionId, prompt }) => {
   const messageId = 'fixture-message';
-  await connection.sendNotification('session.event', {
-    sessionId, event: { type: 'user.message', id: 'user', data: { messageId, content: 'event fallback' } },
+  // Admit the prompt before running it, as the native session.send endpoint does.
+  setImmediate(async () => {
+    await connection.sendNotification('session.event', {
+      sessionId, event: { type: 'user.message', id: 'user', data: { messageId, content: prompt } },
+    });
+    await finishAfterInput(sessionId);
   });
-  await finishAfterInput(sessionId);
   return { messageId };
 });
 connection.listen();

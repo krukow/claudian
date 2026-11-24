@@ -36,9 +36,12 @@ it.each<[ProviderSessionLifecycle, string, number, unknown]>([
     });
     // Cross several SDK long-timer chunks without faking the fixture CLI's stdio.
     jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate', 'clearImmediate'] });
-    const result = session.send(prompt).then(() => 'completed', (error: unknown) => error);
+    let finished = false;
+    const result = session.send(prompt).then(() => 'completed', (error: unknown) => error)
+      .finally(() => { finished = true; });
     await asked.promise;
     await jest.advanceTimersByTimeAsync(elapsedMs);
+    if (lifecycle === 'persistent') expect(finished).toBe(false);
     answer.resolve();
     expect(await result).toEqual(expected);
   } finally {
