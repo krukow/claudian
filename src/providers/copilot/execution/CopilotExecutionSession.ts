@@ -395,7 +395,7 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
         this.recoverFromFailure(active, toCopilotRuntimeError(error)),
       );
     } finally {
-      if (this.active === active) {
+      if (this.active === active && !active.cancelled) {
         this.active = null;
         this.settleToIdle();
       }

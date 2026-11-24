@@ -418,7 +418,7 @@ them as pending here.
   ownership before that process has stopped.
 - An abort and a disconnect are left to their caller to bound, because the caller has to
   decide what a silent runtime means for a session it might still reuse. The port says so;
-  do not bind them to a budget here. Read `session.rpc.abort({}).success`: SDK 2.0.1's `session.abort()` ignores a negative acknowledgement. If neither abort nor detach succeeds, retire the owning client before reusing the saved session ID.
+  do not bind them to a budget here. Read `session.rpc.abort({}).success`: SDK 2.0.1's `session.abort()` ignores a negative acknowledgement. An abort or detach acknowledgement does not settle `sendAndWait`; both releases must also wait for the outstanding native send. If neither releases the turn, retire the owning client before resuming the saved session.
 
 ## Execution Rules
 

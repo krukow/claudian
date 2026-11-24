@@ -1661,6 +1661,32 @@ describe('CopilotExecutionSession terminal events', () => {
 });
 
 describe('CopilotExecutionSession cancellation outcomes', () => {
+  it('keeps the lease occupied until Stop finishes even if the send settles first', async () => {
+    const started = createDeferred();
+    const finishSend = createDeferred();
+    const acknowledge = createDeferred();
+    const runtime = createRuntime(created => {
+      created.sendBehavior = blockFirstSend(started, finishSend);
+      created.abortBehavior = () => acknowledge.promise;
+    });
+    const session = new CopilotExecutionBackend(createHost(), { runtime })
+      .createSession(createSessionConfig());
+    const run = session.execute(createRequest());
+    const events = collect(run.events);
+    await started.promise;
+    run.cancel();
+    finishSend.resolve();
+    try {
+      await settlePendingWork();
+      expect(session.getStatus()).toBe('executing');
+      expect(() => session.execute(createRequest())).toThrow(/already executing/);
+    } finally {
+      acknowledge.resolve();
+      await events;
+      await session.dispose();
+    }
+  });
+
   it('drops a live session whose abort rejected instead of reusing it', async () => {
     const sending = createDeferred();
     const blocked = createDeferred();

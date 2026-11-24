@@ -607,6 +607,7 @@ function isJudgeFailureReason(
 
 class SdkBackedSession implements CopilotSdkSession {
   private disconnected = false;
+  private sendSettled?: Promise<void>;
 
   constructor(
     private readonly session: CopilotSession,
@@ -635,6 +636,8 @@ class SdkBackedSession implements CopilotSdkSession {
         }
       });
       const sending = this.session.sendAndWait(prompt, timeoutMs);
+      // Stop and detach can be acknowledged before the SDK releases its wait. The send caller owns its error.
+      this.sendSettled = sending.then(() => undefined, () => undefined);
       const response = await (this.permissions ? this.permissions.withFailure(sending) : sending);
       // A blocked prompt reaches idle without a user or assistant message.
       if (!response && refusal !== undefined) throw new CopilotRuntimeError('provider', refusal);
@@ -746,6 +749,7 @@ class SdkBackedSession implements CopilotSdkSession {
       if (!result.success) {
         throw new CopilotRuntimeError('transport', result.error || 'The Copilot CLI did not confirm the abort.');
       }
+      await this.sendSettled;
     } catch (error) {
       throw toCopilotRuntimeError(error, 'transport');
     }
@@ -770,6 +774,7 @@ class SdkBackedSession implements CopilotSdkSession {
     this.permissions?.dispose();
     try {
       await this.session.disconnect();
+      await this.sendSettled;
     } catch (error) {
       throw toCopilotRuntimeError(error, 'transport');
     }

@@ -175,12 +175,12 @@ export interface CopilotSdkSession {
   /** Checks native connection and lists tools without granting or invoking any tool. */
   checkMcpServer(serverName: string): Promise<CopilotMcpReadiness>;
   /**
-   * Stops the running turn. Resolves once the runtime acknowledges the abort, and rejects
-   * when it could not: the caller may only reuse the session in the first case.
+   * Stops the running turn. Reuse is safe only when the CLI acknowledged the abort and the
+   * SDK's send has settled. The caller bounds the wait for both.
    */
   abort(): Promise<void>;
   setModel(model: string, reasoningEffort?: CopilotReasoningEffort): Promise<void>;
-  /** Releases in-memory resources. Native session data is left untouched. */
+  /** Waits for detach and any pending SDK send to settle. Native session data is left untouched. */
   disconnect(): Promise<void>;
 }
 

@@ -874,9 +874,11 @@ describe('copilotSdkRuntime judge event ownership', () => {
       const sending = session.send('Read another note.').catch(error => error as Error);
       try {
         await entered.promise;
-        if (transition === 'abort') await session.abort();
-        else if (transition === 'disconnect') await session.disconnect();
-        else if (transition === 'completed') {
+        if (transition === 'abort' || transition === 'disconnect') {
+          const release = session[transition]();
+          finishNative.resolve();
+          await release;
+        } else if (transition === 'completed') {
           await FakeSdkCopilotSession.instances[0].dispatchEvent({
             id: 'completed', parentId: null, timestamp: '2026-09-17T12:00:01Z',
             type: 'permission.completed',
@@ -1783,6 +1785,30 @@ describe('copilotSdkRuntime turn aborts', () => {
     const session = await createSession();
 
     await expect(session.abort()).resolves.toBeUndefined();
+  });
+
+  it.each(['abort', 'disconnect'] as const)('does not report %s complete while the SDK still owns the send', async operation => {
+    const started = createDeferred();
+    const completion = createDeferred();
+    FakeSdkCopilotClient.behavior.send = async () => {
+      started.resolve();
+      await completion.promise;
+      throw new Error('The requested run was aborted before completion.');
+    };
+    const session = await createSession();
+    const sending = session.send('Wait for Stop.');
+    await started.promise;
+
+    let released = false;
+    const release = session[operation]().then(() => { released = true; });
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      expect(released).toBe(false);
+    } finally {
+      completion.resolve();
+      await expect(sending).rejects.toThrow(/aborted before completion/);
+      await release;
+    }
   });
 });
 
