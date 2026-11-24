@@ -367,8 +367,9 @@ them as pending here.
   failure drops the client so the next runtime starts fresh and re-runs the auth gate.
   `ENOENT` is read as a wrong CLI path before the process-exit shape, because a CLI that
   cannot be spawned is fixed in settings, not by retrying.
+- Persistent chat has no elapsed-time or inactivity cutoff: completion, Stop, or a CLI failure ends the wait. Keep `sendAndWait` for request-correlated completion, including its event fallback. SDK 2.0.1 re-arms long timers in chunks; `Infinity` never expires and does not overflow Node's timer. The integration test advances through multiple timer chunks; rerun it when the SDK changes. Ephemeral work retains its ten-minute limit.
 - Two SDK failures carry no category and no keyword the categorizer reads, so each is
-  matched by its whole message shape rather than by a word in it: the turn that never
+  matched by its whole message shape rather than by a word in it: a bounded turn that never
   reached completion (`waiting for session.idle` or `waiting for response completion`), and `Copilot CLI not found at <path>.`, which the SDK throws
   when the path it was handed names nothing. The second is a configuration failure, not
   the transport failure its call site would otherwise report — the CLI cannot be
@@ -383,8 +384,7 @@ them as pending here.
   being given. `abandonCopilotClient` does that for a client the factory gave up on, and
   `sdk/CopilotSdkRuntime` does it for a start that went silent; a discovery probe's own
   client is shut down for the same reason, so a failed discovery leaves no CLI running.
-- Every native call that acquires something from a runtime that is already up — the
-  authentication gate, the model catalog, and opening or resuming a session here — is
+- Each short native acquisition — the authentication gate, the model catalog, and opening a new session — is
   bounded by the release budget in `sdk/CopilotNativeBudget`, because an acquisition
   nothing interrupts holds its caller open and holds whatever is queued behind it open
   with it. A client that arrives after the budget belongs to nobody and is released where
@@ -400,7 +400,7 @@ them as pending here.
   an unbounded request it would wrap a second deadline around without being able to clean
   up after it. A session that arrives afterwards is disconnected where it arrives. Do not
   add a second bound at a call site.
-- Starting a client is the exception, and runs on the longer startup budget instead. A
+- Starting a client and resuming a session use the longer startup budget. Resume can require replaying the saved conversation on a fresh CLI. A
   start is not a release: spawning the CLI, waiting for it to listen, and handshaking
   versions is cold work a first launch, a slow disk, or a virus scanner stretches well
   past what a running runtime would ever take to answer, and `@microsoft/copilot-sdk` allows

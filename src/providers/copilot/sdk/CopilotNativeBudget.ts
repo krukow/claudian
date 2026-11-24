@@ -26,7 +26,7 @@ export type CopilotNativeAcquisition<T> =
  * them, so a CLI that stopped answering can never hold Claudian open at whichever of them
  * it happens to be wedged on.
  *
- * Starting a client is not one of them; it runs on {@link NATIVE_STARTUP_TIMEOUT_MS}.
+ * Starting a client and resuming a saved session use {@link NATIVE_STARTUP_TIMEOUT_MS}.
  */
 export const NATIVE_OPERATION_TIMEOUT_MS = 5_000;
 
@@ -34,7 +34,7 @@ export const NATIVE_OPERATION_TIMEOUT_MS = 5_000;
 export const NATIVE_OPERATION_TIMEOUT_SECONDS = NATIVE_OPERATION_TIMEOUT_MS / 1_000;
 
 /**
- * How long starting a client may take before the CLI it spawned is killed.
+ * How long the CLI has to start or restore a saved session before it is stopped.
  *
  * A start is not a release. Spawning the executable, waiting for its server to listen, and
  * agreeing a protocol version is cold work that a first launch of the day, a slow disk, or

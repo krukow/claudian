@@ -84,7 +84,7 @@ Leave **CLI path** empty for automatic discovery. Set an absolute path only when
 
 ## Using it
 
-- **Chat**: pick a Copilot model in the chat model selector and send a message. Text and reasoning stream as they arrive, tool calls appear as they start and finish, and usage is reported against the model's context window.
+- **Chat**: pick a Copilot model in the chat model selector and send a message. Text and reasoning stream as they arrive, tool calls appear as they start and finish, and usage is reported against the model's context window. Claudian does not stop chat because of elapsed time or silence. The turn continues until it finishes, you select **Stop**, or the CLI reports an error.
 - **History**: select a chat from **Chat history**, the session sidebar, or `/resume` to restore its messages, readable reasoning, and tool results from Copilot's local transcript. If the CLI split the transcript into numbered journals, keep those files alongside `events.jsonl` in this vault's Copilot home. Loading history does not start the CLI, connect MCP servers, or send a model request.
 - **Stop a response**: select **Stop** in the active chat's composer, or press **Esc**. This cancels only that tab's foreground response, including reasoning and tool approval waits, without deleting the conversation or losing queued or draft input. **Stopping...** remains disabled until the turn settles; stopping during preparation prevents the turn from being sent. Rewind is not interruptible through this control.
 - **Tools**: Copilot runs its own built-in tools with the vault as its working directory, not a filesystem sandbox. Claudian excludes tools that manage background agents or create and run workflows.
@@ -92,7 +92,7 @@ Leave **CLI path** empty for automatic discovery. Set an absolute path only when
 - **Deleting a chat**: choose the trash button on a session row, or right-click the row and choose **Delete**. Confirm the named chat to remove it from Claudian; archiving first is not required. Stop running work and wait for any rewind to finish before deleting the chat, including work in another pane. Your notes and provider-native history remain untouched, and deletion cannot be undone in Claudian.
 - **Questions**: when the CLI asks a question, Claudian shows it with the choices the CLI offered.
 - **Context**: the note a message was sent from, the editor selection, and any browser or canvas selection travel with the prompt. Directories you have added as external context are opened to the session alongside the vault.
-- **Auxiliary work**: conversation titles, inline edits, and instruction refinement each run as their own short-lived Copilot session, separate from the chat runtime. Their native session data is deleted when the work finishes, and none of them ever starts an MCP server or loads a skill.
+- **Auxiliary work**: conversation titles, inline edits, and instruction refinement each run in a separate session with a ten-minute limit. Their native session data is deleted when the work finishes, and none of them ever starts an MCP server or loads a skill.
 - **Skills**: an enabled skill's slash command appears in the chat command list. Repository skills are enabled by default; personal and custom skills require selection. Choosing one asks the CLI to expand it and sends the prompt it produced; your message is shown as you typed it. A message that starts with a slash but names no enabled skill is sent as ordinary text.
 
 ## Capabilities
@@ -234,6 +234,8 @@ Claudian depends on `@microsoft/copilot-sdk`, which declares the native `koffi` 
 **OAuth challenges in native logs** — an initial HTTP 401 or `needs-auth` event may be followed by automatic recovery using remembered credentials. Use the completed connection check, not an isolated log line, to decide whether manual sign-in is needed.
 
 **Turns fail with a transport error** — the CLI stopped answering and was terminated. Sending the message again starts a fresh one. If it repeats, run the CLI in a terminal with the same `COPILOT_HOME` to see what it reports.
+
+**"Copilot did not resume the session within 30 seconds"** — the new CLI did not finish reopening the saved conversation in time. Retry in the same chat; the timeout does not delete its history. Check what the interrupted turn already completed before asking it to repeat any actions.
 
 **"Select an enabled Copilot model before starting a turn"** — no Copilot model is selected in settings. Discover the catalog and select at least one.
 

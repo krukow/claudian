@@ -232,7 +232,7 @@ describe('CopilotExecutionSession permission profiles', () => {
         const events = await collect(session.execute(createRequest({ toolPolicy })).events);
 
         expect(events.at(-1)).toMatchObject({ reason: 'completed', type: 'turn_completed' });
-        expect(runtime.lastClient?.lastSession?.config.permissionMode).toBe('ask');
+        expect(runtime.lastClient?.lastSession?.config).toMatchObject({ lifecycle, permissionMode: 'ask' });
       } finally {
         await session.dispose();
       }

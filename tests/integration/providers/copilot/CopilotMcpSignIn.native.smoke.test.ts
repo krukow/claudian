@@ -51,6 +51,7 @@ describeNative('Copilot native selected MCP sign-in', () => {
     };
     const config: CopilotSdkSessionConfig = {
       availableTools: [],
+      lifecycle: 'ephemeral',
       model: 'gpt-5-mini',
       onEvent: () => {},
       onPermissionRequest: async () => ({ kind: 'reject' }),

@@ -570,6 +570,7 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
       ...(toolSelection.excludedTools ? { excludedTools: toolSelection.excludedTools } : {}),
       ...(reasoningEffort ? { reasoningEffort } : {}),
       availableTools: toolSelection.availableTools,
+      lifecycle: this.config.lifecycle,
       model,
       onEvent: (event) => {
         this.handleSdkEvent(liveToken, event);

@@ -232,6 +232,7 @@ export class CopilotMcpSignInCoordinator {
       assertActive();
       session = await client.createSession({
         availableTools: [],
+        lifecycle: 'ephemeral',
         model: model.rawId,
         onEvent: event => {
           if (event.type === 'session.mcp_server_status_changed' && event.data.serverName === reference.name) {

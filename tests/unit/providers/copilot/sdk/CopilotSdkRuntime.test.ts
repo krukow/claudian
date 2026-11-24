@@ -336,6 +336,7 @@ function sessionConfig(
 ): CopilotSdkSessionConfig {
   return {
     availableTools: [],
+    lifecycle: 'persistent',
     model: 'gpt-5',
     onEvent: () => {},
     onPermissionRequest: async () => ({ kind: 'reject' }),
@@ -1571,8 +1572,8 @@ describe('copilotSdkRuntime startup budget', () => {
 });
 
 /**
- * Opening a session is a native acquisition from a runtime that is already up, so it runs
- * on the same budget every release does. A CLI that never answers one would otherwise hold
+ * Creating a session uses the ordinary operation budget; restoring history uses startup time.
+ * A CLI that never answers would otherwise hold
  * the turn that asked for it open for as long as it stays silent, and hold whatever is
  * queued behind that turn open with it.
  *
@@ -1581,6 +1582,20 @@ describe('copilotSdkRuntime startup budget', () => {
  * would wait out the same silence.
  */
 describe('copilotSdkRuntime session budget', () => {
+  it('lets a cold resume restore the same session beyond the release deadline', async () => {
+    await withFakeTimers(async () => {
+      const restored = createDeferred<FakeSdkCopilotSession>();
+      FakeSdkCopilotClient.behavior.resumeSession = () => restored.promise;
+      const client = await createClient();
+      const resuming = client.resumeSession('saved-session', sessionConfig()).then(
+        session => session.sessionId, (error: unknown) => error,
+      );
+      await jest.advanceTimersByTimeAsync(12_000);
+      restored.resolve(new FakeSdkCopilotSession('saved-session'));
+      expect(await resuming).toBe('saved-session');
+    });
+  });
+
   it('ends the CLI when a new session never arrives', async () => {
     await withoutUnhandledRejections(async () => {
       await withFakeTimers(async () => {
@@ -1613,10 +1628,10 @@ describe('copilotSdkRuntime session budget', () => {
           () => new Error('the session unexpectedly resumed'),
           (error: unknown) => error as Error,
         );
-        await jest.advanceTimersByTimeAsync(5_000);
+        await jest.advanceTimersByTimeAsync(30_000);
 
         expect((await resuming).message)
-          .toMatch(/did not resume the session within 5 seconds.*terminated/);
+          .toMatch(/did not resume the session within 30 seconds.*terminated/);
         expect(FakeSdkCopilotClient.instances[0]?.forceStopped).toBe(1);
       });
     });
