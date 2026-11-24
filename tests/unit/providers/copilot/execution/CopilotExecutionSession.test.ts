@@ -2368,6 +2368,37 @@ describe('CopilotExecutionSession bounded native acquisition', () => {
     expect(client.stopped).toBe(1);
   });
 
+  it('resumes on a fresh CLI when an already cancelled restore times out', async () => {
+    const restoring = createDeferred();
+    const deadline = createDeferred();
+    const stalled = new FakeCopilotSdkClient({
+      sessionGate: async () => {
+        restoring.resolve();
+        await deadline.promise;
+        throw new CopilotRuntimeError('transport', 'The resume timed out and the CLI was terminated.');
+      },
+    });
+    const fresh = new FakeCopilotSdkClient();
+    const runtime = new FakeCopilotSdkRuntime(() => stalled.stopped ? fresh : stalled);
+    const session = new CopilotExecutionBackend(createHost(), { runtime }).createSession(
+      createSessionConfig({ resumeSeed: { providerSessionId: 'saved-session' } }),
+    );
+
+    const first = session.execute(createRequest());
+    await restoring.promise;
+    first.cancel();
+    expect((await collect(first.events)).at(-1)).toMatchObject({ type: 'cancelled' });
+    const retry = collect(session.execute(createRequest()).events);
+    deadline.resolve();
+    try {
+      expect((await retry).at(-1)).toMatchObject({ type: 'turn_completed' });
+      expect(fresh.resumedSessionIds).toEqual(['saved-session']);
+      expect(stalled.resumedSessionIds).toEqual(['saved-session']);
+    } finally {
+      await session.dispose();
+    }
+  });
+
   /**
    * A session the CLI hands back once the turn that asked for it has been cancelled
    * belongs to nobody, so it is released where it arrives rather than left running. The

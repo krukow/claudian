@@ -429,9 +429,17 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
   private acquireSdkSession(active: ActiveExecution): Promise<CopilotSdkSession> {
     // A stale SDK handle disconnects by native session ID, which a retry may reuse.
     const previousAcquisitions = Promise.all([...this.acquisitionFlights]);
-    return this.trackAcquisition(previousAcquisitions.then(() => {
+    return this.trackAcquisition(previousAcquisitions.then(async () => {
       this.assertRunOwnsNative(active);
-      return this.ensureSdkSession(active);
+      try {
+        return await this.ensureSdkSession(active);
+      } catch (error) {
+        // Cancellation suppresses the turn error, not retirement of the CLI that failed to open it.
+        if (active.cancelled && toCopilotRuntimeError(error).nativeReset === 'client') {
+          await this.teardownNative({ final: false });
+        }
+        throw error;
+      }
     }));
   }
 

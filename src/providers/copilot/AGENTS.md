@@ -428,7 +428,7 @@ them as pending here.
   not stop, and it would report a silence the boundary has already turned into a transport
   failure about a CLI that is gone. What stays is the fencing, which is a different
   question: a session that arrives for a run that was cancelled, replaced, or disposed
-  while the CLI was answering is released where it arrives rather than installed.
+  while the CLI was answering is released where it arrives rather than installed. If the acquisition instead reports a client failure after Stop, retire the client before the next acquisition; the cancelled turn will not run ordinary error recovery.
 - Every native acquisition a turn starts is published on the session, so disposal drains it
   instead of tearing down beside it and leaving the late client or session unowned.
   Disposal terminates because a disposed session refuses further turns.
