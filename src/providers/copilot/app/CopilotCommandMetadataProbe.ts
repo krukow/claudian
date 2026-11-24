@@ -106,6 +106,7 @@ export class CopilotCommandMetadataProbe {
   ): Promise<SlashCommand[]> {
     const session = await client.createSession({
       availableTools: [],
+      lifecycle: 'ephemeral',
       model,
       onEvent: () => {},
       onPermissionRequest: async () => ({

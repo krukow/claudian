@@ -232,7 +232,7 @@ describe('CopilotExecutionSession permission profiles', () => {
         const events = await collect(session.execute(createRequest({ toolPolicy })).events);
 
         expect(events.at(-1)).toMatchObject({ reason: 'completed', type: 'turn_completed' });
-        expect(runtime.lastClient?.lastSession?.config.permissionMode).toBe('ask');
+        expect(runtime.lastClient?.lastSession?.config).toMatchObject({ lifecycle, permissionMode: 'ask' });
       } finally {
         await session.dispose();
       }
@@ -1661,6 +1661,32 @@ describe('CopilotExecutionSession terminal events', () => {
 });
 
 describe('CopilotExecutionSession cancellation outcomes', () => {
+  it('keeps the lease occupied until Stop finishes even if the send settles first', async () => {
+    const started = createDeferred();
+    const finishSend = createDeferred();
+    const acknowledge = createDeferred();
+    const runtime = createRuntime(created => {
+      created.sendBehavior = blockFirstSend(started, finishSend);
+      created.abortBehavior = () => acknowledge.promise;
+    });
+    const session = new CopilotExecutionBackend(createHost(), { runtime })
+      .createSession(createSessionConfig());
+    const run = session.execute(createRequest());
+    const events = collect(run.events);
+    await started.promise;
+    run.cancel();
+    finishSend.resolve();
+    try {
+      await settlePendingWork();
+      expect(session.getStatus()).toBe('executing');
+      expect(() => session.execute(createRequest())).toThrow(/already executing/);
+    } finally {
+      acknowledge.resolve();
+      await events;
+      await session.dispose();
+    }
+  });
+
   it('drops a live session whose abort rejected instead of reusing it', async () => {
     const sending = createDeferred();
     const blocked = createDeferred();
@@ -1789,7 +1815,7 @@ async function withFakeTimers(body: () => Promise<void>): Promise<void> {
  * open, and what it could not do is reported rather than dropped.
  */
 describe('CopilotExecutionSession bounded native shutdown', () => {
-  it('cancels a turn whose disconnect never answers', async () => {
+  it('retires a CLI that ignored Stop and detach so the first retry resumes on a fresh client', async () => {
     await withFakeTimers(async () => {
       const sending = createDeferred();
       const blocked = createDeferred();
@@ -1801,7 +1827,7 @@ describe('CopilotExecutionSession bounded native shutdown', () => {
           wedgeShutdown(created);
         },
       });
-      const runtime = new FakeCopilotSdkRuntime(() => client);
+      const runtime = new FakeCopilotSdkRuntime(() => client.stopped ? new FakeCopilotSdkClient() : client);
       const session = new CopilotExecutionBackend(createHost(), { runtime })
         .createSession(createSessionConfig());
 
@@ -1814,10 +1840,13 @@ describe('CopilotExecutionSession bounded native shutdown', () => {
       expect(turnFlow(await cancelled).filter(event => event.type === 'cancelled'))
         .toHaveLength(1);
       expect(client.createdSessions[0]?.disconnected).toBe(1);
+      expect(client.stopped).toBe(1);
 
       const retry = turnFlow(await collect(session.execute(createRequest()).events));
 
       expect(retry.at(-1)).toMatchObject({ reason: 'completed', type: 'turn_completed' });
+      expect(runtime.lastClient?.resumedSessionIds).toEqual(['copilot-session-1']);
+      expect(client.resumedSessionIds).toEqual([]);
       blocked.resolve();
       const disposal = disposalFailure(session);
       await jest.advanceTimersByTimeAsync(10_000);
@@ -2337,6 +2366,37 @@ describe('CopilotExecutionSession bounded native acquisition', () => {
 
     expect(session.getStatus()).toBe('disposed');
     expect(client.stopped).toBe(1);
+  });
+
+  it('resumes on a fresh CLI when an already cancelled restore times out', async () => {
+    const restoring = createDeferred();
+    const deadline = createDeferred();
+    const stalled = new FakeCopilotSdkClient({
+      sessionGate: async () => {
+        restoring.resolve();
+        await deadline.promise;
+        throw new CopilotRuntimeError('transport', 'The resume timed out and the CLI was terminated.');
+      },
+    });
+    const fresh = new FakeCopilotSdkClient();
+    const runtime = new FakeCopilotSdkRuntime(() => stalled.stopped ? fresh : stalled);
+    const session = new CopilotExecutionBackend(createHost(), { runtime }).createSession(
+      createSessionConfig({ resumeSeed: { providerSessionId: 'saved-session' } }),
+    );
+
+    const first = session.execute(createRequest());
+    await restoring.promise;
+    first.cancel();
+    expect((await collect(first.events)).at(-1)).toMatchObject({ type: 'cancelled' });
+    const retry = collect(session.execute(createRequest()).events);
+    deadline.resolve();
+    try {
+      expect((await retry).at(-1)).toMatchObject({ type: 'turn_completed' });
+      expect(fresh.resumedSessionIds).toEqual(['saved-session']);
+      expect(stalled.resumedSessionIds).toEqual(['saved-session']);
+    } finally {
+      await session.dispose();
+    }
   });
 
   /**

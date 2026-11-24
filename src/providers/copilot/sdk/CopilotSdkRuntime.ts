@@ -95,8 +95,8 @@ function loadCopilotSdk(): Promise<CopilotSdkModule> {
  * given a bounded call and a terminated process rather than an unbounded request it would
  * have to wrap a deadline around and could not clean up after.
  *
- * It runs on the startup budget rather than the one every release shares, because a cold
- * CLI is still coming up long after a runtime that is already running would have answered.
+ * Resuming can replay a long transcript on a fresh CLI. It gets the startup budget,
+ * independently of the shorter deadline for creating an empty session or releasing one.
  */
 export const copilotSdkRuntime: CopilotSdkRuntime = {
   async createClient(options: CopilotSdkClientOptions): Promise<CopilotSdkClient> {
@@ -171,6 +171,7 @@ class SdkBackedClient implements CopilotSdkClient {
       const session = await this.openSession(
         this.client.createSession(toSessionConfig(config, disabledMcpServers, permissions)),
         'open a session',
+        NATIVE_OPERATION_TIMEOUT_MS,
       );
       return await this.prepareSession(session, config, true, permissions);
     } catch (error) {
@@ -194,6 +195,7 @@ class SdkBackedClient implements CopilotSdkClient {
           toSessionConfig(config, disabledMcpServers, permissions),
         ),
         'resume the session',
+        NATIVE_STARTUP_TIMEOUT_MS,
       );
       return await this.prepareSession(session, config, false, permissions);
     } catch (error) {
@@ -312,13 +314,7 @@ class SdkBackedClient implements CopilotSdkClient {
   }
 
   /**
-   * Waits for a session the CLI is opening, under the shared native release budget.
-   *
-   * Opening one is an acquisition from a runtime that is already up, so it answers or it
-   * does not; a CLI that never answers would otherwise hold the turn that asked open for
-   * as long as it stays silent, and hold whatever is queued behind that turn open with
-   * it. Bounding it here is what lets the layer above call this like any other native
-   * operation instead of wrapping a deadline of its own around an unbounded call.
+   * Bounds native session acquisition, including history restoration on resume.
    *
    * A CLI that went silent cannot be asked anything else, so it is stopped and killed
    * rather than handed back as a client whose next call waits out the same silence, and
@@ -330,10 +326,12 @@ class SdkBackedClient implements CopilotSdkClient {
   private async openSession(
     opening: Promise<CopilotSession>,
     step: string,
+    timeoutMs: number,
   ): Promise<CopilotSession> {
     const outcome = await acquireNativeWithin(
       opening,
       session => session.disconnect(),
+      timeoutMs,
     );
     switch (outcome.kind) {
       case 'settled':
@@ -342,7 +340,11 @@ class SdkBackedClient implements CopilotSdkClient {
         throw outcome.error;
       case 'timed-out':
         await stopQuietly(this.client);
-        throw sessionSilenceError(step);
+        throw new CopilotRuntimeError(
+          'transport',
+          `Copilot did not ${step} within ${timeoutMs / 1_000} seconds. `
+          + 'The CLI was terminated; retry to start a fresh one.',
+        );
     }
   }
 
@@ -605,6 +607,7 @@ function isJudgeFailureReason(
 
 class SdkBackedSession implements CopilotSdkSession {
   private disconnected = false;
+  private sendSettled?: Promise<void>;
 
   constructor(
     private readonly session: CopilotSession,
@@ -621,6 +624,9 @@ class SdkBackedSession implements CopilotSdkSession {
 
   async send(prompt: string): Promise<void> {
     const turn = this.permissions?.beginTurn();
+    // SDK 2.0.1 defaults an omitted timeout to 60s and re-arms long timers in chunks.
+    // Infinity keeps its request-correlated wait until completion, abort, or disconnect.
+    const timeoutMs = this.config.lifecycle === 'persistent' ? Infinity : AUXILIARY_TURN_TIMEOUT_MS;
     let refusal: string | undefined;
     let unsubscribe: (() => void) | undefined;
     try {
@@ -629,12 +635,14 @@ class SdkBackedSession implements CopilotSdkSession {
           refusal = event.data.message || 'The Copilot CLI blocked this prompt by policy.';
         }
       });
-      const sending = this.session.sendAndWait(prompt, TURN_TIMEOUT_MS);
+      const sending = this.session.sendAndWait(prompt, timeoutMs);
+      // Stop and detach can be acknowledged before the SDK releases its wait. The send caller owns its error.
+      this.sendSettled = sending.then(() => undefined, () => undefined);
       const response = await (this.permissions ? this.permissions.withFailure(sending) : sending);
       // A blocked prompt reaches idle without a user or assistant message.
       if (!response && refusal !== undefined) throw new CopilotRuntimeError('provider', refusal);
     } catch (error) {
-      throw toCopilotSendError(error, TURN_TIMEOUT_MS);
+      throw toCopilotSendError(error, timeoutMs);
     } finally {
       unsubscribe?.();
       this.permissions?.endTurn(turn);
@@ -733,16 +741,15 @@ class SdkBackedSession implements CopilotSdkSession {
     return { phase: 'connected', toolCount: listing.tools.length };
   }
 
-  /**
-   * The SDK resolves once the runtime acknowledges the abort, and rejects when the session
-   * is disconnected or the connection failed. Which of the two happened decides whether
-   * the caller may reuse the session for another turn, so it is reported rather than
-   * flattened into a resolved promise here.
-   */
   async abort(): Promise<void> {
     this.permissions?.endTurn();
     try {
-      await this.session.abort();
+      // The SDK convenience method discards a negative acknowledgement.
+      const result = await this.session.rpc.abort({});
+      if (!result.success) {
+        throw new CopilotRuntimeError('transport', result.error || 'The Copilot CLI did not confirm the abort.');
+      }
+      await this.sendSettled;
     } catch (error) {
       throw toCopilotRuntimeError(error, 'transport');
     }
@@ -767,6 +774,7 @@ class SdkBackedSession implements CopilotSdkSession {
     this.permissions?.dispose();
     try {
       await this.session.disconnect();
+      await this.sendSettled;
     } catch (error) {
       throw toCopilotRuntimeError(error, 'transport');
     }
@@ -1056,8 +1064,7 @@ function describeUnavailableServer(
     + `available in this session${detail}.`;
 }
 
-/** Ten minutes, matching the longest turn the Copilot CLI will run unattended. */
-const TURN_TIMEOUT_MS = 600_000;
+const AUXILIARY_TURN_TIMEOUT_MS = 600_000;
 
 /**
  * The session Claudian asks for, stated in full.
@@ -1177,19 +1184,6 @@ function shutdownTimeoutError(): CopilotRuntimeError {
     'transport',
     'The Copilot CLI did not shut down within '
     + `${NATIVE_OPERATION_TIMEOUT_SECONDS} seconds and was terminated.`,
-  );
-}
-
-/**
- * The session a CLI never opened, told as the transport failure it is. The CLI it was
- * asked of is gone by the time this is raised, so the message says so: the next attempt
- * starts a fresh one rather than waiting out the same silence.
- */
-function sessionSilenceError(step: string): CopilotRuntimeError {
-  return new CopilotRuntimeError(
-    'transport',
-    `Copilot did not ${step} within ${NATIVE_OPERATION_TIMEOUT_SECONDS} seconds. `
-    + 'The CLI was terminated; send the message again to start a fresh one.',
   );
 }
 

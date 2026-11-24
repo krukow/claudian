@@ -395,7 +395,7 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
         this.recoverFromFailure(active, toCopilotRuntimeError(error)),
       );
     } finally {
-      if (this.active === active) {
+      if (this.active === active && !active.cancelled) {
         this.active = null;
         this.settleToIdle();
       }
@@ -429,9 +429,17 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
   private acquireSdkSession(active: ActiveExecution): Promise<CopilotSdkSession> {
     // A stale SDK handle disconnects by native session ID, which a retry may reuse.
     const previousAcquisitions = Promise.all([...this.acquisitionFlights]);
-    return this.trackAcquisition(previousAcquisitions.then(() => {
+    return this.trackAcquisition(previousAcquisitions.then(async () => {
       this.assertRunOwnsNative(active);
-      return this.ensureSdkSession(active);
+      try {
+        return await this.ensureSdkSession(active);
+      } catch (error) {
+        // Cancellation suppresses the turn error, not retirement of the CLI that failed to open it.
+        if (active.cancelled && toCopilotRuntimeError(error).nativeReset === 'client') {
+          await this.teardownNative({ final: false });
+        }
+        throw error;
+      }
     }));
   }
 
@@ -570,6 +578,7 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
       ...(toolSelection.excludedTools ? { excludedTools: toolSelection.excludedTools } : {}),
       ...(reasoningEffort ? { reasoningEffort } : {}),
       availableTools: toolSelection.availableTools,
+      lifecycle: this.config.lifecycle,
       model,
       onEvent: (event) => {
         this.handleSdkEvent(liveToken, event);
@@ -874,7 +883,10 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
       return;
     }
     this.live = null;
-    await this.releaseNativeSession(live.session, context);
+    if (!await this.releaseNativeSession(live.session, context)) {
+      // Detaching did not release the pending SDK wait. Do not resume on this CLI.
+      await this.teardownNative({ final: false });
+    }
   }
 
   /**
@@ -1083,14 +1095,15 @@ export class CopilotExecutionSession implements ProviderExecutionSession {
   private async releaseNativeSession(
     session: CopilotSdkSession,
     context: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const outcome = await settleNativeWithin(session.disconnect());
     if (outcome.kind === 'settled') {
-      return;
+      return true;
     }
     this.recordCleanupFailure(outcome.kind === 'rejected'
       ? describeCleanupFailure(context, outcome.error, 'transport')
       : copilotNativeSilenceError(context));
+    return false;
   }
 
   /**

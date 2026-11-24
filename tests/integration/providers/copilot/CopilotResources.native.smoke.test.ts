@@ -567,6 +567,7 @@ describeWithCli('Copilot native resource isolation', () => {
 function sessionConfig(workingDirectory: string): CopilotSdkSessionConfig {
   return {
     availableTools: [],
+    lifecycle: 'persistent',
     model: 'gpt-5.4-mini',
     onEvent: () => {},
     onPermissionRequest: async () => ({ kind: 'reject' }),

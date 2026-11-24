@@ -129,7 +129,7 @@ const ENTRA_HOST_CONFIGURATION_PATTERN =
  * reusing a runtime that stopped answering.
  */
 export function toCopilotSendError(error: unknown, timeoutMs: number): CopilotRuntimeError {
-  if (error instanceof Error && SEND_TIMEOUT_PATTERN.test(error.message)) {
+  if (Number.isFinite(timeoutMs) && error instanceof Error && SEND_TIMEOUT_PATTERN.test(error.message)) {
     return new CopilotRuntimeError(
       'transport',
       `Copilot did not finish the turn within ${Math.round(timeoutMs / 60_000)} minutes. `

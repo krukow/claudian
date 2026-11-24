@@ -292,7 +292,7 @@ export class CopilotMcpReadinessCoordinator {
     try {
       signal.throwIfAborted();
       session = await client.createSession({
-        availableTools: [], permissionMode: 'ask', model: model.rawId,
+        availableTools: [], lifecycle: 'ephemeral', permissionMode: 'ask', model: model.rawId,
         resources: { ...resources, skillDirectories: [] },
         workingDirectory: identity.workingDirectory,
         systemMessage: { mode: 'replace', content: 'MCP readiness only; never run a model turn.' },

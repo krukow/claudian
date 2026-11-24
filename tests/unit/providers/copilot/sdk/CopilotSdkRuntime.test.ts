@@ -65,6 +65,10 @@ class FakeSdkCopilotSession {
   }
 
   readonly rpc = {
+    abort: async () => {
+      this.aborted += 1;
+      return await FakeSdkCopilotClient.behavior.abort?.() ?? { success: true };
+    },
     commands: {
       invoke: async (params: { input?: string; name: string }) => {
         if (params.name === 'permissions') {
@@ -180,11 +184,6 @@ class FakeSdkCopilotSession {
     return waiter.promise;
   }
 
-  async abort(): Promise<void> {
-    this.aborted += 1;
-    await FakeSdkCopilotClient.behavior.abort?.();
-  }
-
   async disconnect(): Promise<void> {
     this.disconnected += 1;
     await FakeSdkCopilotClient.behavior.disconnect?.();
@@ -199,7 +198,7 @@ class FakeSdkCopilotSession {
 class FakeSdkCopilotClient {
   static readonly instances: FakeSdkCopilotClient[] = [];
   static behavior: {
-    abort?: () => Promise<void>;
+    abort?: () => Promise<{ success: boolean; error?: string }>;
     commands?: Array<{ description?: string; kind: string; name: string }>;
     createSession?: (config: SessionOptionsBase) => Promise<FakeSdkCopilotSession>;
     deleteSession?: () => Promise<void>;
@@ -336,6 +335,7 @@ function sessionConfig(
 ): CopilotSdkSessionConfig {
   return {
     availableTools: [],
+    lifecycle: 'persistent',
     model: 'gpt-5',
     onEvent: () => {},
     onPermissionRequest: async () => ({ kind: 'reject' }),
@@ -874,9 +874,11 @@ describe('copilotSdkRuntime judge event ownership', () => {
       const sending = session.send('Read another note.').catch(error => error as Error);
       try {
         await entered.promise;
-        if (transition === 'abort') await session.abort();
-        else if (transition === 'disconnect') await session.disconnect();
-        else if (transition === 'completed') {
+        if (transition === 'abort' || transition === 'disconnect') {
+          const release = session[transition]();
+          finishNative.resolve();
+          await release;
+        } else if (transition === 'completed') {
           await FakeSdkCopilotSession.instances[0].dispatchEvent({
             id: 'completed', parentId: null, timestamp: '2026-09-17T12:00:01Z',
             type: 'permission.completed',
@@ -1571,8 +1573,8 @@ describe('copilotSdkRuntime startup budget', () => {
 });
 
 /**
- * Opening a session is a native acquisition from a runtime that is already up, so it runs
- * on the same budget every release does. A CLI that never answers one would otherwise hold
+ * Creating a session uses the ordinary operation budget; restoring history uses startup time.
+ * A CLI that never answers would otherwise hold
  * the turn that asked for it open for as long as it stays silent, and hold whatever is
  * queued behind that turn open with it.
  *
@@ -1581,6 +1583,20 @@ describe('copilotSdkRuntime startup budget', () => {
  * would wait out the same silence.
  */
 describe('copilotSdkRuntime session budget', () => {
+  it('lets a cold resume restore the same session beyond the release deadline', async () => {
+    await withFakeTimers(async () => {
+      const restored = createDeferred<FakeSdkCopilotSession>();
+      FakeSdkCopilotClient.behavior.resumeSession = () => restored.promise;
+      const client = await createClient();
+      const resuming = client.resumeSession('saved-session', sessionConfig()).then(
+        session => session.sessionId, (error: unknown) => error,
+      );
+      await jest.advanceTimersByTimeAsync(12_000);
+      restored.resolve(new FakeSdkCopilotSession('saved-session'));
+      expect(await resuming).toBe('saved-session');
+    });
+  });
+
   it('ends the CLI when a new session never arrives', async () => {
     await withoutUnhandledRejections(async () => {
       await withFakeTimers(async () => {
@@ -1613,10 +1629,10 @@ describe('copilotSdkRuntime session budget', () => {
           () => new Error('the session unexpectedly resumed'),
           (error: unknown) => error as Error,
         );
-        await jest.advanceTimersByTimeAsync(5_000);
+        await jest.advanceTimersByTimeAsync(30_000);
 
         expect((await resuming).message)
-          .toMatch(/did not resume the session within 5 seconds.*terminated/);
+          .toMatch(/did not resume the session within 30 seconds.*terminated/);
         expect(FakeSdkCopilotClient.instances[0]?.forceStopped).toBe(1);
       });
     });
@@ -1756,10 +1772,43 @@ describe('copilotSdkRuntime turn aborts', () => {
     await expect(session.abort()).rejects.toThrow(/session connection was closed/);
   });
 
+  it('rejects a negative acknowledgement so a stopped turn cannot reuse that native session', async () => {
+    FakeSdkCopilotClient.behavior.abort = async () => ({ success: false, error: 'Fixture abort refused' });
+    const session = await createSession();
+
+    await expect(session.abort()).rejects.toMatchObject({
+      category: 'transport', message: 'Fixture abort refused',
+    });
+  });
+
   it('resolves an abort the runtime acknowledged', async () => {
     const session = await createSession();
 
     await expect(session.abort()).resolves.toBeUndefined();
+  });
+
+  it.each(['abort', 'disconnect'] as const)('does not report %s complete while the SDK still owns the send', async operation => {
+    const started = createDeferred();
+    const completion = createDeferred();
+    FakeSdkCopilotClient.behavior.send = async () => {
+      started.resolve();
+      await completion.promise;
+      throw new Error('The requested run was aborted before completion.');
+    };
+    const session = await createSession();
+    const sending = session.send('Wait for Stop.');
+    await started.promise;
+
+    let released = false;
+    const release = session[operation]().then(() => { released = true; });
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      expect(released).toBe(false);
+    } finally {
+      completion.resolve();
+      await expect(sending).rejects.toThrow(/aborted before completion/);
+      await release;
+    }
   });
 });
 
