@@ -14,4 +14,6 @@ connection.onRequest('connect', () => {
   return { protocolVersion: 4 };
 });
 connection.onRequest('auth.getStatus', () => ({ isAuthenticated: connected }));
+connection.onRequest('session.create', ({ sessionId }) => ({ sessionId }));
+connection.onRequest('session.delete', () => ({ success: true }));
 connection.listen();

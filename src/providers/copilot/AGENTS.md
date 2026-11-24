@@ -125,6 +125,7 @@ them as pending here.
   addon out of the bundle. `sdk/CopilotSdkRuntime` is written against that envelope, so
   adding an SDK feature that reaches those modules requires revisiting it, not deleting
   it.
+- The v2 SDK dispatches even the `connect` reply through `AsyncLocalStorage.run`. Never use Node async hooks in its renderer bundle: Node and Blink share the V8 continuation slot. The bundle envelope tracks the SDK's initialization callback tokens per client until response or disposal and rejects ambiguous re-entry. Workflow execution contexts are unsupported. Check both SDK imports and callback lifetimes when upgrading; do not replace all renderer imports or use a synchronous context stack.
 - SDK lockfile entries use canonical public-registry URLs with verified integrity hashes. Contributor-specific registry mirrors belong in installation configuration, not the committed SDK artifact locations.
 - Use `RuntimeConnection.forSpawnedStdio` with the resolved CLI, environment, vault working directory, and per-vault base directory. Omitting `runtime` lets SDK v2 select its in-process native runtime.
 - The client is constructed with `mode: 'coding-agent'`, because `mode: 'empty'` is the one

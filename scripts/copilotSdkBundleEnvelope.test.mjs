@@ -63,8 +63,9 @@ test('unsupported Copilot SDK transports are replaced with fail-closed stubs', a
   const plugin = createCopilotSdkBundleEnvelopePlugin();
   const loaders = [];
   plugin.setup({
+    onResolve() {},
     onLoad(options, callback) {
-      loaders.push({ callback, filter: options.filter });
+      if (!options.namespace) loaders.push({ callback, filter: options.filter });
     },
   });
 

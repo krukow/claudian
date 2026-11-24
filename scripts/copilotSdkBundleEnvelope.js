@@ -125,6 +125,7 @@ function inspectCopilotBundleEnvelope(bundleContents) {
 }
 
 function createCopilotSdkBundleEnvelopePlugin() {
+  const sdkContextImporter = /[\\/]node_modules[\\/]@microsoft[\\/]copilot-sdk[\\/]dist[\\/](?:cjs[\\/])?(client|session)\.js$/;
   const unsupportedFilter = new RegExp(
     `[\\\\/]node_modules[\\\\/]@microsoft[\\\\/]copilot-sdk[\\\\/]dist[\\\\/](?:cjs[\\\\/])?(?:${
       Object.keys(unsupportedSdkModules).join('|')
@@ -133,6 +134,17 @@ function createCopilotSdkBundleEnvelopePlugin() {
   return {
     name: 'copilot-sdk-bundle-envelope',
     setup(build) {
+      build.onResolve({ filter: /^(?:node:)?async_hooks$/ }, ({ importer }) => {
+        const name = sdkContextImporter.exec(importer)?.[1];
+        return name ? { path: name, namespace: 'copilot-renderer-context' } : undefined;
+      });
+      build.onLoad({ filter: /.*/, namespace: 'copilot-renderer-context' }, ({ path: name }) => {
+        const context = name === 'client' ? 'InitializationCallbacks' : 'DisabledWorkflowContext';
+        return {
+          contents: `export { ${context} as AsyncLocalStorage } from './copilotSdkRendererContext.mjs';`,
+          resolveDir: __dirname,
+        };
+      });
       build.onLoad({ filter: unsupportedFilter }, (args) => ({
         contents: unsupportedModuleSource(path.basename(args.path, '.js')),
         loader: 'js',

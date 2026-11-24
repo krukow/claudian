@@ -163,6 +163,11 @@ describe('Copilot SDK bundle envelope', () => {
     stop();
   });
 
+  it('does not load Node async hooks in the Copilot renderer bundle', () => {
+    const hooksImport = bundleSource.match(/require\(["'](?:node:)?async_hooks["']\)/g);
+    expect(hooksImport).toBeNull();
+  });
+
   it('negotiates protocol 4 and checks CLI authentication over child stdio', async () => {
     const cli = path.join(root, 'tests/fixtures/copilot/protocol4-cli.js');
     const client = new fixture.CopilotClient({
@@ -176,6 +181,36 @@ describe('Copilot SDK bundle envelope', () => {
       await client.forceStop();
     }
     expect(retainedSdkBytes).toBeGreaterThan(retainedSdkLowerBoundBytes);
+  });
+
+  it('rejects re-entry after an await without blocking the next session operation', async () => {
+    const sessionId = 'callback-test';
+    let nestedError: unknown;
+    const client = new fixture.CopilotClient({
+      mode: 'coding-agent',
+      observability: {
+        onGetTraceContext: async () => {
+          await Promise.resolve();
+          try {
+            await client.deleteSession(sessionId);
+          } catch (error) {
+            nestedError = error;
+          }
+          return {};
+        },
+      },
+      runtime: fixture.RuntimeConnection.forSpawnedStdio({
+        path: path.join(root, 'tests/fixtures/copilot/protocol4-cli.js'),
+      }),
+    });
+    try {
+      const session = await client.createSession({ sessionId });
+      expect(nestedError).toMatchObject({ message: expect.stringContaining('Cannot re-enter session initialization') });
+      await expect(session.workflow.start('unsupported')).rejects.toThrow('workflow execution is disabled');
+      await expect(client.deleteSession(sessionId)).resolves.toBeUndefined();
+    } finally {
+      await client.forceStop();
+    }
   });
 
   it('excludes the native FFI addon and the SDK-bundled CLI', () => {
