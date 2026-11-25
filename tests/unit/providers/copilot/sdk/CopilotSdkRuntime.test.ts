@@ -1138,13 +1138,21 @@ describe('copilotSdkRuntime session floor', () => {
     expect(config).not.toHaveProperty('cloud');
   });
 
-  it('does not hand back a resumed session when remote export cannot be disabled', async () => {
-    FakeSdkCopilotClient.behavior.disableRemote = async () => { throw new Error('Remote policy unavailable'); };
-    const client = await createClient();
-    await expect(client.resumeSession('saved-session', sessionConfig())).rejects.toThrow('Remote policy unavailable');
-    expect(FakeSdkCopilotSession.instances[0].disconnected).toBe(1);
-    expect(FakeSdkCopilotClient.instances[0].deletedSessions).toEqual([]);
-  });
+  it.each(['create', 'resume'] as const)(
+    'refuses to %s a session when remote export cannot be disabled',
+    async operation => {
+      FakeSdkCopilotClient.behavior.disableRemote = async () => { throw new Error('Remote policy unavailable'); };
+      const client = await createClient();
+      const opening = operation === 'create'
+        ? client.createSession(sessionConfig())
+        : client.resumeSession('saved-session', sessionConfig());
+
+      await expect(opening).rejects.toThrow('Remote policy unavailable');
+      expect(FakeSdkCopilotSession.instances[0].disconnected).toBe(1);
+      expect(FakeSdkCopilotClient.instances[0].deletedSessions)
+        .toEqual(operation === 'create' ? ['copilot-session-1'] : []);
+    },
+  );
 
   /**
    * Empty mode stripped the runtime's `environment_context` section from every system
@@ -1886,6 +1894,7 @@ describe('copilotSdkRuntime session resources', () => {
   }
 
   it.each([
+    { step: 'disableRemote', phase: 'disabling remote session export' },
     { step: 'configurePermissions', phase: 'configuring Copilot permissions' },
     { step: 'ensureSkills', phase: 'loading selected skills' },
     { step: 'listSkills', phase: 'listing loaded skills' },
