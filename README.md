@@ -81,10 +81,19 @@ npm run build
 
 ## Privacy & Data Use
 
-- **Sent to API**: Your input, attached files, images, and tool call outputs. Depending on the selected provider, data is sent to Anthropic (Claude), OpenAI (Codex), xAI (Grok), GitHub (Copilot), or the providers configured in OpenCode or Pi. The destination can be configured through provider settings and environment variables.
-- **Copilot session state**: The Copilot CLI keeps its own session data in a per-vault directory Claudian creates outside your notes, and Claudian never reads or deletes it apart from the short-lived sessions it creates for titles and inline edits. See [Copilot provider](docs/copilot-provider.md).
+- **Model requests**: The selected provider receives your prompt and relevant context, such as note excerpts, supported attachments, and tool results. Requests go to Anthropic (Claude), OpenAI (Codex), xAI (Grok), GitHub (Copilot), or the service configured for OpenCode or Pi. Some providers let you change the destination.
+- **Plugin telemetry**: Claudian does not send analytics of its own. Editor selection polling stays on your device. Provider CLIs and MCP servers you connect can make network requests under their own policies.
 - **Collab LAN traffic**: When you explicitly Host or synchronize a Collab Project, Project Git data and authenticated coordination metadata travel directly between invited teammates' devices on the local network. Collab Mode itself does not send Project data to a Claudian cloud service or any third party.
-- **No telemetry or unsolicited background activity**: Claudian does not run telemetry beacons. UI polling timers read local Obsidian/editor selection state only. Network activity is limited to explicit provider runtime work, configured MCP endpoints, provider SDK/CLI calls needed to answer your requests, and explicitly started Collab LAN work.
+
+### GitHub Copilot
+
+**Claudian turns off cloud transcript sync, not model requests.** These settings apply to Copilot sessions opened by Claudian, not to your standalone CLI or other providers.
+
+- **Local history:** The CLI stores the transcript outside your vault in a directory specific to that vault. Claudian reads it when you reopen a chat. Claudian also saves conversation metadata and can save prompt text in `.claudian/sessions/` inside the vault; your vault sync and backup settings apply to those files.
+- **GitHub session history:** Every time Claudian creates or resumes a session, it waits for the CLI to disable transcript export and remote control before sending a prompt. If the CLI cannot confirm that, Claudian does not send the prompt. This does not delete a copy already synced or shared elsewhere.
+- **Telemetry and usage:** Claudian disables the CLI's per-session telemetry. That setting does not cover CLI startup or sign-in diagnostics. GitHub still processes your model requests and can record the request ID, model, token counts, and timing. A usage record is not a synced conversation, and turning off sync does not set the service's data retention policy.
+
+See [where Copilot stores transcripts and how to check for a synced copy](docs/copilot-provider.md#data-storage-and-network).
 
 ## Troubleshooting
 
